@@ -161,7 +161,23 @@ export function buildRunPlan(
 ): RunPlan {
 	if (!env.image || env.image.trim() === '') {
 		throw new AnonPiError(
-			'anon-pi: set ANON_PI_IMAGE to a container image that has `pi` on its PATH (e.g. ANON_PI_IMAGE=your/pi-image:tag).',
+			'anon-pi: set ANON_PI_IMAGE to a container image that has `pi` on its PATH.\n' +
+				'\n' +
+				'No such image yet? Build a small one from the upstream-documented recipe\n' +
+				'(it installs the official @earendil-works/pi-coding-agent npm package):\n' +
+				'\n' +
+				"  cat > Dockerfile.pi <<'EOF'\n" +
+				'  FROM node:24-bookworm-slim\n' +
+				'  RUN apt-get update && apt-get install -y --no-install-recommends \\\n' +
+				'        bash ca-certificates git ripgrep && rm -rf /var/lib/apt/lists/*\n' +
+				'  RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent\n' +
+				'  WORKDIR /work\n' +
+				'  EOF\n' +
+				'  podman build -t localhost/anon-pi-pi:latest -f Dockerfile.pi .\n' +
+				'  export ANON_PI_IMAGE=localhost/anon-pi-pi:latest\n' +
+				'\n' +
+				'A ready Dockerfile.pi also ships with this package. See the README\n' +
+				'(Providing a pi image) for details and a community-image note.',
 		);
 	}
 	if (!env.llmDirect || env.llmDirect.trim() === '') {
@@ -258,7 +274,9 @@ WHAT IT DOES
   egress forced through the socks5h proxy, fail-closed. Requires \`netcage\`.
 
 ENVIRONMENT
-  ANON_PI_IMAGE   (required) image with \`pi\` on PATH
+  ANON_PI_IMAGE   (required) image with \`pi\` on PATH. No image yet? Running
+                  anon-pi without it prints a ready-to-build Dockerfile.pi
+                  recipe; see the README (Providing a pi image).
   ANON_PI_LLM     (required) RFC1918/link-local IP[:port] of the local model
   ANON_PI_PROXY   socks5h URL (default ${DEFAULT_PROXY})
   ANON_PI_HOME    anon-pi home (default $XDG_CONFIG_HOME/anon-pi or ~/.config/anon-pi)
