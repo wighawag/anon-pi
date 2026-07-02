@@ -47,12 +47,19 @@ You land in pi, inside the jail, cwd `/work` = `./recon`. pi's web/tool egress i
 | `ANON_PI_PROXY` | no | `socks5h://127.0.0.1:9050` | the socks5h proxy |
 | `ANON_PI_HOME` | no | `$XDG_CONFIG_HOME/anon-pi` or `~/.config/anon-pi` | anon-pi home |
 | `ANON_PI_CONFIG` | no | `<ANON_PI_HOME>/agent` | the canonical seed dir |
+| `ANON_PI_AGENT_MOUNT` | no | `/opt/pi-agent` | absolute container path pi's config is mounted at (see below) |
 
 ## How it works
 
 1. **Seed (once per workdir).** The first time you use a workdir, anon-pi copies your canonical config (`~/.config/anon-pi/agent`) into a per-session dir `~/.config/anon-pi/sessions/<hash-of-workdir>/agent`. The canonical config is only ever READ; it is never mounted into the container, so pi in the jail cannot mutate it.
-2. **Mount.** The session config dir is mounted as pi's global config (`PI_CODING_AGENT_DIR=/opt/pi-agent`), and the workdir is mounted at `/work`.
-3. **Run.** anon-pi execs `tooljail run --proxy <proxy> --allow-direct <ANON_PI_LLM> -it -v <workdir> -v <session>:/opt/pi-agent -e PI_CODING_AGENT_DIR=/opt/pi-agent <image> pi`.
+2. **Mount.** The session config dir is mounted as pi's global config (`PI_CODING_AGENT_DIR=<mount>`, default `/opt/pi-agent`), and the workdir is mounted at `/work`.
+3. **Run.** anon-pi execs `tooljail run --proxy <proxy> --allow-direct <ANON_PI_LLM> -it -v <workdir> -v <session>:<mount> -e PI_CODING_AGENT_DIR=<mount> <image> pi`.
+
+### Where pi's config is mounted (`ANON_PI_AGENT_MOUNT`)
+
+By default anon-pi mounts the seeded config at `/opt/pi-agent` and points pi there with `PI_CODING_AGENT_DIR`. This absolute, image-independent path is chosen so the podman mount target and pi's config dir agree without anon-pi having to guess your image's home directory.
+
+If you would rather pi's config live at its **standard** `~/.pi/agent` inside the container, set `ANON_PI_AGENT_MOUNT` to that home's **absolute** path, e.g. `ANON_PI_AGENT_MOUNT=/root/.pi/agent` for an image that runs as `root` (or `/home/<user>/.pi/agent` otherwise). The value must be absolute: podman does not expand `~`, and anon-pi rejects a `~`-relative or relative value rather than mounting it at a literal `~` directory. Both the mount target and `PI_CODING_AGENT_DIR` always stay in lockstep.
 
 ## Populating the seed
 

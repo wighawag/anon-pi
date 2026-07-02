@@ -2,9 +2,10 @@ import {describe, it, expect} from 'vitest';
 import {
 	AnonPiError,
 	buildRunPlan,
-	CONTAINER_AGENT_DIR,
+	DEFAULT_CONTAINER_AGENT_DIR,
 	envFromProcess,
 	PI_AGENT_DIR_ENV,
+	resolveAgentMount,
 	resolveAnonPiHome,
 	resolveConfigSeed,
 	sessionAgentDir,
@@ -158,12 +159,13 @@ describe('buildRunPlan tooljail argv', () => {
 		expect(plan.tooljailArgs).toContain('/work/recon');
 	});
 
-	it('mounts the seeded session config and points pi at it', () => {
+	it('mounts the seeded session config at the default mount and points pi at it', () => {
+		expect(plan.agentMount).toBe(DEFAULT_CONTAINER_AGENT_DIR);
 		expect(plan.tooljailArgs).toContain(
-			`${plan.sessionAgentDir}:${CONTAINER_AGENT_DIR}`,
+			`${plan.sessionAgentDir}:${DEFAULT_CONTAINER_AGENT_DIR}`,
 		);
 		expect(plan.tooljailArgs).toContain(
-			`${PI_AGENT_DIR_ENV}=${CONTAINER_AGENT_DIR}`,
+			`${PI_AGENT_DIR_ENV}=${DEFAULT_CONTAINER_AGENT_DIR}`,
 		);
 	});
 
@@ -179,6 +181,59 @@ describe('buildRunPlan tooljail argv', () => {
 	});
 });
 
+describe('agent-mount override (ANON_PI_AGENT_MOUNT, option 3)', () => {
+	it('defaults to /opt/pi-agent', () => {
+		expect(resolveAgentMount(base)).toBe('/opt/pi-agent');
+		expect(resolveAgentMount(base)).toBe(DEFAULT_CONTAINER_AGENT_DIR);
+	});
+
+	it('honours an absolute override (e.g. a root image ~/.pi/agent)', () => {
+		expect(resolveAgentMount({...base, agentMount: '/root/.pi/agent'})).toBe(
+			'/root/.pi/agent',
+		);
+	});
+
+	it('threads the override into BOTH the -v target and the env var, in lockstep', () => {
+		const plan = buildRunPlan(
+			{...base, agentMount: '/root/.pi/agent'},
+			'/work/recon',
+			seedAlways,
+			sessionAbsent,
+		);
+		expect(plan.agentMount).toBe('/root/.pi/agent');
+		expect(plan.tooljailArgs).toContain(
+			`${plan.sessionAgentDir}:/root/.pi/agent`,
+		);
+		expect(plan.tooljailArgs).toContain(`${PI_AGENT_DIR_ENV}=/root/.pi/agent`);
+	});
+
+	it('rejects a ~-relative mount (podman does not expand ~)', () => {
+		expect(() =>
+			resolveAgentMount({...base, agentMount: '~/.pi/agent'}),
+		).toThrow(AnonPiError);
+		expect(() =>
+			buildRunPlan(
+				{...base, agentMount: '~/.pi/agent'},
+				'/w',
+				seedAlways,
+				sessionAbsent,
+			),
+		).toThrow(/ABSOLUTE/);
+	});
+
+	it('rejects a relative mount', () => {
+		expect(() => resolveAgentMount({...base, agentMount: 'pi-agent'})).toThrow(
+			AnonPiError,
+		);
+	});
+
+	it('treats an empty override as unset (falls back to default)', () => {
+		expect(resolveAgentMount({...base, agentMount: ''})).toBe(
+			DEFAULT_CONTAINER_AGENT_DIR,
+		);
+	});
+});
+
 describe('envFromProcess mapping', () => {
 	it('maps the ANON_PI_* vars and falls back HOME', () => {
 		const env = envFromProcess({
@@ -189,6 +244,7 @@ describe('envFromProcess mapping', () => {
 			ANON_PI_HOME: '/ah',
 			ANON_PI_CONFIG: '/seed',
 			XDG_CONFIG_HOME: '/xdg',
+			ANON_PI_AGENT_MOUNT: '/root/.pi/agent',
 		});
 		expect(env).toMatchObject({
 			home: '/home/z',
@@ -198,6 +254,7 @@ describe('envFromProcess mapping', () => {
 			anonPiHome: '/ah',
 			configSeed: '/seed',
 			xdgConfigHome: '/xdg',
+			agentMount: '/root/.pi/agent',
 		});
 	});
 });

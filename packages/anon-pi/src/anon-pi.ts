@@ -25,8 +25,14 @@ import {isAbsolute, join, resolve} from 'node:path';
 /** The container path the workdir is mounted at (pi's cwd). */
 export const CONTAINER_WORKDIR = '/work';
 
-/** The container path the seeded pi config is mounted at (the pi global). */
-export const CONTAINER_AGENT_DIR = '/opt/pi-agent';
+/**
+ * The DEFAULT container path the seeded pi config is mounted at (the pi global).
+ * Absolute and image-independent: both podman (the -v target) and pi (the
+ * PI_CODING_AGENT_DIR env) agree on it with no home-resolution guessing. A user
+ * who knows their image's home can override it (ANON_PI_AGENT_MOUNT) to the
+ * standard `~/.pi/agent` location, e.g. /root/.pi/agent for a root image.
+ */
+export const DEFAULT_CONTAINER_AGENT_DIR = '/opt/pi-agent';
 
 /** The pi env var that overrides its config dir (see pi config.ts getAgentDir). */
 export const PI_AGENT_DIR_ENV = 'PI_CODING_AGENT_DIR';
@@ -47,6 +53,14 @@ export interface AnonPiEnv {
 	llmDirect?: string;
 	/** XDG_CONFIG_HOME, if set (used to derive the default anon-pi home). */
 	xdgConfigHome?: string;
+	/**
+	 * The ABSOLUTE container path to mount the seeded config at (and point pi's
+	 * PI_CODING_AGENT_DIR at). Default /opt/pi-agent. Set it to your image's real
+	 * `~/.pi/agent` (e.g. /root/.pi/agent) if you want the standard location.
+	 * MUST be absolute: podman does not expand `~`, so a `~`-relative value would
+	 * be mounted literally. Rejected if it starts with `~` or is not absolute.
+	 */
+	agentMount?: string;
 }
 
 /** The fully-resolved run plan cli.ts executes. */
@@ -57,6 +71,8 @@ export interface RunPlan {
 	sessionAgentDir: string;
 	/** The canonical seed dir to copy FROM (read-only by convention). */
 	configSeed: string;
+	/** The absolute container path the session config is mounted at (== pi's config dir). */
+	agentMount: string;
 	/** True iff the session dir does not exist yet and must be seeded from configSeed. */
 	needsSeed: boolean;
 	/** The argv passed to `tooljail` (after the `tooljail` program name). */
@@ -67,6 +83,32 @@ const DEFAULT_PROXY = 'socks5h://127.0.0.1:9050';
 
 /** A user-facing error whose message is meant to be printed verbatim (no stack). */
 export class AnonPiError extends Error {}
+
+/**
+ * Resolve the container agent-mount path: ANON_PI_AGENT_MOUNT or the default.
+ * It MUST be an absolute container path, because it is BOTH the podman `-v`
+ * target AND pi's PI_CODING_AGENT_DIR, and podman (unlike pi) does not expand
+ * `~`. A `~`-relative or relative value is rejected loudly rather than silently
+ * mounted at a literal `~` directory or a cwd-relative path.
+ */
+export function resolveAgentMount(env: AnonPiEnv): string {
+	const raw =
+		env.agentMount && env.agentMount.trim() !== ''
+			? env.agentMount.trim()
+			: DEFAULT_CONTAINER_AGENT_DIR;
+	if (raw.startsWith('~')) {
+		throw new AnonPiError(
+			`anon-pi: ANON_PI_AGENT_MOUNT must be an ABSOLUTE container path, not \`${raw}\`. ` +
+				'podman does not expand `~`; use the concrete home, e.g. /root/.pi/agent.',
+		);
+	}
+	if (!raw.startsWith('/')) {
+		throw new AnonPiError(
+			`anon-pi: ANON_PI_AGENT_MOUNT must be an ABSOLUTE container path, not \`${raw}\` (it is both the mount target and pi's config dir).`,
+		);
+	}
+	return raw;
+}
 
 /** Resolve the anon-pi home dir (holds the canonical seed + per-session state). */
 export function resolveAnonPiHome(env: AnonPiEnv): string {
@@ -152,6 +194,7 @@ export function buildRunPlan(
 	const sessionDir = sessionAgentDir(env, workdir);
 	const needsSeed = !sessionExists(sessionDir);
 
+	const agentMount = resolveAgentMount(env);
 	const proxy =
 		env.proxy && env.proxy.trim() !== '' ? env.proxy : DEFAULT_PROXY;
 
@@ -165,9 +208,9 @@ export function buildRunPlan(
 		'-v',
 		workdir, // tooljail defaults a target-less -v to /work and cwd to /work
 		'-v',
-		`${sessionDir}:${CONTAINER_AGENT_DIR}`,
+		`${sessionDir}:${agentMount}`,
 		'-e',
-		`${PI_AGENT_DIR_ENV}=${CONTAINER_AGENT_DIR}`,
+		`${PI_AGENT_DIR_ENV}=${agentMount}`,
 		env.image,
 		'pi',
 	];
@@ -176,6 +219,7 @@ export function buildRunPlan(
 		workdir,
 		sessionAgentDir: sessionDir,
 		configSeed,
+		agentMount,
 		needsSeed,
 		tooljailArgs,
 	};
@@ -193,6 +237,7 @@ export function envFromProcess(
 		image: penv.ANON_PI_IMAGE,
 		llmDirect: penv.ANON_PI_LLM,
 		xdgConfigHome: penv.XDG_CONFIG_HOME,
+		agentMount: penv.ANON_PI_AGENT_MOUNT,
 	};
 }
 
@@ -208,9 +253,9 @@ USAGE
 WHAT IT DOES
   Seeds a per-workdir writable copy of your canonical anon-pi config into
   ~/.config/anon-pi/sessions/<hash>/agent, mounts it as pi's global config
-  (${PI_AGENT_DIR_ENV}=${CONTAINER_AGENT_DIR}), mounts WORKDIR at ${CONTAINER_WORKDIR}, opens ONE
-  direct hole to your local model, and runs pi with all other egress forced
-  through the socks5h proxy, fail-closed. Requires the \`tooljail\` command.
+  (${PI_AGENT_DIR_ENV}=<mount>, default ${DEFAULT_CONTAINER_AGENT_DIR}), mounts WORKDIR at
+  ${CONTAINER_WORKDIR}, opens ONE direct hole to your local model, and runs pi with all other
+  egress forced through the socks5h proxy, fail-closed. Requires \`tooljail\`.
 
 ENVIRONMENT
   ANON_PI_IMAGE   (required) image with \`pi\` on PATH
@@ -218,6 +263,8 @@ ENVIRONMENT
   ANON_PI_PROXY   socks5h URL (default ${DEFAULT_PROXY})
   ANON_PI_HOME    anon-pi home (default $XDG_CONFIG_HOME/anon-pi or ~/.config/anon-pi)
   ANON_PI_CONFIG  canonical seed dir (default <ANON_PI_HOME>/agent)
+  ANON_PI_AGENT_MOUNT  absolute container path for pi's config (default
+                  ${DEFAULT_CONTAINER_AGENT_DIR}; set to your image's ~/.pi/agent, e.g. /root/.pi/agent)
 
 RESEED
   Reseed is manual: delete the session dir, e.g.
