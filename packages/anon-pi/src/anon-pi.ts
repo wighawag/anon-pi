@@ -73,6 +73,11 @@ export interface AnonPiEnv {
 	 * `Dockerfile.pi`.
 	 */
 	dockerfilePath?: string;
+	/**
+	 * Absolute path to the shipped examples/Dockerfile.pi-webveil (pi + pi-webveil
+	 * + SearXNG), used to make the missing-image error mention the fuller build.
+	 */
+	webveilDockerfilePath?: string;
 	/** `import` source models.json override (ANON_PI_SOURCE_MODELS). */
 	sourceModels?: string;
 	/** The host pi agent dir override (PI_CODING_AGENT_DIR), used to find models.json. */
@@ -240,6 +245,7 @@ export function buildRunPlan(
 		// leading spaces into the Dockerfile and break the EOF terminator, so we
 		// point at the shipped file instead of printing a heredoc.
 		const df = env.dockerfilePath ?? 'Dockerfile.pi';
+		const wv = env.webveilDockerfilePath ?? 'examples/Dockerfile.pi-webveil';
 		throw new AnonPiError(
 			'anon-pi: set ANON_PI_IMAGE to a container image that has `pi` on its PATH.\n' +
 				'\n' +
@@ -248,6 +254,12 @@ export function buildRunPlan(
 				'\n' +
 				`podman build -t localhost/anon-pi-pi:latest -f "${df}" "$(dirname "${df}")"\n` +
 				'export ANON_PI_IMAGE=localhost/anon-pi-pi:latest\n' +
+				'\n' +
+				'Or the fuller example with the pi-webveil extension + a local SearXNG\n' +
+				'(anonymized web search):\n' +
+				'\n' +
+				`podman build -t localhost/anon-pi-webveil:latest -f "${wv}" "$(dirname "${wv}")"\n` +
+				'export ANON_PI_IMAGE=localhost/anon-pi-webveil:latest\n' +
 				'\n' +
 				'See the README (Providing a pi image) for details and a community-image note.',
 		);
@@ -320,13 +332,26 @@ export function buildRunPlan(
  * build command concrete.
  */
 export function shippedDockerfilePath(): string | undefined {
+	return shippedFile('Dockerfile.pi');
+}
+
+/**
+ * Absolute path to the fuller pi-webveil + SearXNG example that ships with
+ * anon-pi (examples/Dockerfile.pi-webveil), or undefined if not found.
+ */
+export function shippedWebveilDockerfilePath(): string | undefined {
+	return shippedFile(join('examples', 'Dockerfile.pi-webveil'));
+}
+
+/**
+ * Resolve a file shipped in the package root, from this module's location
+ * (package root is one level up from dist/anon-pi.js). Returns undefined if it
+ * cannot be found or import.meta.url is unavailable.
+ */
+function shippedFile(rel: string): string | undefined {
 	try {
 		const here = dirname(fileURLToPath(import.meta.url));
-		// dist/anon-pi.js -> ../Dockerfile.pi; also try alongside for safety.
-		for (const p of [
-			join(here, '..', 'Dockerfile.pi'),
-			join(here, 'Dockerfile.pi'),
-		]) {
+		for (const p of [join(here, '..', rel), join(here, rel)]) {
 			if (existsSync(p)) return p;
 		}
 	} catch {
@@ -348,6 +373,7 @@ export function envFromProcess(
 		llmDirect: penv.ANON_PI_LLM,
 		xdgConfigHome: penv.XDG_CONFIG_HOME,
 		dockerfilePath: shippedDockerfilePath(),
+		webveilDockerfilePath: shippedWebveilDockerfilePath(),
 		sourceModels: penv.ANON_PI_SOURCE_MODELS,
 		piAgentDir: penv.PI_CODING_AGENT_DIR,
 	};

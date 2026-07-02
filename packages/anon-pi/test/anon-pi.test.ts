@@ -155,11 +155,16 @@ describe('buildRunPlan required inputs', () => {
 		).toThrow(/ANON_PI_LLM/);
 	});
 
-	it('missing-image error is copy-pasteable: command lines are flush-left', () => {
+	it('missing-image error is copy-pasteable and mentions both Dockerfiles', () => {
 		let msg = '';
 		try {
 			buildRunPlan(
-				{...base, image: '', dockerfilePath: '/pkg/Dockerfile.pi'},
+				{
+					...base,
+					image: '',
+					dockerfilePath: '/pkg/Dockerfile.pi',
+					webveilDockerfilePath: '/pkg/examples/Dockerfile.pi-webveil',
+				},
 				'/w',
 				seedPresent,
 			);
@@ -171,7 +176,9 @@ describe('buildRunPlan required inputs', () => {
 			expect(/^\s+(podman|export)\b/.test(line)).toBe(false);
 		}
 		expect(msg).toContain('podman build');
+		// both the simple image and the fuller webveil example are offered
 		expect(msg).toContain('/pkg/Dockerfile.pi');
+		expect(msg).toContain('/pkg/examples/Dockerfile.pi-webveil');
 		expect(msg).not.toContain("<<'EOF'");
 	});
 });
