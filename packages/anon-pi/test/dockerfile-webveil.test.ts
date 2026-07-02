@@ -82,10 +82,7 @@ describe('examples/Dockerfile.pi-webveil structure', () => {
 	});
 
 	it('embeds a valid webveil.json: searxng over a unix: socket, egress direct', () => {
-		const jsonText = extractPrintfBlock(
-			dockerfile,
-			'/root/.pi/agent/webveil.json',
-		);
+		const jsonText = extractPrintfBlock(dockerfile, 'webveil.json');
 		const cfg = JSON.parse(jsonText) as {
 			backend?: string;
 			baseUrl?: string;
@@ -139,8 +136,18 @@ describe('examples/Dockerfile.pi-webveil structure', () => {
 		);
 	});
 
-	it('pre-trusts /work so pi does not prompt on the mounted project', () => {
-		expect(dockerfile).toMatch(/\/root\/\.pi\/agent\/trust\.json/);
+	it('stages extensions + config in ANON_PI_STAGE (not the mounted ~/.pi/agent)', () => {
+		// Installing into the persistent-mount path would be shadowed; the image
+		// must install into the staging dir that anon-pi promotes on first launch.
+		expect(dockerfile).toMatch(/ANON_PI_STAGE=\/opt\/anon-pi-seed\/agent/);
+		expect(dockerfile).toMatch(
+			/PI_CODING_AGENT_DIR="\$ANON_PI_STAGE" pi install npm:pi-webveil/,
+		);
+		expect(dockerfile).not.toMatch(/> \/root\/\.pi\/agent\//);
+	});
+
+	it('pre-trusts /work (staged) so pi does not prompt on the mounted project', () => {
+		expect(dockerfile).toMatch(/\$ANON_PI_STAGE\/trust\.json/);
 		expect(dockerfile).toContain('"/work": true');
 	});
 });

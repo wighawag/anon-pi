@@ -1,14 +1,19 @@
 # A minimal image with `pi` (the Earendil Works coding agent) on PATH, for use as
-# anon-pi's ANON_PI_IMAGE. It follows the official upstream containerization
-# pattern (earendil-works/pi, packages/coding-agent/docs/containerization.md):
-# node:24-bookworm-slim + the official `@earendil-works/pi-coding-agent` npm
-# package, plus the handful of tools pi's built-in bash/grep/find expect.
+# anon-pi's ANON_PI_IMAGE. node:24-bookworm-slim + the official
+# `@earendil-works/pi-coding-agent` npm package + the tools pi's built-in
+# bash/grep/find expect.
 #
-# Note: unlike the upstream `Dockerfile.pi`, this image sets NO ENTRYPOINT and
-# NO config volume. anon-pi passes `pi` as the run command and copies just its
-# models.json into this image's ~/.pi/agent at start, so the image just needs
-# `pi` reachable on PATH. Anything else you want in the anon session (extensions,
-# skills, and their services) belongs HERE, in the image.
+# HOW anon-pi USES THIS IMAGE (stateful model):
+#   anon-pi mounts a PERSISTENT per-workdir host dir at the container's
+#   ~/.pi/agent, so pi's sessions/history/settings and any extensions you
+#   `pi install` persist across launches. On a FRESH home, anon-pi seeds it once
+#   from this image's STAGING dir (/opt/anon-pi-seed/agent) + your imported
+#   models.json, then stamps a marker and never overwrites again.
+#
+#   So image defaults (extensions, trust.json) go in the STAGING dir, NOT in
+#   ~/.pi/agent (which is the mount and would be shadowed). Set
+#   PI_CODING_AGENT_DIR to the staging dir while running `pi install` so the
+#   extension is recorded there.
 #
 # Build (pin a digest for reproducibility once pushed to a registry):
 #   podman build -t localhost/anon-pi-pi:latest -f Dockerfile.pi .
@@ -22,20 +27,25 @@ RUN apt-get update \
 # The official pi coding agent CLI (puts `pi` on PATH).
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
+# The staging dir anon-pi promotes into a fresh home on first launch.
+ENV ANON_PI_STAGE=/opt/anon-pi-seed/agent
+RUN mkdir -p "$ANON_PI_STAGE"
+
+# Trust /work so pi does not prompt on the mounted project (staged, so it lands
+# in the persistent home on first launch; anon-pi never writes this for you).
+RUN printf '{"/work": true}\n' > "$ANON_PI_STAGE/trust.json"
+
 # --- Optional: extensions + skills (the capability layer) -------------------
-# Install extensions with `pi install` (it records them in settings), NOT a
-# global npm install. Uncomment what you want in the anon persona:
+# Install into the STAGING dir (PI_CODING_AGENT_DIR), so `pi install` records the
+# extension there and anon-pi promotes it into the persistent home on first
+# launch. After that you can `pi install` more from inside the session and it
+# persists. Uncomment what you want in the anon persona:
 #
-#   RUN pi install npm:pi-subagents
-#   RUN pi install npm:pi-plan-mode
+#   RUN PI_CODING_AGENT_DIR="$ANON_PI_STAGE" pi install npm:pi-subagents
+#   RUN PI_CODING_AGENT_DIR="$ANON_PI_STAGE" pi install npm:pi-plan-mode
 #
 # An extension that needs a running SERVICE (e.g. pi-webveil + a local SearXNG)
 # installs and configures that service in the image too. See the worked example
-# examples/Dockerfile.pi-webveil (SearXNG over a Unix socket, started by an
-# entrypoint that then execs anon-pi's command).
-#
-# Trust /work up front so pi does not prompt on every run (anon-pi never writes
-# this for you):
-#   RUN mkdir -p /root/.pi/agent && printf '{"/work": true}\n' > /root/.pi/agent/trust.json
+# examples/Dockerfile.pi-webveil.
 
 WORKDIR /work

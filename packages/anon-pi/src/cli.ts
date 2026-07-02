@@ -8,8 +8,16 @@
 //   anon-pi import      generate the seed models.json from the host models.json,
 //                       carrying only the provider that serves ANON_PI_LLM.
 
-import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import {spawnSync} from 'node:child_process';
+import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {
 	AnonPiError,
@@ -41,11 +49,13 @@ function main(argv: string[]): number {
 
 // --- anon-pi [WORKDIR] : launch pi jailed -----------------------------------
 function runLaunch(args: string[]): number {
-	// The only positional is the optional workdir. Reject stray flags so a typo
-	// (e.g. --allow-direct) is not silently swallowed: anon-pi owns the netcage
-	// argv, extra flags are not passed through.
+	// One optional positional (the workdir) + the --ephemeral flag. Reject other
+	// flags so a typo is not silently swallowed: anon-pi owns the netcage argv.
+	const ephemeralFlag = args.includes('--ephemeral') || args.includes('--eph');
 	const positionals = args.filter((a) => !a.startsWith('-'));
-	const flags = args.filter((a) => a.startsWith('-'));
+	const flags = args.filter(
+		(a) => a.startsWith('-') && a !== '--ephemeral' && a !== '--eph',
+	);
 	if (flags.length > 0) {
 		process.stderr.write(
 			`anon-pi: unknown option(s): ${flags.join(' ')}\nRun \`anon-pi --help\`.\n`,
@@ -60,10 +70,24 @@ function runLaunch(args: string[]): number {
 	}
 
 	const env = envFromProcess(process.env);
+	if (ephemeralFlag) env.ephemeral = true;
+
+	// For --ephemeral, create a throwaway state home discarded on exit.
+	let ephemeralDir: string | undefined;
+	if (env.ephemeral) {
+		ephemeralDir = join(mkdtempSync(join(tmpdir(), 'anon-pi-eph-')), 'agent');
+		mkdirSync(ephemeralDir, {recursive: true});
+	}
 
 	let plan;
 	try {
-		plan = buildRunPlan(env, positionals[0], existsSync);
+		plan = buildRunPlan(
+			env,
+			positionals[0],
+			existsSync,
+			existsSync,
+			ephemeralDir,
+		);
 	} catch (e) {
 		if (e instanceof AnonPiError) {
 			process.stderr.write(e.message + '\n');
@@ -81,19 +105,32 @@ function runLaunch(args: string[]): number {
 		return 1;
 	}
 
-	// Ensure the workdir exists (a fresh named folder is fine).
+	// Ensure the workdir and the (persistent) state home exist before mounting.
 	mkdirSync(plan.workdir, {recursive: true});
-
-	// Hand off to netcage with inherited stdio so -it is a real interactive TTY.
-	const res = spawnSync('netcage', plan.netcageArgs, {stdio: 'inherit'});
-	if (res.error) {
+	mkdirSync(plan.stateDir, {recursive: true});
+	if (plan.fresh && !env.ephemeral) {
 		process.stderr.write(
-			`anon-pi: failed to run netcage: ${res.error.message}\n`,
+			`anon-pi: new session home ${plan.stateDir} (seeding on first launch)\n`,
 		);
-		return 1;
 	}
-	// Propagate netcage's exit code (which itself propagates the tool's).
-	return res.status ?? 1;
+
+	try {
+		// Hand off to netcage with inherited stdio so -it is a real interactive TTY.
+		const res = spawnSync('netcage', plan.netcageArgs, {stdio: 'inherit'});
+		if (res.error) {
+			process.stderr.write(
+				`anon-pi: failed to run netcage: ${res.error.message}\n`,
+			);
+			return 1;
+		}
+		// Propagate netcage's exit code (which itself propagates the tool's).
+		return res.status ?? 1;
+	} finally {
+		// Discard the throwaway home for --ephemeral (no persistence, no trace).
+		if (env.ephemeral && ephemeralDir) {
+			rmSync(join(ephemeralDir, '..'), {recursive: true, force: true});
+		}
+	}
 }
 
 // --- anon-pi import : write the seed models.json ----------------------------

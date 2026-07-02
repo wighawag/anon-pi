@@ -45,18 +45,37 @@ You land in pi, inside the jail, cwd `/work` = `./recon`. pi's web/tool egress i
 | --- | --- | --- | --- |
 | `ANON_PI_IMAGE` | for run | | container image with `pi` on `PATH` |
 | `ANON_PI_LLM` | yes | | RFC1918/link-local `IP[:port]` of the local model (the one direct hole) |
-| `ANON_PI_PROXY` | no | `socks5h://127.0.0.1:9050` | the socks5h proxy |
+| `ANON_PI_PROXY` | yes | | the socks5h proxy (Tor/wireproxy/ssh -D). No default: it is what anonymizes |
+| `ANON_PI_EPHEMERAL` | no | (off) | set to `1` for a throwaway, non-persistent session |
 | `ANON_PI_HOME` | no | `$XDG_CONFIG_HOME/anon-pi` or `~/.config/anon-pi` | anon-pi home |
-| `ANON_PI_CONFIG` | no | `<ANON_PI_HOME>/agent` | the seed dir (holds `models.json`) |
+| `ANON_PI_CONFIG` | no | `<ANON_PI_HOME>/agent` | canonical seed dir (holds the imported `models.json`) |
 | `ANON_PI_SOURCE_MODELS` | no | `~/.pi/agent/models.json` | (`import`) the host `models.json` to read from |
 
 ## How it works
 
-1. **Seed = just `models.json`.** `anon-pi import` writes one file, `<ANON_PI_CONFIG>/models.json`, containing only the provider that serves your local model (see [Generating the seed](#generating-the-seed-anon-pi-import)). No auth for other providers, no sessions, no identity.
-2. **Mount read-only + copy in.** anon-pi mounts the seed read-only at `/anon-pi-seed` and, at start, **copies** `models.json` into the container's own `~/.pi/agent`. It does **not** mount over pi's config dir, so anything the image installed there (pi itself, extensions, skills) survives; the copy just adds your local model to it.
-3. **Run.** anon-pi execs `netcage run --proxy <proxy> --allow-direct <ANON_PI_LLM> -it -v <workdir> -v <seed>:/anon-pi-seed:ro <image> sh -c 'cp /anon-pi-seed/models.json ~/.pi/agent/ && exec pi'`.
+**Stateful by default.** anon-pi mounts a persistent per-workdir host dir at the container's `~/.pi/agent`, so pi's **sessions, history, settings (your model choice), and any extensions you `pi install`** all persist across launches. Re-running in the same folder resumes it. The state dir is `<ANON_PI_HOME>/state/<workdir>/agent`, named with pi's own readable path convention (e.g. `--home-me-proj--`), not a hash, so you can see which folder it belongs to and delete it to reset.
 
-pi has no default model set in the seed, so on start it auto-selects the first available model, your local one (it needs no real API key). Everything that runs, and everything that identifies you, lives in the **image**, not the seed (see below).
+1. **Mount the persistent home.** `-v <ANON_PI_HOME>/state/<workdir>/agent:/root/.pi/agent`. Everything pi writes there survives.
+2. **First-launch seed (only when the home is fresh).** anon-pi mounts the image's staged defaults and your imported `models.json`, and the container promotes them into the fresh home, then stamps a `.anon-pi-seed` marker. On later launches the marker is present, so nothing is re-copied and **your changes (added models, installed extensions) are never clobbered**.
+3. **Run.** `netcage run --proxy <proxy> --allow-direct <ANON_PI_LLM> -it -v <workdir> -v <state>:/root/.pi/agent [-v <models.json>:...:ro] <image> sh -c '<seed-if-fresh> && exec pi'`.
+
+pi auto-selects the first available model (your local one; it needs no real API key), so no default needs to be set. Services and default extensions live in the **image**; your state lives in the persistent home.
+
+### Ephemeral (throwaway) sessions
+
+For a clean, no-local-trace session, pass `--ephemeral` (or `ANON_PI_EPHEMERAL=1`): anon-pi uses a temporary home that is seeded the same way and **discarded on exit**. Nothing persists.
+
+```sh
+anon-pi --ephemeral ./scratch
+```
+
+### Reset a session
+
+Delete its state home; the next launch re-seeds:
+
+```sh
+rm -rf ~/.config/anon-pi/state/<workdir-slug>/agent
+```
 
 ## Providing a pi image
 
@@ -95,30 +114,30 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 WORKDIR /work
 ```
 
-Because anon-pi copies `models.json` **into** the image's own `~/.pi/agent` rather than replacing it, extensions installed in the image stay active in the anon session.
+Install image defaults into the **staging dir** (`PI_CODING_AGENT_DIR=/opt/anon-pi-seed/agent pi install ...`), NOT `~/.pi/agent`: anon-pi mounts a persistent home over `~/.pi/agent`, and promotes the staging dir into it on a fresh launch. Anything you then `pi install` *inside* a session also persists (it is written to the mounted home). See the `Dockerfile.pi` comments for the exact `pi install` form.
 
-A worked example ships in this package: [`examples/Dockerfile.pi-webveil`](examples/Dockerfile.pi-webveil) builds pi + the `pi-webveil` extension + a local SearXNG (over a Unix socket, `http-socket` so webveil's `unix:` baseUrl can speak HTTP to it, JSON API on, limiter off), started by an entrypoint that then execs anon-pi's command. Note the anonymity subtlety it documents: SearXNG's own crawl is anonymized here **because netcage forces every process's egress through the proxy**, so webveil's plain `egress: direct` is correct in-jail (the usual "local SearXNG leaks your IP" caveat does not apply).
+A worked example ships in this package: [`examples/Dockerfile.pi-webveil`](examples/Dockerfile.pi-webveil) builds pi + the `pi-webveil` extension (staged) + a local SearXNG (over a Unix socket, `http-socket` so webveil's `unix:` baseUrl can speak HTTP to it, JSON API on, limiter off), started by an entrypoint that then execs anon-pi's seed-then-pi command. Note the anonymity subtlety it documents: SearXNG's own crawl is anonymized here **because netcage forces every process's egress through the proxy**, so webveil's plain `egress: direct` is correct in-jail (the usual "local SearXNG leaks your IP" caveat does not apply).
 
 ## Generating the seed (`anon-pi import`)
 
-anon-pi **never** copies your real pi config. Instead, `anon-pi import` synthesizes a minimal seed from your local model:
+anon-pi **never** copies your real pi config. Instead, `anon-pi import` synthesizes a minimal `models.json` from your local model:
 
 ```sh
 export ANON_PI_LLM=192.168.1.150:8080
 anon-pi import
 ```
 
-It reads your host `~/.pi/agent/models.json` (override with `ANON_PI_SOURCE_MODELS`), finds the provider whose `baseUrl` serves `ANON_PI_LLM` (matched on host:port, so `192.168.1.150:8080` matches `http://192.168.1.150:8080/v1`), and writes **just that provider** to `<ANON_PI_CONFIG>/models.json`. Everything else, your paid providers and their API keys, your sessions, your trust list, your extensions, is left behind on the host.
+It reads your host `~/.pi/agent/models.json` (override with `ANON_PI_SOURCE_MODELS`), finds the provider whose `baseUrl` serves `ANON_PI_LLM` (matched on host:port, so `192.168.1.150:8080` matches `http://192.168.1.150:8080/v1`), and writes **just that provider** to `<ANON_PI_CONFIG>/models.json`. Everything else, your paid providers and their API keys, your sessions, your trust list, is left behind on the host.
+
+That file **seeds a fresh session home** (it is copied in on first launch). Models you later add *inside* pi persist in the session home and are never clobbered by import. To change what a fresh home seeds, re-run `anon-pi import --force`; to apply it to an existing session, reset that session (delete its state home).
 
 - If no provider matches `ANON_PI_LLM`, it errors and lists the providers it did find.
 - If the matched provider carries a real-looking `apiKey` (not `none`/`ollama`/empty), it warns but proceeds (for a local model this is usually fine).
-- It refuses to overwrite an existing seed unless you pass `--force`.
-
-To reseed (e.g. after changing your local model), re-run `anon-pi import --force`.
+- It refuses to overwrite the canonical seed unless you pass `--force`.
 
 ## Trusting `/work`
 
-pi treats a mounted project as untrusted until approved. For a smooth start, have the **image** trust `/work` (bake a `trust.json` mapping `/work` to `true` into the image's `~/.pi/agent`), or approve once inside a session. anon-pi does not synthesize pi's `trust.json`; it belongs in the image, alongside the extensions.
+pi treats a mounted project as untrusted until approved. The shipped Dockerfiles stage a `trust.json` trusting `/work` (in `/opt/anon-pi-seed/agent`), which is promoted into the session home on first launch, so you are not prompted. You can also approve once inside a session; it persists.
 
 ## Overriding the config per workdir
 

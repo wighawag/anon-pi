@@ -36,9 +36,15 @@ RUN apt-get update \
 		uwsgi uwsgi-plugin-python3 \
 	&& rm -rf /var/lib/apt/lists/*
 
-# --- pi + the pi-webveil extension (via `pi install`, which records it) -------
+# --- pi + the pi-webveil extension --------------------------------------------
+# Install pi globally, then install the extension into the STAGING dir
+# (PI_CODING_AGENT_DIR), NOT ~/.pi/agent: anon-pi mounts a persistent home over
+# ~/.pi/agent and promotes the staging dir into it on first launch. Installing
+# straight into ~/.pi/agent would be shadowed by that mount.
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-RUN pi install npm:pi-webveil
+ENV ANON_PI_STAGE=/opt/anon-pi-seed/agent
+RUN mkdir -p "$ANON_PI_STAGE" \
+	&& PI_CODING_AGENT_DIR="$ANON_PI_STAGE" pi install npm:pi-webveil
 
 # --- SearXNG in a venv -------------------------------------------------------
 ENV SEARXNG_HOME=/opt/searxng
@@ -59,18 +65,18 @@ RUN mkdir -p /etc/searxng \
 		> /etc/searxng/settings.yml
 ENV SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml
 
-# webveil.json (global): point at the Unix socket, backend hop DIRECT (netcage
-# anonymizes it). fetchEgress is left DIRECT too, since netcage forces the fetch
-# hop through the proxy as well; no webveil-side proxy config is needed in-jail.
-RUN mkdir -p /root/.pi/agent \
-	&& printf '%s\n' \
+# webveil.json + trust.json go in the STAGING dir (promoted into the persistent
+# home on first launch). webveil points at the Unix socket, backend hop DIRECT
+# (netcage anonymizes it): no webveil-side proxy config is needed in-jail because
+# netcage forces every process's egress through the proxy.
+RUN printf '%s\n' \
 		'{' \
 		'  "backend": "searxng",' \
 		'  "baseUrl": "unix:/run/searxng/socket",' \
 		'  "egress": { "mode": "direct" }' \
 		'}' \
-		> /root/.pi/agent/webveil.json \
-	&& printf '{"/work": true}\n' > /root/.pi/agent/trust.json
+		> "$ANON_PI_STAGE/webveil.json" \
+	&& printf '{"/work": true}\n' > "$ANON_PI_STAGE/trust.json"
 
 # --- entrypoint: start SearXNG (HTTP over the Unix socket), then exec CMD ------
 # anon-pi passes `sh -c 'cp ... && exec pi'` as the CMD; a Dockerfile ENTRYPOINT
