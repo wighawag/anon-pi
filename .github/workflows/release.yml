@@ -7,7 +7,13 @@ name: release
 #   3. Merging that PR (which removes the changesets) makes this workflow run
 #      `changeset publish`, publishing the changed packages to npm.
 #
-# Requires an NPM_TOKEN repo secret (an npm automation token with publish rights).
+# Auth is npm Trusted Publishing (OIDC): NO NPM_TOKEN secret. npm trusts this
+# repo + workflow (release.yml) once you register it as a trusted publisher on
+# the package's npmjs.com settings. The OIDC handshake needs `id-token: write`,
+# Node >= 22, and a recent pnpm; publishes are stamped with provenance.
+# NOTE: npm ties a trusted publisher to an existing package, so the FIRST
+# publish is a one-time manual `pnpm release` (see README / package notes);
+# every release after that goes through this tokenless OIDC flow.
 on:
   push:
     branches: [main]
@@ -32,7 +38,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24 # >= 22 required for npm OIDC trusted publishing
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
@@ -44,9 +50,9 @@ jobs:
         with:
           # release:ci builds + format-checks then runs `changeset publish`
           # (the action itself handles git commits/tags, so no git push here).
+          # No NPM_TOKEN: npm detects the OIDC environment and authenticates via
+          # the registered trusted publisher.
           publish: pnpm release:ci
           version: pnpm changeset version
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
