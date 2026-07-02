@@ -97,6 +97,8 @@ WORKDIR /work
 
 Because anon-pi copies `models.json` **into** the image's own `~/.pi/agent` rather than replacing it, extensions installed in the image stay active in the anon session.
 
+A worked example ships in this package: [`examples/Dockerfile.pi-webveil`](examples/Dockerfile.pi-webveil) builds pi + the `pi-webveil` extension + a local SearXNG (over a Unix socket, `http-socket` so webveil's `unix:` baseUrl can speak HTTP to it, JSON API on, limiter off), started by an entrypoint that then execs anon-pi's command. Note the anonymity subtlety it documents: SearXNG's own crawl is anonymized here **because netcage forces every process's egress through the proxy**, so webveil's plain `egress: direct` is correct in-jail (the usual "local SearXNG leaks your IP" caveat does not apply).
+
 ## Generating the seed (`anon-pi import`)
 
 anon-pi **never** copies your real pi config. Instead, `anon-pi import` synthesizes a minimal seed from your local model:

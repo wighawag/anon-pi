@@ -40,7 +40,8 @@
 		"dist",
 		"src",
 		"LICENSE",
-		"Dockerfile.pi"
+		"Dockerfile.pi",
+		"examples"
 	],
 	"engines": {
 		"node": ">=20"

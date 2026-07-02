@@ -29,14 +29,10 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 #   RUN pi install npm:pi-subagents
 #   RUN pi install npm:pi-plan-mode
 #
-# Some extensions need a running service. pi-webveil, for example, uses searxng
-# for search; searxng must ALSO be installed and configured in this image, and
-# it must be happy talking out through a socks5h proxy (netcage forces all egress
-# through the proxy at runtime, DNS included). Sketch:
-#
-#   RUN pi install npm:pi-webveil
-#   # + install & configure searxng here (its own RUN steps / config), pointed
-#   #   at a proxy-only egress. See the webveil docs.
+# An extension that needs a running SERVICE (e.g. pi-webveil + a local SearXNG)
+# installs and configures that service in the image too. See the worked example
+# examples/Dockerfile.pi-webveil (SearXNG over a Unix socket, started by an
+# entrypoint that then execs anon-pi's command).
 #
 # Trust /work up front so pi does not prompt on every run (anon-pi never writes
 # this for you):

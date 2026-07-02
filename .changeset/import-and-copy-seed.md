@@ -17,3 +17,8 @@ survive.
   needed). Removed `ANON_PI_AGENT_MOUNT` and the per-session seed copy.
 - README + `Dockerfile.pi`: document that extensions, skills, and their services
   (e.g. `pi-webveil` + searxng) belong in the image, installed via `pi install`.
+- Ship a worked `examples/Dockerfile.pi-webveil`: pi + pi-webveil + a local
+  SearXNG over a Unix socket (http-socket, json+limiter:false, `unix:` baseUrl,
+  `egress: direct`), started by an entrypoint that then execs anon-pi's command.
+  It documents why the usual local-SearXNG anonymity caveat does not apply
+  in-jail (netcage forces every process's egress through the proxy).

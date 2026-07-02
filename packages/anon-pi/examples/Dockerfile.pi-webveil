@@ -1,0 +1,94 @@
+# A fuller ANON_PI_IMAGE example: pi + the pi-webveil extension + a local SearXNG
+# (over a Unix socket) for anonymized web search, baked into ONE image (the
+# capability layer). Modelled on a real working host setup (Unix socket,
+# http-socket, json+limiter:false, unix: baseUrl, egress: direct).
+#
+# STATUS: a documented REFERENCE, not a CI-built image. The topology matches a
+# working host, but pin versions and test the build for your platform before
+# relying on it (SearXNG's pip install + engine set drift over time).
+#
+# WHY THE USUAL SearXNG ANONYMITY CAVEAT DOES NOT APPLY HERE:
+#   webveil warns that a LOCAL SearXNG crawls the web from its OWN process egress
+#   (direct), so a socks5 backend hop to 127.0.0.1 is FALSE confidence. Under
+#   anon-pi that risk is gone: netcage forces ALL TCP+DNS egress from EVERY
+#   process in the jail through the socks5h proxy, fail-closed. SearXNG's crawl is
+#   anonymized by the network layer regardless. So we use webveil's plain
+#   `egress: direct` and let netcage do the anonymizing.
+#
+# WHY A UNIX SOCKET (matches the host setup, avoids the loopback-TCP guard):
+#   webveil's `unix:` baseUrl speaks HTTP over a Unix socket, so uWSGI must use
+#   `http-socket = <path>` (NOT `socket = <path>`, which is the native uwsgi
+#   protocol webveil cannot speak). SearXNG also needs `json` in search.formats
+#   and `server.limiter: false` for a local instance.
+#
+# Build:
+#   podman build -t localhost/anon-pi-webveil:latest -f Dockerfile.pi-webveil .
+#   export ANON_PI_IMAGE=localhost/anon-pi-webveil:latest
+# Then: `anon-pi import` (your local model), then `anon-pi <workdir>`.
+FROM node:24-bookworm-slim
+
+# --- system deps: pi's tools + SearXNG's Python/uwsgi runtime ----------------
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		bash ca-certificates git ripgrep \
+		python3 python3-venv python3-pip python3-dev \
+		build-essential libxml2-dev libxslt1-dev zlib1g-dev libffi-dev libssl-dev \
+		uwsgi uwsgi-plugin-python3 \
+	&& rm -rf /var/lib/apt/lists/*
+
+# --- pi + the pi-webveil extension (via `pi install`, which records it) -------
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+RUN pi install npm:pi-webveil
+
+# --- SearXNG in a venv -------------------------------------------------------
+ENV SEARXNG_HOME=/opt/searxng
+RUN python3 -m venv "$SEARXNG_HOME/venv" \
+	&& "$SEARXNG_HOME/venv/bin/pip" install --no-cache-dir -U pip setuptools wheel \
+	&& "$SEARXNG_HOME/venv/bin/pip" install --no-cache-dir searxng
+
+# settings.yml: JSON API on + limiter off (both required for a local instance).
+RUN mkdir -p /etc/searxng \
+	&& printf '%s\n' \
+		'use_default_settings: true' \
+		'server:' \
+		'  secret_key: "change-me-anon-pi"' \
+		'  limiter: false' \
+		'  public_instance: false' \
+		'search:' \
+		'  formats: [html, json]' \
+		> /etc/searxng/settings.yml
+ENV SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml
+
+# webveil.json (global): point at the Unix socket, backend hop DIRECT (netcage
+# anonymizes it). fetchEgress is left DIRECT too, since netcage forces the fetch
+# hop through the proxy as well; no webveil-side proxy config is needed in-jail.
+RUN mkdir -p /root/.pi/agent \
+	&& printf '%s\n' \
+		'{' \
+		'  "backend": "searxng",' \
+		'  "baseUrl": "unix:/run/searxng/socket",' \
+		'  "egress": { "mode": "direct" }' \
+		'}' \
+		> /root/.pi/agent/webveil.json \
+	&& printf '{"/work": true}\n' > /root/.pi/agent/trust.json
+
+# --- entrypoint: start SearXNG (HTTP over the Unix socket), then exec CMD ------
+# anon-pi passes `sh -c 'cp ... && exec pi'` as the CMD; a Dockerfile ENTRYPOINT
+# is PREPENDED to it (OCI), so this wrapper starts SearXNG then execs anon-pi's
+# command. `http-socket` (not `socket`) makes uWSGI speak HTTP over the socket,
+# which is what webveil's `unix:` baseUrl requires.
+RUN mkdir -p /run/searxng && printf '%s\n' \
+	'#!/bin/sh' \
+	'set -e' \
+	'uwsgi --master --plugin python3,http \' \
+	'  --http-socket /run/searxng/socket --chmod-socket=666 \' \
+	'  --venv "$SEARXNG_HOME/venv" --module searx.webapp \' \
+	'  --daemonize /tmp/searxng.log' \
+	'# Wait for the socket to appear (bounded).' \
+	'i=0; while [ ! -S /run/searxng/socket ] && [ $i -lt 30 ]; do i=$((i+1)); sleep 0.5; done' \
+	'exec "$@"' \
+	> /usr/local/bin/anon-pi-entrypoint \
+	&& chmod +x /usr/local/bin/anon-pi-entrypoint
+ENTRYPOINT ["/usr/local/bin/anon-pi-entrypoint"]
+
+WORKDIR /work
