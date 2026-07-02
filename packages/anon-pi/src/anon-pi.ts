@@ -19,8 +19,10 @@
 //     the same session config+state; reseed is manual (delete the session dir).
 
 import {createHash} from 'node:crypto';
+import {existsSync} from 'node:fs';
 import {homedir} from 'node:os';
-import {isAbsolute, join, resolve} from 'node:path';
+import {dirname, isAbsolute, join, resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
 
 /** The container path the workdir is mounted at (pi's cwd). */
 export const CONTAINER_WORKDIR = '/work';
@@ -61,6 +63,13 @@ export interface AnonPiEnv {
 	 * be mounted literally. Rejected if it starts with `~` or is not absolute.
 	 */
 	agentMount?: string;
+	/**
+	 * Absolute path to the Dockerfile.pi that ships with anon-pi, used only to
+	 * make the missing-image error's build command concrete. cli.ts resolves it
+	 * from import.meta.url; when absent the message falls back to a bare
+	 * `Dockerfile.pi`.
+	 */
+	dockerfilePath?: string;
 }
 
 /** The fully-resolved run plan cli.ts executes. */
@@ -160,24 +169,22 @@ export function buildRunPlan(
 	sessionExists: (dir: string) => boolean,
 ): RunPlan {
 	if (!env.image || env.image.trim() === '') {
+		// dockerfilePath is injected (cli.ts resolves the shipped Dockerfile.pi via
+		// import.meta.url; tests pass a fixed path). Every command is emitted
+		// flush-left so it copy-pastes cleanly: an indented heredoc would bake
+		// leading spaces into the Dockerfile and break the EOF terminator, so we
+		// point at the shipped file instead of printing a heredoc.
+		const df = env.dockerfilePath ?? 'Dockerfile.pi';
 		throw new AnonPiError(
 			'anon-pi: set ANON_PI_IMAGE to a container image that has `pi` on its PATH.\n' +
 				'\n' +
-				'No such image yet? Build a small one from the upstream-documented recipe\n' +
-				'(it installs the official @earendil-works/pi-coding-agent npm package):\n' +
+				'No image yet? A ready Dockerfile.pi ships with anon-pi (it installs the\n' +
+				'official @earendil-works/pi-coding-agent). Build it and point at it:\n' +
 				'\n' +
-				"  cat > Dockerfile.pi <<'EOF'\n" +
-				'  FROM node:24-bookworm-slim\n' +
-				'  RUN apt-get update && apt-get install -y --no-install-recommends \\\n' +
-				'        bash ca-certificates git ripgrep && rm -rf /var/lib/apt/lists/*\n' +
-				'  RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent\n' +
-				'  WORKDIR /work\n' +
-				'  EOF\n' +
-				'  podman build -t localhost/anon-pi-pi:latest -f Dockerfile.pi .\n' +
-				'  export ANON_PI_IMAGE=localhost/anon-pi-pi:latest\n' +
+				`podman build -t localhost/anon-pi-pi:latest -f "${df}" "$(dirname "${df}")"\n` +
+				'export ANON_PI_IMAGE=localhost/anon-pi-pi:latest\n' +
 				'\n' +
-				'A ready Dockerfile.pi also ships with this package. See the README\n' +
-				'(Providing a pi image) for details and a community-image note.',
+				'See the README (Providing a pi image) for details and a community-image note.',
 		);
 	}
 	if (!env.llmDirect || env.llmDirect.trim() === '') {
@@ -241,6 +248,28 @@ export function buildRunPlan(
 	};
 }
 
+/**
+ * Absolute path to the Dockerfile.pi that ships with anon-pi, resolved from this
+ * module's location (package root, one level up from dist/anon-pi.js), or
+ * undefined if it cannot be found. Used only to make the missing-image error's
+ * build command concrete.
+ */
+export function shippedDockerfilePath(): string | undefined {
+	try {
+		const here = dirname(fileURLToPath(import.meta.url));
+		// dist/anon-pi.js -> ../Dockerfile.pi; also try alongside for safety.
+		for (const p of [
+			join(here, '..', 'Dockerfile.pi'),
+			join(here, 'Dockerfile.pi'),
+		]) {
+			if (existsSync(p)) return p;
+		}
+	} catch {
+		// import.meta.url unavailable (e.g. some test bundlers): fall through.
+	}
+	return undefined;
+}
+
 /** Read the AnonPiEnv from a process env map (kept separate so tests inject one). */
 export function envFromProcess(
 	penv: Record<string, string | undefined>,
@@ -254,6 +283,7 @@ export function envFromProcess(
 		llmDirect: penv.ANON_PI_LLM,
 		xdgConfigHome: penv.XDG_CONFIG_HOME,
 		agentMount: penv.ANON_PI_AGENT_MOUNT,
+		dockerfilePath: shippedDockerfilePath(),
 	};
 }
 

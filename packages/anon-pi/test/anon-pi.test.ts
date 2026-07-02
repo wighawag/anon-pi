@@ -89,6 +89,29 @@ describe('buildRunPlan required inputs', () => {
 			buildRunPlan({...base, llmDirect: ''}, '/w', seedAlways, sessionAbsent),
 		).toThrow(/ANON_PI_LLM/);
 	});
+
+	it('missing-image error is copy-pasteable: command lines are flush-left', () => {
+		let msg = '';
+		try {
+			buildRunPlan(
+				{...base, image: '', dockerfilePath: '/pkg/Dockerfile.pi'},
+				'/w',
+				seedAlways,
+				sessionAbsent,
+			);
+		} catch (e) {
+			msg = (e as Error).message;
+		}
+		// The shell commands must have NO leading whitespace, else a paste breaks
+		// (an indented heredoc would bake spaces into the Dockerfile / EOF).
+		for (const line of msg.split('\n')) {
+			if (line.startsWith('podman ') || line.startsWith('export ')) continue;
+			expect(/^\s+(podman|export)\b/.test(line)).toBe(false);
+		}
+		expect(msg).toContain('podman build');
+		expect(msg).toContain('/pkg/Dockerfile.pi');
+		expect(msg).not.toContain("<<'EOF'"); // no fragile heredoc
+	});
 });
 
 describe('buildRunPlan missing seed (never auto-populate)', () => {
