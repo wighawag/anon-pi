@@ -298,12 +298,18 @@ export function buildRunPlan(
 	const proxy =
 		env.proxy && env.proxy.trim() !== '' ? env.proxy : DEFAULT_PROXY;
 
+	// netcage's --allow-direct wants a bare IP[:port]/CIDR (no scheme/path), but a
+	// user naturally sets ANON_PI_LLM to a URL (http://192.168.1.150:8080). Strip
+	// it to host:port with the same helper `import` uses to match providers, so a
+	// URL, an ip:port, or a bare ip all work.
+	const directTarget = hostPortKey(env.llmDirect);
+
 	const netcageArgs = [
 		'run',
 		'--proxy',
 		proxy,
 		'--allow-direct',
-		env.llmDirect,
+		directTarget,
 		'-it',
 		'-v',
 		workdir, // netcage defaults a target-less -v to /work and cwd to /work

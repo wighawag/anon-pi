@@ -236,6 +236,19 @@ describe('buildRunPlan netcage argv', () => {
 		);
 	});
 
+	it('normalizes a URL-form ANON_PI_LLM for --allow-direct (strips scheme/path)', () => {
+		// netcage's --allow-direct rejects a scheme; a user naturally sets a URL.
+		for (const llm of [
+			'http://192.168.1.150:8080',
+			'http://192.168.1.150:8080/v1',
+			'192.168.1.150:8080',
+		]) {
+			const p = buildRunPlan({...base, llmDirect: llm}, '/w', seedPresent);
+			const i = p.netcageArgs.indexOf('--allow-direct');
+			expect(p.netcageArgs[i + 1]).toBe('192.168.1.150:8080');
+		}
+	});
+
 	it('is interactive', () => {
 		expect(plan.netcageArgs).toContain('-it');
 	});
