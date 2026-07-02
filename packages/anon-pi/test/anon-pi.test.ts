@@ -255,19 +255,23 @@ describe('buildRunPlan statefulness', () => {
 		expect(p.configSeed).toBe('');
 	});
 
-	it('uses an ephemeral throwaway home when env.ephemeral', () => {
+	it('--ephemeral mounts NO writable state (pi writes to the --rm container layer)', () => {
 		const p = buildRunPlan(
 			{...base, ephemeral: true},
 			'/w',
 			seedPresent,
 			statePresent, // ignored for ephemeral
-			'/tmp/throwaway/agent',
 		);
-		expect(p.stateDir).toBe('/tmp/throwaway/agent');
-		expect(p.fresh).toBe(true); // ephemeral is always fresh
-		expect(p.netcageArgs).toContain(
-			`/tmp/throwaway/agent:${CONTAINER_AGENT_DIR}`,
-		);
+		expect(p.stateDir).toBe(''); // no host state dir at all
+		expect(p.fresh).toBe(true); // the container's throwaway home is always fresh
+		// NO -v ...:/root/.pi/agent mount: nothing writable touches the host
+		expect(
+			p.netcageArgs.some((a) => a.endsWith(`:${CONTAINER_AGENT_DIR}`)),
+		).toBe(false);
+		// the read-only models.json seed is still mounted (single file, never written)
+		expect(
+			p.netcageArgs.some((a) => a.endsWith(':/anon-pi-seed/models.json:ro')),
+		).toBe(true);
 	});
 });
 

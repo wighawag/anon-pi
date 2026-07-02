@@ -303,15 +303,19 @@ export function resolveSourceModelsPath(env: AnonPiEnv): string {
  *
  * `modelsSeedExists` reports whether the canonical import models.json exists (so
  * it is mounted for the seed); `stateExists` reports whether this workdir's
- * state home already exists (so `fresh` is known). For --ephemeral, cli.ts
- * supplies a throwaway stateDir and treats it as fresh.
+ * state home already exists (so `fresh` is known).
+ *
+ * --ephemeral mounts NO writable state: pi writes to the container's own
+ * filesystem, which netcage runs with `--rm`, so it is destroyed when the
+ * container exits. Nothing writable ever touches a host path; there is no
+ * cleanup and no leftover-on-crash. (The read-only models.json seed is still
+ * mounted; it is a single file anon-pi never writes to.)
  */
 export function buildRunPlan(
 	env: AnonPiEnv,
 	workdirArg: string | undefined,
 	modelsSeedExists: (modelsJsonPath: string) => boolean,
 	stateExists: (stateDir: string) => boolean,
-	ephemeralStateDir?: string,
 ): RunPlan {
 	if (!env.image || env.image.trim() === '') {
 		// dockerfilePath is injected (cli.ts resolves the shipped Dockerfile.pi via
@@ -378,12 +382,11 @@ export function buildRunPlan(
 		workdirArg && workdirArg.trim() !== '' ? workdirArg : process.cwd();
 	const workdir = isAbsolute(raw) ? raw : resolve(raw);
 
-	// Persistent per-workdir state home (or the ephemeral throwaway cli.ts made).
+	// Persistent per-workdir state home, unless --ephemeral (no writable mount).
 	const ephemeral = env.ephemeral === true;
-	const stateDir = ephemeral
-		? (ephemeralStateDir ?? '')
-		: stateAgentDir(env, workdir);
-	// Ephemeral is always fresh (throwaway); a persistent home is fresh iff absent.
+	const stateDir = ephemeral ? '' : stateAgentDir(env, workdir);
+	// Ephemeral home is always fresh (the container's throwaway layer); a
+	// persistent home is fresh iff its dir is absent.
 	const fresh = ephemeral ? true : !stateExists(stateDir);
 
 	// The canonical imported models.json is mounted (read-only) for the seed only
@@ -409,10 +412,13 @@ export function buildRunPlan(
 		'-it',
 		'-v',
 		workdir, // netcage defaults a target-less -v to /work and cwd to /work
-		'-v',
-		// Mount the PERSISTENT state home at the container's ~/.pi/agent (Model B).
-		`${stateDir}:${CONTAINER_AGENT_DIR}`,
 	];
+	// Persistent mode ONLY: mount the per-workdir state home at ~/.pi/agent
+	// (Model B). --ephemeral mounts nothing writable: pi writes to the container's
+	// own --rm layer, gone on exit, no host state.
+	if (!ephemeral) {
+		netcageArgs.push('-v', `${stateDir}:${CONTAINER_AGENT_DIR}`);
+	}
 	// Mount the imported models.json read-only for the first-launch seed, if any.
 	if (haveModelsSeed) {
 		netcageArgs.push('-v', `${modelsSeed}:${CONTAINER_MODELS_SEED}:ro`);
@@ -512,8 +518,9 @@ WHAT IT DOES
   trust) and your imported models.json are seeded in once; after that pi owns the
   home and nothing is overwritten. Requires \`netcage\`.
 
-  --ephemeral (or ANON_PI_EPHEMERAL=1): use a throwaway home, discarded on exit
-  (clean, no local trace; seeded the same way).
+  --ephemeral (or ANON_PI_EPHEMERAL=1): mount NO writable state; pi writes to the
+  container's own --rm layer, gone on exit. Nothing writable touches the host,
+  no cleanup, no leftover-on-crash.
 
 import
   Reads your host ~/.pi/agent/models.json, picks the provider whose baseUrl

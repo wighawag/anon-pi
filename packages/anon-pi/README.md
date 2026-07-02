@@ -63,7 +63,7 @@ pi auto-selects the first available model (your local one; it needs no real API 
 
 ### Ephemeral (throwaway) sessions
 
-For a clean, no-local-trace session, pass `--ephemeral` (or `ANON_PI_EPHEMERAL=1`): anon-pi uses a temporary home that is seeded the same way and **discarded on exit**. Nothing persists.
+For a clean, no-local-trace session, pass `--ephemeral` (or `ANON_PI_EPHEMERAL=1`): anon-pi mounts **no writable state** at all. pi writes to the container's own filesystem, which netcage runs with `--rm`, so it is destroyed when the container exits. Nothing writable ever touches a host path (only the read-only `models.json` seed is mounted), there is no cleanup step, and nothing is left behind even if anon-pi is killed.
 
 ```sh
 anon-pi --ephemeral ./scratch

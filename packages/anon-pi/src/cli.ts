@@ -8,16 +8,8 @@
 //   anon-pi import      generate the seed models.json from the host models.json,
 //                       carrying only the provider that serves ANON_PI_LLM.
 
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
+import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
-import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {
 	AnonPiError,
@@ -72,22 +64,9 @@ function runLaunch(args: string[]): number {
 	const env = envFromProcess(process.env);
 	if (ephemeralFlag) env.ephemeral = true;
 
-	// For --ephemeral, create a throwaway state home discarded on exit.
-	let ephemeralDir: string | undefined;
-	if (env.ephemeral) {
-		ephemeralDir = join(mkdtempSync(join(tmpdir(), 'anon-pi-eph-')), 'agent');
-		mkdirSync(ephemeralDir, {recursive: true});
-	}
-
 	let plan;
 	try {
-		plan = buildRunPlan(
-			env,
-			positionals[0],
-			existsSync,
-			existsSync,
-			ephemeralDir,
-		);
+		plan = buildRunPlan(env, positionals[0], existsSync, existsSync);
 	} catch (e) {
 		if (e instanceof AnonPiError) {
 			process.stderr.write(e.message + '\n');
@@ -105,32 +84,33 @@ function runLaunch(args: string[]): number {
 		return 1;
 	}
 
-	// Ensure the workdir and the (persistent) state home exist before mounting.
 	mkdirSync(plan.workdir, {recursive: true});
-	mkdirSync(plan.stateDir, {recursive: true});
-	if (plan.fresh && !env.ephemeral) {
+	if (env.ephemeral) {
+		// No host state dir: pi writes to the container's own --rm layer, so the
+		// session leaves NO trace on the host and there is nothing to clean up.
 		process.stderr.write(
-			`anon-pi: new session home ${plan.stateDir} (seeding on first launch)\n`,
+			'anon-pi: ephemeral session (nothing persisted; no host state)\n',
 		);
+	} else {
+		// Persistent mode: create the per-workdir state home to mount.
+		mkdirSync(plan.stateDir, {recursive: true});
+		if (plan.fresh) {
+			process.stderr.write(
+				`anon-pi: new session home ${plan.stateDir} (seeding on first launch)\n`,
+			);
+		}
 	}
 
-	try {
-		// Hand off to netcage with inherited stdio so -it is a real interactive TTY.
-		const res = spawnSync('netcage', plan.netcageArgs, {stdio: 'inherit'});
-		if (res.error) {
-			process.stderr.write(
-				`anon-pi: failed to run netcage: ${res.error.message}\n`,
-			);
-			return 1;
-		}
-		// Propagate netcage's exit code (which itself propagates the tool's).
-		return res.status ?? 1;
-	} finally {
-		// Discard the throwaway home for --ephemeral (no persistence, no trace).
-		if (env.ephemeral && ephemeralDir) {
-			rmSync(join(ephemeralDir, '..'), {recursive: true, force: true});
-		}
+	// Hand off to netcage with inherited stdio so -it is a real interactive TTY.
+	const res = spawnSync('netcage', plan.netcageArgs, {stdio: 'inherit'});
+	if (res.error) {
+		process.stderr.write(
+			`anon-pi: failed to run netcage: ${res.error.message}\n`,
+		);
+		return 1;
 	}
+	// Propagate netcage's exit code (which itself propagates the tool's).
+	return res.status ?? 1;
 }
 
 // --- anon-pi import : write the seed models.json ----------------------------
