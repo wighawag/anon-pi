@@ -9,7 +9,7 @@ anon-pi is a thin, opinionated launcher over `netcage run`. It is a separate pac
 - **Linux.** anon-pi inherits netcage's platform reality (network namespaces + nftables + rootless Podman). See [Platform](#platform).
 - **[`netcage`](https://github.com/wighawag/netcage)** on your `PATH`.
 - A running **socks5h proxy** (local Tor, `ssh -D`, ...).
-- A **container image with `pi` on its `PATH`** (you provide it via `ANON_PI_IMAGE`).
+- A **container image with `pi` on its `PATH`** (you provide it via `ANON_PI_IMAGE`; see [Providing a pi image](#providing-a-pi-image)).
 
 ## Install
 
@@ -60,6 +60,22 @@ You land in pi, inside the jail, cwd `/work` = `./recon`. pi's web/tool egress i
 By default anon-pi mounts the seeded config at `/opt/pi-agent` and points pi there with `PI_CODING_AGENT_DIR`. This absolute, image-independent path is chosen so the podman mount target and pi's config dir agree without anon-pi having to guess your image's home directory.
 
 If you would rather pi's config live at its **standard** `~/.pi/agent` inside the container, set `ANON_PI_AGENT_MOUNT` to that home's **absolute** path, e.g. `ANON_PI_AGENT_MOUNT=/root/.pi/agent` for an image that runs as `root` (or `/home/<user>/.pi/agent` otherwise). The value must be absolute: podman does not expand `~`, and anon-pi rejects a `~`-relative or relative value rather than mounting it at a literal `~` directory. Both the mount target and `PI_CODING_AGENT_DIR` always stay in lockstep.
+
+## Providing a pi image
+
+anon-pi does not ship or default an image: you set `ANON_PI_IMAGE` to an image that has the `pi` CLI on its `PATH`. pi's maintainers do not publish an official prebuilt image, so the reputable path is to **build a small one from the upstream-documented recipe** (which installs the official [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) npm package, no third-party image to trust).
+
+A ready `Dockerfile.pi` ships in this package (adapted from pi's own [containerization docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/containerization.md)):
+
+```sh
+# from wherever this package's Dockerfile.pi is (e.g. node_modules/anon-pi)
+podman build -t localhost/anon-pi-pi:latest -f Dockerfile.pi .
+export ANON_PI_IMAGE=localhost/anon-pi-pi:latest
+```
+
+The image only needs `pi` reachable on `PATH`. anon-pi passes `pi` as the run command and mounts pi's config itself, so the image needs **no `ENTRYPOINT` and no config volume** (unlike pi's upstream `Dockerfile.pi`, which is written for running pi directly).
+
+A community image also exists ([`gni/pi-coding-agent-container`](https://github.com/gni/pi-coding-agent-container)); it is third-party and unvetted, so review it yourself before trusting it with your (anonymized) credentials.
 
 ## Populating the seed
 

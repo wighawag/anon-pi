@@ -39,7 +39,8 @@
 	"files": [
 		"dist",
 		"src",
-		"LICENSE"
+		"LICENSE",
+		"Dockerfile.pi"
 	],
 	"engines": {
 		"node": ">=20"

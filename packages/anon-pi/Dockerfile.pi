@@ -1,0 +1,23 @@
+# A minimal image with `pi` (the Earendil Works coding agent) on PATH, for use as
+# anon-pi's ANON_PI_IMAGE. It follows the official upstream containerization
+# pattern (earendil-works/pi, packages/coding-agent/docs/containerization.md):
+# node:24-bookworm-slim + the official `@earendil-works/pi-coding-agent` npm
+# package, plus the handful of tools pi's built-in bash/grep/find expect.
+#
+# Note: unlike the upstream `Dockerfile.pi`, this image sets NO ENTRYPOINT and
+# NO config volume. anon-pi passes `pi` as the run command and mounts pi's config
+# itself (PI_CODING_AGENT_DIR), so the image just needs `pi` reachable on PATH.
+#
+# Build (pin a digest for reproducibility once pushed to a registry):
+#   podman build -t localhost/anon-pi-pi:latest -f Dockerfile.pi .
+#   export ANON_PI_IMAGE=localhost/anon-pi-pi:latest
+FROM node:24-bookworm-slim
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends bash ca-certificates git ripgrep \
+	&& rm -rf /var/lib/apt/lists/*
+
+# The official pi coding agent CLI (puts `pi` on PATH).
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+
+WORKDIR /work
