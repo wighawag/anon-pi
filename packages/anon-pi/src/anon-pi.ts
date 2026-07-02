@@ -54,7 +54,7 @@ export const MODELS_FILE = 'models.json';
 export interface AnonPiEnv {
 	/** $HOME (or an override) used to derive default paths. */
 	home: string;
-	/** socks5h proxy URL. Default socks5h://127.0.0.1:9050. */
+	/** socks5h proxy URL. REQUIRED (no default: the proxy is what anonymizes). */
 	proxy?: string;
 	/** The anon-pi home dir. Default $XDG_CONFIG_HOME/anon-pi or ~/.config/anon-pi. */
 	anonPiHome?: string;
@@ -93,8 +93,6 @@ export interface RunPlan {
 	/** The argv passed to `netcage` (after the `netcage` program name). */
 	netcageArgs: string[];
 }
-
-const DEFAULT_PROXY = 'socks5h://127.0.0.1:9050';
 
 /** A user-facing error whose message is meant to be printed verbatim (no stack). */
 export class AnonPiError extends Error {}
@@ -269,6 +267,15 @@ export function buildRunPlan(
 			'anon-pi: set ANON_PI_LLM to the RFC1918/link-local IP[:port] of the local model pi should reach directly (e.g. ANON_PI_LLM=192.168.1.150:8080). All other egress stays forced through the proxy.',
 		);
 	}
+	if (!env.proxy || env.proxy.trim() === '') {
+		// No default: this is an anonymity tool, so the proxy is REQUIRED and never
+		// guessed (mirrors netcage, which fails closed without --proxy). A silent
+		// default would anonymize through the wrong endpoint, or fail deep in the
+		// jail with a confusing DNS error, if the guessed proxy is not actually up.
+		throw new AnonPiError(
+			'anon-pi: set ANON_PI_PROXY to your socks5h proxy (e.g. ANON_PI_PROXY=socks5h://127.0.0.1:9050 for Tor, or wherever your wireproxy/ssh -D listens). anon-pi has no default: the proxy is what makes the session anonymous, so it is never guessed.',
+		);
+	}
 
 	const home = env.home;
 	if (!home || home.trim() === '') {
@@ -295,8 +302,7 @@ export function buildRunPlan(
 		);
 	}
 
-	const proxy =
-		env.proxy && env.proxy.trim() !== '' ? env.proxy : DEFAULT_PROXY;
+	const proxy = env.proxy.trim();
 
 	// netcage's --allow-direct wants a bare IP[:port]/CIDR (no scheme/path), but a
 	// user naturally sets ANON_PI_LLM to a URL (http://192.168.1.150:8080). Strip
@@ -413,7 +419,8 @@ ENVIRONMENT
                   Running anon-pi without it prints a ready-to-build
                   Dockerfile.pi recipe; see the README (Providing a pi image).
   ANON_PI_LLM     (required) RFC1918/link-local IP[:port] of the local model
-  ANON_PI_PROXY   socks5h URL (default ${DEFAULT_PROXY})
+  ANON_PI_PROXY   (required) socks5h URL of your proxy (Tor/wireproxy/ssh -D).
+                  No default: the proxy is what anonymizes, so it is never guessed.
   ANON_PI_HOME    anon-pi home (default $XDG_CONFIG_HOME/anon-pi or ~/.config/anon-pi)
   ANON_PI_CONFIG  seed dir holding models.json (default <ANON_PI_HOME>/agent)
   ANON_PI_SOURCE_MODELS  (import) host models.json to read (default ~/.pi/agent/models.json)

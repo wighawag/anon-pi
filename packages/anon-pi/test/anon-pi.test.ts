@@ -17,6 +17,7 @@ const base: AnonPiEnv = {
 	home: '/home/u',
 	image: 'my/pi:tag',
 	llmDirect: '192.168.1.150:8080',
+	proxy: 'socks5h://127.0.0.1:9050',
 };
 
 const seedPresent = () => true;
@@ -155,6 +156,15 @@ describe('buildRunPlan required inputs', () => {
 		).toThrow(/ANON_PI_LLM/);
 	});
 
+	it('requires ANON_PI_PROXY (no default: the proxy is what anonymizes)', () => {
+		expect(() => buildRunPlan({...base, proxy: ''}, '/w', seedPresent)).toThrow(
+			/ANON_PI_PROXY/,
+		);
+		expect(() =>
+			buildRunPlan({...base, proxy: undefined}, '/w', seedPresent),
+		).toThrow(/never guessed|no default/i);
+	});
+
 	it('missing-image error is copy-pasteable and mentions both Dockerfiles', () => {
 		let msg = '';
 		try {
@@ -210,7 +220,7 @@ describe('buildRunPlan missing seed models.json', () => {
 describe('buildRunPlan netcage argv', () => {
 	const plan = buildRunPlan(base, '/work/recon', seedPresent);
 
-	it('starts with run + the proxy default', () => {
+	it('starts with run + the configured proxy', () => {
 		expect(plan.netcageArgs.slice(0, 3)).toEqual([
 			'run',
 			'--proxy',
@@ -218,7 +228,7 @@ describe('buildRunPlan netcage argv', () => {
 		]);
 	});
 
-	it('honours ANON_PI_PROXY override', () => {
+	it('uses the ANON_PI_PROXY value verbatim', () => {
 		const p = buildRunPlan(
 			{...base, proxy: 'socks5h://10.0.0.5:9050'},
 			'/w',
