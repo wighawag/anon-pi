@@ -98,4 +98,4 @@ Treat non-Linux as best-effort-via-VM, not supported.
 
 ## License
 
-MIT
+[AGPL-3.0-only](../../LICENSE)

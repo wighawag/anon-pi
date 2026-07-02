@@ -2,7 +2,7 @@
 	"name": "anon-pi",
 	"version": "0.0.0",
 	"description": "Launch pi inside a tooljail: anonymized web egress through a socks5h proxy, one direct hole for a local model, seeded pi config on the host.",
-	"license": "MIT",
+	"license": "AGPL-3.0-only",
 	"publishConfig": {
 		"access": "public"
 	},
