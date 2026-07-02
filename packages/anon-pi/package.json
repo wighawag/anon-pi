@@ -1,8 +1,28 @@
 {
 	"name": "anon-pi",
 	"version": "0.0.0",
-	"description": "Launch pi inside a tooljail: anonymized web egress through a socks5h proxy, one direct hole for a local model, seeded pi config on the host.",
+	"description": "Launch pi inside a netcage: anonymized web egress through a socks5h proxy, one direct hole for a local model, seeded pi config on the host.",
 	"license": "AGPL-3.0-only",
+	"keywords": [
+		"pi",
+		"netcage",
+		"anonymity",
+		"socks5h",
+		"tor",
+		"proxy",
+		"privacy",
+		"cli",
+		"agent"
+	],
+	"homepage": "https://github.com/wighawag/anon-pi#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/wighawag/anon-pi.git",
+		"directory": "packages/anon-pi"
+	},
+	"bugs": {
+		"url": "https://github.com/wighawag/anon-pi/issues"
+	},
 	"publishConfig": {
 		"access": "public"
 	},
@@ -18,7 +38,8 @@
 	},
 	"files": [
 		"dist",
-		"src"
+		"src",
+		"LICENSE"
 	],
 	"engines": {
 		"node": ">=20"

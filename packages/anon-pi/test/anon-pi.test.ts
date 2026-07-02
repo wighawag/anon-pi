@@ -120,11 +120,11 @@ describe('buildRunPlan seed decision (reuse if present, seed if absent)', () => 
 	});
 });
 
-describe('buildRunPlan tooljail argv', () => {
+describe('buildRunPlan netcage argv', () => {
 	const plan = buildRunPlan(base, '/work/recon', seedAlways, sessionAbsent);
 
 	it('starts with run + the proxy default', () => {
-		expect(plan.tooljailArgs.slice(0, 3)).toEqual([
+		expect(plan.netcageArgs.slice(0, 3)).toEqual([
 			'run',
 			'--proxy',
 			'socks5h://127.0.0.1:9050',
@@ -138,43 +138,43 @@ describe('buildRunPlan tooljail argv', () => {
 			seedAlways,
 			sessionAbsent,
 		);
-		expect(p.tooljailArgs[2]).toBe('socks5h://10.0.0.5:9050');
+		expect(p.netcageArgs[2]).toBe('socks5h://10.0.0.5:9050');
 	});
 
 	it('opens exactly one direct hole for the local model', () => {
-		const i = plan.tooljailArgs.indexOf('--allow-direct');
+		const i = plan.netcageArgs.indexOf('--allow-direct');
 		expect(i).toBeGreaterThan(-1);
-		expect(plan.tooljailArgs[i + 1]).toBe('192.168.1.150:8080');
+		expect(plan.netcageArgs[i + 1]).toBe('192.168.1.150:8080');
 		// exactly one --allow-direct
-		expect(
-			plan.tooljailArgs.filter((a) => a === '--allow-direct'),
-		).toHaveLength(1);
+		expect(plan.netcageArgs.filter((a) => a === '--allow-direct')).toHaveLength(
+			1,
+		);
 	});
 
 	it('is interactive', () => {
-		expect(plan.tooljailArgs).toContain('-it');
+		expect(plan.netcageArgs).toContain('-it');
 	});
 
-	it('mounts the workdir (target-less -v, tooljail defaults it to /work)', () => {
-		expect(plan.tooljailArgs).toContain('/work/recon');
+	it('mounts the workdir (target-less -v, netcage defaults it to /work)', () => {
+		expect(plan.netcageArgs).toContain('/work/recon');
 	});
 
 	it('mounts the seeded session config at the default mount and points pi at it', () => {
 		expect(plan.agentMount).toBe(DEFAULT_CONTAINER_AGENT_DIR);
-		expect(plan.tooljailArgs).toContain(
+		expect(plan.netcageArgs).toContain(
 			`${plan.sessionAgentDir}:${DEFAULT_CONTAINER_AGENT_DIR}`,
 		);
-		expect(plan.tooljailArgs).toContain(
+		expect(plan.netcageArgs).toContain(
 			`${PI_AGENT_DIR_ENV}=${DEFAULT_CONTAINER_AGENT_DIR}`,
 		);
 	});
 
 	it('ends with the image then the pi command', () => {
-		expect(plan.tooljailArgs.slice(-2)).toEqual(['my/pi:tag', 'pi']);
+		expect(plan.netcageArgs.slice(-2)).toEqual(['my/pi:tag', 'pi']);
 	});
 
 	it('does NOT mount the canonical seed into the container (it is read-only, copy-only)', () => {
-		const mountsSeed = plan.tooljailArgs.some((a) =>
+		const mountsSeed = plan.netcageArgs.some((a) =>
 			a.startsWith(`${plan.configSeed}:`),
 		);
 		expect(mountsSeed).toBe(false);
@@ -201,10 +201,10 @@ describe('agent-mount override (ANON_PI_AGENT_MOUNT, option 3)', () => {
 			sessionAbsent,
 		);
 		expect(plan.agentMount).toBe('/root/.pi/agent');
-		expect(plan.tooljailArgs).toContain(
+		expect(plan.netcageArgs).toContain(
 			`${plan.sessionAgentDir}:/root/.pi/agent`,
 		);
-		expect(plan.tooljailArgs).toContain(`${PI_AGENT_DIR_ENV}=/root/.pi/agent`);
+		expect(plan.netcageArgs).toContain(`${PI_AGENT_DIR_ENV}=/root/.pi/agent`);
 	});
 
 	it('rejects a ~-relative mount (podman does not expand ~)', () => {

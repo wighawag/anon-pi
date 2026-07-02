@@ -1,13 +1,13 @@
 # anon-pi
 
-Launch [pi](https://github.com/earendil-works/pi-mono) inside a [tooljail](https://github.com/wighawag/tooljail): all of pi's web and DNS egress is forced through a socks5h proxy (fail-closed, leak-proof), while ONE direct hole is opened to a local model on your LAN. Your pi config is seeded, per-workdir, onto the host; your canonical config is never touched by the container.
+Launch [pi](https://github.com/earendil-works/pi-mono) inside a [netcage](https://github.com/wighawag/netcage): all of pi's web and DNS egress is forced through a socks5h proxy (fail-closed, leak-proof), while ONE direct hole is opened to a local model on your LAN. Your pi config is seeded, per-workdir, onto the host; your canonical config is never touched by the container.
 
-anon-pi is a thin, opinionated launcher over `tooljail run`. It is a separate package on purpose: tooljail wraps any tool and stays tool-agnostic; anon-pi holds the pi-specific opinion.
+anon-pi is a thin, opinionated launcher over `netcage run`. It is a separate package on purpose: netcage wraps any tool and stays tool-agnostic; anon-pi holds the pi-specific opinion.
 
 ## Requirements
 
-- **Linux.** anon-pi inherits tooljail's platform reality (network namespaces + nftables + rootless Podman). See [Platform](#platform).
-- **[`tooljail`](https://github.com/wighawag/tooljail)** on your `PATH`.
+- **Linux.** anon-pi inherits netcage's platform reality (network namespaces + nftables + rootless Podman). See [Platform](#platform).
+- **[`netcage`](https://github.com/wighawag/netcage)** on your `PATH`.
 - A running **socks5h proxy** (local Tor, `ssh -D`, ...).
 - A **container image with `pi` on its `PATH`** (you provide it via `ANON_PI_IMAGE`).
 
@@ -53,7 +53,7 @@ You land in pi, inside the jail, cwd `/work` = `./recon`. pi's web/tool egress i
 
 1. **Seed (once per workdir).** The first time you use a workdir, anon-pi copies your canonical config (`~/.config/anon-pi/agent`) into a per-session dir `~/.config/anon-pi/sessions/<hash-of-workdir>/agent`. The canonical config is only ever READ; it is never mounted into the container, so pi in the jail cannot mutate it.
 2. **Mount.** The session config dir is mounted as pi's global config (`PI_CODING_AGENT_DIR=<mount>`, default `/opt/pi-agent`), and the workdir is mounted at `/work`.
-3. **Run.** anon-pi execs `tooljail run --proxy <proxy> --allow-direct <ANON_PI_LLM> -it -v <workdir> -v <session>:<mount> -e PI_CODING_AGENT_DIR=<mount> <image> pi`.
+3. **Run.** anon-pi execs `netcage run --proxy <proxy> --allow-direct <ANON_PI_LLM> -it -v <workdir> -v <session>:<mount> -e PI_CODING_AGENT_DIR=<mount> <image> pi`.
 
 ### Where pi's config is mounted (`ANON_PI_AGENT_MOUNT`)
 
@@ -87,9 +87,9 @@ The seeded config is pi's **global** in the container. pi also supports a **proj
 
 ## Platform
 
-anon-pi is **Linux-only**, because tooljail's jail is built on Linux kernel primitives (network namespaces, nftables, `/dev/net/tun`, rootless Podman + pasta). There is no native macOS/Windows jail.
+anon-pi is **Linux-only**, because netcage's jail is built on Linux kernel primitives (network namespaces, nftables, `/dev/net/tun`, rootless Podman + pasta). There is no native macOS/Windows jail.
 
-On macOS/Windows, Podman runs inside a Linux VM (`podman machine`), so tooljail (and anon-pi) can run **inside that VM**. Two caveats matter for anon-pi:
+On macOS/Windows, Podman runs inside a Linux VM (`podman machine`), so netcage (and anon-pi) can run **inside that VM**. Two caveats matter for anon-pi:
 
 - **`--allow-direct` to a LAN model is VM-boundary-sensitive.** "Directly over the LAN" means the *VM's* NIC, not your Mac/Windows host LAN, so a model at an RFC1918 address on the host network may not be directly reachable from inside the VM the way it is on bare Linux.
 - **Host-loopback proxy reachback** (`ssh -D`/Tor on the host's `127.0.0.1`) is the host loopback, not the VM's.
@@ -98,4 +98,4 @@ Treat non-Linux as best-effort-via-VM, not supported.
 
 ## License
 
-[AGPL-3.0-only](../../LICENSE)
+[AGPL-3.0-only](./LICENSE)

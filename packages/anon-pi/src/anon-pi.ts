@@ -75,8 +75,8 @@ export interface RunPlan {
 	agentMount: string;
 	/** True iff the session dir does not exist yet and must be seeded from configSeed. */
 	needsSeed: boolean;
-	/** The argv passed to `tooljail` (after the `tooljail` program name). */
-	tooljailArgs: string[];
+	/** The argv passed to `netcage` (after the `netcage` program name). */
+	netcageArgs: string[];
 }
 
 const DEFAULT_PROXY = 'socks5h://127.0.0.1:9050';
@@ -147,7 +147,7 @@ export function sessionAgentDir(env: AnonPiEnv, absWorkdir: string): string {
 
 /**
  * Build the run plan from the environment + the (optional) workdir arg. PURE: it
- * resolves paths and composes the tooljail argv, and reports whether a seed copy
+ * resolves paths and composes the netcage argv, and reports whether a seed copy
  * is needed, but performs NO filesystem writes or spawns. It THROWS AnonPiError
  * for the two hard preconditions (missing image, missing llm) so the required
  * inputs fail loud; the missing-SEED check is left to cli.ts (it needs a real
@@ -198,7 +198,7 @@ export function buildRunPlan(
 	const proxy =
 		env.proxy && env.proxy.trim() !== '' ? env.proxy : DEFAULT_PROXY;
 
-	const tooljailArgs = [
+	const netcageArgs = [
 		'run',
 		'--proxy',
 		proxy,
@@ -206,7 +206,7 @@ export function buildRunPlan(
 		env.llmDirect,
 		'-it',
 		'-v',
-		workdir, // tooljail defaults a target-less -v to /work and cwd to /work
+		workdir, // netcage defaults a target-less -v to /work and cwd to /work
 		'-v',
 		`${sessionDir}:${agentMount}`,
 		'-e',
@@ -221,7 +221,7 @@ export function buildRunPlan(
 		configSeed,
 		agentMount,
 		needsSeed,
-		tooljailArgs,
+		netcageArgs,
 	};
 }
 
@@ -242,7 +242,7 @@ export function envFromProcess(
 }
 
 /** The --help text (kept here so it is covered by the same module). */
-export const HELP = `anon-pi - launch pi inside a tooljail (anonymized egress + one direct local model)
+export const HELP = `anon-pi - launch pi inside a netcage (anonymized egress + one direct local model)
 
 USAGE
   anon-pi [WORKDIR]
@@ -255,7 +255,7 @@ WHAT IT DOES
   ~/.config/anon-pi/sessions/<hash>/agent, mounts it as pi's global config
   (${PI_AGENT_DIR_ENV}=<mount>, default ${DEFAULT_CONTAINER_AGENT_DIR}), mounts WORKDIR at
   ${CONTAINER_WORKDIR}, opens ONE direct hole to your local model, and runs pi with all other
-  egress forced through the socks5h proxy, fail-closed. Requires \`tooljail\`.
+  egress forced through the socks5h proxy, fail-closed. Requires \`netcage\`.
 
 ENVIRONMENT
   ANON_PI_IMAGE   (required) image with \`pi\` on PATH
@@ -272,6 +272,6 @@ RESEED
   and the next run re-seeds it from the canonical config.
 
 PLATFORM
-  Linux only (via tooljail's netns/nft jail). On macOS/Windows it works only
+  Linux only (via netcage's netns/nft jail). On macOS/Windows it works only
   inside a Linux VM, where --allow-direct to a LAN model is VM-boundary-sensitive.
 `;

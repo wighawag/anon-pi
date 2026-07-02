@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // anon-pi CLI: resolve the run plan (pure), do the one filesystem side-effect
-// (seed the session config if absent), then exec `tooljail run ...` with inherited
+// (seed the session config if absent), then exec `netcage run ...` with inherited
 // stdio so the interactive pi session (-it) passes through the terminal cleanly.
 
 import {cpSync, existsSync, mkdirSync} from 'node:fs';
@@ -17,7 +17,7 @@ function main(argv: string[]): number {
 	}
 
 	// The only positional is the optional workdir. Reject stray flags so a typo
-	// (e.g. --allow-direct) is not silently swallowed: anon-pi owns the tooljail
+	// (e.g. --allow-direct) is not silently swallowed: anon-pi owns the netcage
 	// argv, extra flags are not passed through.
 	const positionals = args.filter((a) => !a.startsWith('-'));
 	const flags = args.filter((a) => a.startsWith('-'));
@@ -47,11 +47,11 @@ function main(argv: string[]): number {
 		throw e;
 	}
 
-	// Fail loud if tooljail is not installed, before we mutate anything.
-	if (!hasTooljail()) {
+	// Fail loud if netcage is not installed, before we mutate anything.
+	if (!hasNetcage()) {
 		process.stderr.write(
-			'anon-pi: `tooljail` not found on PATH. anon-pi is a launcher for tooljail; install it first\n' +
-				'(https://github.com/wighawag/tooljail). Linux only.\n',
+			'anon-pi: `netcage` not found on PATH. anon-pi is a launcher for netcage; install it first\n' +
+				'(https://github.com/wighawag/netcage). Linux only.\n',
 		);
 		return 1;
 	}
@@ -69,22 +69,22 @@ function main(argv: string[]): number {
 	// Ensure the workdir exists (a fresh named folder is fine).
 	mkdirSync(plan.workdir, {recursive: true});
 
-	// Hand off to tooljail with inherited stdio so -it is a real interactive TTY.
-	const res = spawnSync('tooljail', plan.tooljailArgs, {stdio: 'inherit'});
+	// Hand off to netcage with inherited stdio so -it is a real interactive TTY.
+	const res = spawnSync('netcage', plan.netcageArgs, {stdio: 'inherit'});
 	if (res.error) {
 		process.stderr.write(
-			`anon-pi: failed to run tooljail: ${res.error.message}\n`,
+			`anon-pi: failed to run netcage: ${res.error.message}\n`,
 		);
 		return 1;
 	}
-	// Propagate tooljail's exit code (which itself propagates the tool's).
+	// Propagate netcage's exit code (which itself propagates the tool's).
 	return res.status ?? 1;
 }
 
-function hasTooljail(): boolean {
+function hasNetcage(): boolean {
 	const which = spawnSync(
 		process.platform === 'win32' ? 'where' : 'command',
-		['-v', 'tooljail'],
+		['-v', 'netcage'],
 		{
 			stdio: 'ignore',
 			shell: process.platform !== 'win32',
@@ -92,7 +92,7 @@ function hasTooljail(): boolean {
 	);
 	if (which.status === 0) return true;
 	// Fallback: try running it harmlessly.
-	const probe = spawnSync('tooljail', ['--help'], {stdio: 'ignore'});
+	const probe = spawnSync('netcage', ['--help'], {stdio: 'ignore'});
 	return !probe.error;
 }
 
