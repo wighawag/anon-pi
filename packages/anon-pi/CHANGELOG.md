@@ -1,5 +1,15 @@
 # anon-pi
 
+## 0.4.0
+
+### Minor Changes
+
+- c92f296: Add `anon-pi --fresh [WORKDIR]`: delete this workdir's persistent state home
+  before launching, so the (possibly rebuilt) image's staged defaults and your
+  imported `models.json` are re-seeded on this launch. Use it after rebuilding your
+  image to pick up new extensions/config without hand-deleting the state dir.
+  `--fresh` with `--ephemeral` is rejected (an ephemeral session is always fresh).
+
 ## 0.3.0
 
 ### Minor Changes
