@@ -8,9 +8,15 @@
 //   anon-pi import      generate the seed models.json from the host models.json,
 //                       carrying only the provider that serves ANON_PI_LLM.
 
-import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import {spawnSync} from 'node:child_process';
-import {join} from 'node:path';
+import {isAbsolute, join, resolve} from 'node:path';
 import {
 	AnonPiError,
 	buildRunPlan,
@@ -20,6 +26,7 @@ import {
 	pickProviderForLlm,
 	resolveConfigSeed,
 	resolveSourceModelsPath,
+	stateAgentDir,
 	type PiModelsFile,
 } from './anon-pi.js';
 
@@ -41,13 +48,14 @@ function main(argv: string[]): number {
 
 // --- anon-pi [WORKDIR] : launch pi jailed -----------------------------------
 function runLaunch(args: string[]): number {
-	// One optional positional (the workdir) + the --ephemeral flag. Reject other
-	// flags so a typo is not silently swallowed: anon-pi owns the netcage argv.
+	// One optional positional (the workdir) + the --ephemeral / --fresh flags.
+	// Reject other flags so a typo is not silently swallowed: anon-pi owns the
+	// netcage argv.
+	const known = new Set(['--ephemeral', '--eph', '--fresh']);
 	const ephemeralFlag = args.includes('--ephemeral') || args.includes('--eph');
+	const freshFlag = args.includes('--fresh');
 	const positionals = args.filter((a) => !a.startsWith('-'));
-	const flags = args.filter(
-		(a) => a.startsWith('-') && a !== '--ephemeral' && a !== '--eph',
-	);
+	const flags = args.filter((a) => a.startsWith('-') && !known.has(a));
 	if (flags.length > 0) {
 		process.stderr.write(
 			`anon-pi: unknown option(s): ${flags.join(' ')}\nRun \`anon-pi --help\`.\n`,
@@ -61,8 +69,31 @@ function runLaunch(args: string[]): number {
 		return 2;
 	}
 
+	if (freshFlag && ephemeralFlag) {
+		process.stderr.write(
+			'anon-pi: --fresh has no effect with --ephemeral (an ephemeral session is always fresh and never persisted).\nRun `anon-pi --help`.\n',
+		);
+		return 2;
+	}
+
 	const env = envFromProcess(process.env);
 	if (ephemeralFlag) env.ephemeral = true;
+
+	// --fresh: delete this workdir's persistent state home BEFORE planning, so the
+	// home is fresh and the image's (possibly rebuilt) defaults + models.json are
+	// re-seeded on this launch. No-op for --ephemeral (handled above).
+	if (freshFlag && !env.ephemeral) {
+		const raw =
+			positionals[0] && positionals[0].trim() !== ''
+				? positionals[0]
+				: process.cwd();
+		const wd = isAbsolute(raw) ? raw : resolve(raw);
+		const stateDir = stateAgentDir(env, wd);
+		if (existsSync(stateDir)) {
+			rmSync(stateDir, {recursive: true, force: true});
+			process.stderr.write(`anon-pi: --fresh removed ${stateDir}\n`);
+		}
+	}
 
 	let plan;
 	try {

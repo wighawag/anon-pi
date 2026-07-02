@@ -522,6 +522,10 @@ WHAT IT DOES
   container's own --rm layer, gone on exit. Nothing writable touches the host,
   no cleanup, no leftover-on-crash.
 
+  --fresh: delete this workdir's persistent state home first, so the (possibly
+  rebuilt) image's defaults + your imported models.json are re-seeded. Use it
+  after rebuilding your image to pick up new extensions/config.
+
 import
   Reads your host ~/.pi/agent/models.json, picks the provider whose baseUrl
   serves ANON_PI_LLM, and writes JUST that provider to the canonical seed
@@ -542,8 +546,8 @@ ENVIRONMENT
   ANON_PI_SOURCE_MODELS  (import) host models.json to read (default ~/.pi/agent/models.json)
 
 RESET A SESSION
-  Delete its state home to start fresh (re-seeds next launch):
-    rm -rf <ANON_PI_HOME>/state/<workdir-slug>/agent
+  anon-pi --fresh [WORKDIR]   drop the session home and re-seed on this launch.
+  Or delete it by hand: rm -rf <ANON_PI_HOME>/state/<workdir-slug>/agent
 
 PLATFORM
   Linux only (via netcage's netns/nft jail). On macOS/Windows it works only
