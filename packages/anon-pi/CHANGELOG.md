@@ -1,5 +1,38 @@
 # anon-pi
 
+## 0.2.0
+
+### Minor Changes
+
+- 76a99a0: Add `anon-pi import` and reshape the seed model so image-installed extensions
+  survive.
+
+  - `anon-pi import` generates the seed from your local model: it reads your host
+    `~/.pi/agent/models.json`, picks the provider whose `baseUrl` serves
+    `ANON_PI_LLM`, and writes just that provider to `<ANON_PI_CONFIG>/models.json`.
+    No other provider's API keys, no sessions, no identity. Errors on no match,
+    warns on a real-looking `apiKey`, refuses to overwrite without `--force`.
+  - The seed is now just `models.json`. anon-pi mounts it read-only and **copies**
+    it into the container's own `~/.pi/agent` at start (instead of mounting a
+    whole config dir as `PI_CODING_AGENT_DIR`), so extensions/skills baked into the
+    image are no longer shadowed. pi auto-selects the local model (no default
+    needed). Removed `ANON_PI_AGENT_MOUNT` and the per-session seed copy.
+  - README + `Dockerfile.pi`: document that extensions, skills, and their services
+    (e.g. `pi-webveil` + searxng) belong in the image, installed via `pi install`.
+  - Ship a worked `examples/Dockerfile.pi-webveil`: pi + pi-webveil + a local
+    SearXNG over a Unix socket (http-socket, json+limiter:false, `unix:` baseUrl,
+    `egress: direct`), started by an entrypoint that then execs anon-pi's command.
+    It documents why the usual local-SearXNG anonymity caveat does not apply
+    in-jail (netcage forces every process's egress through the proxy).
+
+### Patch Changes
+
+- 0f8f76c: Make the missing-`ANON_PI_IMAGE` error copy-pasteable. The previous version
+  printed an indented `Dockerfile.pi` heredoc, so pasting it baked leading spaces
+  into the file and broke the `EOF` terminator. Now the error points at the
+  `Dockerfile.pi` that ships with the package (resolved to its real absolute path)
+  and emits a flush-left `podman build` + `export` you can paste as-is.
+
 ## 0.1.1
 
 ### Patch Changes
