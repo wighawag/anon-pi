@@ -2,15 +2,15 @@ import {describe, it, expect} from 'vitest';
 import {
 	AnonPiError,
 	buildRunPlan,
-	DEFAULT_CONTAINER_AGENT_DIR,
+	CONTAINER_SEED_DIR,
 	envFromProcess,
-	PI_AGENT_DIR_ENV,
-	resolveAgentMount,
+	hostPortKey,
+	pickProviderForLlm,
 	resolveAnonPiHome,
 	resolveConfigSeed,
-	sessionAgentDir,
-	sessionId,
+	resolveSourceModelsPath,
 	type AnonPiEnv,
+	type PiModelsFile,
 } from '../src/index.js';
 
 const base: AnonPiEnv = {
@@ -19,9 +19,8 @@ const base: AnonPiEnv = {
 	llmDirect: '192.168.1.150:8080',
 };
 
-const seedAlways = () => true;
-const sessionAbsent = () => false;
-const sessionPresent = () => true;
+const seedPresent = () => true;
+const seedAbsent = () => false;
 
 describe('path resolution', () => {
 	it('defaults the anon-pi home to ~/.config/anon-pi', () => {
@@ -47,46 +46,112 @@ describe('path resolution', () => {
 	});
 });
 
-describe('session identity keyed to the absolute workdir', () => {
-	it('is stable for the same path', () => {
-		expect(sessionId('/a/b')).toBe(sessionId('/a/b'));
-	});
-
-	it('differs for different paths', () => {
-		expect(sessionId('/a/b')).not.toBe(sessionId('/a/c'));
-	});
-
-	it('is a 16-char hex slice', () => {
-		expect(sessionId('/a/b')).toMatch(/^[0-9a-f]{16}$/);
-	});
-
-	it('places the session agent dir under <home>/sessions/<id>/agent', () => {
-		const dir = sessionAgentDir(base, '/work/recon');
-		expect(dir).toBe(
-			`/home/u/.config/anon-pi/sessions/${sessionId('/work/recon')}/agent`,
+describe('hostPortKey (ANON_PI_LLM vs provider baseUrl matching)', () => {
+	it('strips scheme and path so the LLM value matches a baseUrl', () => {
+		expect(hostPortKey('192.168.1.150:8080')).toBe('192.168.1.150:8080');
+		expect(hostPortKey('http://192.168.1.150:8080/v1')).toBe(
+			'192.168.1.150:8080',
 		);
+	});
+
+	it('lowercases and drops user:pass@', () => {
+		expect(hostPortKey('https://User:Pass@Host:1234/x')).toBe('host:1234');
+	});
+
+	it('handles a host with no port', () => {
+		expect(hostPortKey('http://model.local/v1')).toBe('model.local');
+	});
+});
+
+describe('pickProviderForLlm (import selection)', () => {
+	const host: PiModelsFile = {
+		providers: {
+			etherplay: {
+				api: 'anthropic-messages',
+				apiKey: 'REALSECRET123',
+				baseUrl: 'https://claude.example.io',
+				models: [{id: 'x'}],
+			},
+			llamacpp: {
+				api: 'openai-completions',
+				apiKey: 'none',
+				baseUrl: 'http://192.168.1.150:8080/v1',
+				models: [{id: 'a'}, {id: 'b'}],
+			},
+		},
+	};
+
+	it('picks ONLY the provider whose baseUrl serves ANON_PI_LLM', () => {
+		const r = pickProviderForLlm(host, '192.168.1.150:8080');
+		expect(r.name).toBe('llamacpp');
+		expect(Object.keys(r.models.providers ?? {})).toEqual(['llamacpp']);
+		// the paid/real-key provider is NOT carried into the seed
+		expect(r.models.providers?.etherplay).toBeUndefined();
+	});
+
+	it('carries the matched provider verbatim (its models included)', () => {
+		const r = pickProviderForLlm(host, '192.168.1.150:8080');
+		expect(r.models.providers?.llamacpp?.models).toHaveLength(2);
+		expect(r.models.providers?.llamacpp?.baseUrl).toBe(
+			'http://192.168.1.150:8080/v1',
+		);
+	});
+
+	it('does not flag a benign local apiKey as real', () => {
+		const r = pickProviderForLlm(host, '192.168.1.150:8080');
+		expect(r.apiKeyLooksReal).toBe(false);
+	});
+
+	it('flags a real-looking apiKey on the matched provider', () => {
+		const r = pickProviderForLlm(
+			{providers: {p: {baseUrl: 'http://10.0.0.5:1/v1', apiKey: 'sk-abc123'}}},
+			'10.0.0.5:1',
+		);
+		expect(r.apiKeyLooksReal).toBe(true);
+	});
+
+	it('throws AnonPiError (listing providers) when nothing matches', () => {
+		expect(() => pickProviderForLlm(host, '10.9.9.9:9999')).toThrow(
+			AnonPiError,
+		);
+		try {
+			pickProviderForLlm(host, '10.9.9.9:9999');
+		} catch (e) {
+			const msg = (e as Error).message;
+			expect(msg).toContain('10.9.9.9:9999');
+			expect(msg).toContain('llamacpp'); // lists known providers
+		}
+	});
+});
+
+describe('resolveSourceModelsPath (import reads FROM)', () => {
+	it('defaults to ~/.pi/agent/models.json', () => {
+		expect(resolveSourceModelsPath(base)).toBe('/home/u/.pi/agent/models.json');
+	});
+
+	it('honours PI_CODING_AGENT_DIR', () => {
+		expect(resolveSourceModelsPath({...base, piAgentDir: '/opt/pi'})).toBe(
+			'/opt/pi/models.json',
+		);
+	});
+
+	it('honours ANON_PI_SOURCE_MODELS override', () => {
+		expect(
+			resolveSourceModelsPath({...base, sourceModels: '/x/models.json'}),
+		).toBe('/x/models.json');
 	});
 });
 
 describe('buildRunPlan required inputs', () => {
 	it('throws AnonPiError when ANON_PI_IMAGE is missing', () => {
-		expect(() =>
-			buildRunPlan({...base, image: ''}, '/w', seedAlways, sessionAbsent),
-		).toThrow(AnonPiError);
+		expect(() => buildRunPlan({...base, image: ''}, '/w', seedPresent)).toThrow(
+			/ANON_PI_IMAGE/,
+		);
 	});
 
 	it('throws AnonPiError when ANON_PI_LLM is missing', () => {
 		expect(() =>
-			buildRunPlan({...base, llmDirect: ''}, '/w', seedAlways, sessionAbsent),
-		).toThrow(AnonPiError);
-	});
-
-	it('error names the offending env var', () => {
-		expect(() =>
-			buildRunPlan({...base, image: ''}, '/w', seedAlways, sessionAbsent),
-		).toThrow(/ANON_PI_IMAGE/);
-		expect(() =>
-			buildRunPlan({...base, llmDirect: ''}, '/w', seedAlways, sessionAbsent),
+			buildRunPlan({...base, llmDirect: ''}, '/w', seedPresent),
 		).toThrow(/ANON_PI_LLM/);
 	});
 
@@ -96,55 +161,47 @@ describe('buildRunPlan required inputs', () => {
 			buildRunPlan(
 				{...base, image: '', dockerfilePath: '/pkg/Dockerfile.pi'},
 				'/w',
-				seedAlways,
-				sessionAbsent,
+				seedPresent,
 			);
 		} catch (e) {
 			msg = (e as Error).message;
 		}
-		// The shell commands must have NO leading whitespace, else a paste breaks
-		// (an indented heredoc would bake spaces into the Dockerfile / EOF).
 		for (const line of msg.split('\n')) {
 			if (line.startsWith('podman ') || line.startsWith('export ')) continue;
 			expect(/^\s+(podman|export)\b/.test(line)).toBe(false);
 		}
 		expect(msg).toContain('podman build');
 		expect(msg).toContain('/pkg/Dockerfile.pi');
-		expect(msg).not.toContain("<<'EOF'"); // no fragile heredoc
+		expect(msg).not.toContain("<<'EOF'");
 	});
 });
 
-describe('buildRunPlan missing seed (never auto-populate)', () => {
-	it('throws naming the seed path and telling the user to populate it', () => {
-		const missingSeed = () => false;
-		expect(() =>
-			buildRunPlan(base, '/work/recon', missingSeed, sessionAbsent),
-		).toThrow(AnonPiError);
+describe('buildRunPlan missing seed models.json', () => {
+	it('throws naming the models.json path and pointing at `anon-pi import`', () => {
+		expect(() => buildRunPlan(base, '/work/recon', seedAbsent)).toThrow(
+			AnonPiError,
+		);
 		try {
-			buildRunPlan(base, '/work/recon', missingSeed, sessionAbsent);
+			buildRunPlan(base, '/work/recon', seedAbsent);
 		} catch (e) {
 			const msg = (e as Error).message;
-			expect(msg).toContain('/home/u/.config/anon-pi/agent');
-			expect(msg.toLowerCase()).toContain('never populates it');
-			expect(msg).toContain('trust.json');
+			expect(msg).toContain('/home/u/.config/anon-pi/agent/models.json');
+			expect(msg).toContain('anon-pi import');
 		}
 	});
-});
 
-describe('buildRunPlan seed decision (reuse if present, seed if absent)', () => {
-	it('needsSeed=true when the session dir is absent', () => {
-		const plan = buildRunPlan(base, '/work/recon', seedAlways, sessionAbsent);
-		expect(plan.needsSeed).toBe(true);
-	});
-
-	it('needsSeed=false when the session dir already exists (resume)', () => {
-		const plan = buildRunPlan(base, '/work/recon', seedAlways, sessionPresent);
-		expect(plan.needsSeed).toBe(false);
+	it('checks the models.json path (not the dir) for existence', () => {
+		let checked = '';
+		buildRunPlan(base, '/work/recon', (p) => {
+			checked = p;
+			return true;
+		});
+		expect(checked).toBe('/home/u/.config/anon-pi/agent/models.json');
 	});
 });
 
 describe('buildRunPlan netcage argv', () => {
-	const plan = buildRunPlan(base, '/work/recon', seedAlways, sessionAbsent);
+	const plan = buildRunPlan(base, '/work/recon', seedPresent);
 
 	it('starts with run + the proxy default', () => {
 		expect(plan.netcageArgs.slice(0, 3)).toEqual([
@@ -158,8 +215,7 @@ describe('buildRunPlan netcage argv', () => {
 		const p = buildRunPlan(
 			{...base, proxy: 'socks5h://10.0.0.5:9050'},
 			'/w',
-			seedAlways,
-			sessionAbsent,
+			seedPresent,
 		);
 		expect(p.netcageArgs[2]).toBe('socks5h://10.0.0.5:9050');
 	});
@@ -168,7 +224,6 @@ describe('buildRunPlan netcage argv', () => {
 		const i = plan.netcageArgs.indexOf('--allow-direct');
 		expect(i).toBeGreaterThan(-1);
 		expect(plan.netcageArgs[i + 1]).toBe('192.168.1.150:8080');
-		// exactly one --allow-direct
 		expect(plan.netcageArgs.filter((a) => a === '--allow-direct')).toHaveLength(
 			1,
 		);
@@ -182,78 +237,25 @@ describe('buildRunPlan netcage argv', () => {
 		expect(plan.netcageArgs).toContain('/work/recon');
 	});
 
-	it('mounts the seeded session config at the default mount and points pi at it', () => {
-		expect(plan.agentMount).toBe(DEFAULT_CONTAINER_AGENT_DIR);
+	it('mounts the seed READ-ONLY at the neutral seed dir (not as the agent dir)', () => {
 		expect(plan.netcageArgs).toContain(
-			`${plan.sessionAgentDir}:${DEFAULT_CONTAINER_AGENT_DIR}`,
+			`${plan.configSeed}:${CONTAINER_SEED_DIR}:ro`,
 		);
-		expect(plan.netcageArgs).toContain(
-			`${PI_AGENT_DIR_ENV}=${DEFAULT_CONTAINER_AGENT_DIR}`,
-		);
+		// It must NOT set PI_CODING_AGENT_DIR or mount over the agent dir, else it
+		// would shadow the image's extensions.
+		expect(plan.netcageArgs.join(' ')).not.toContain('PI_CODING_AGENT_DIR');
 	});
 
-	it('ends with the image then the pi command', () => {
-		expect(plan.netcageArgs.slice(-2)).toEqual(['my/pi:tag', 'pi']);
-	});
-
-	it('does NOT mount the canonical seed into the container (it is read-only, copy-only)', () => {
-		const mountsSeed = plan.netcageArgs.some((a) =>
-			a.startsWith(`${plan.configSeed}:`),
-		);
-		expect(mountsSeed).toBe(false);
-	});
-});
-
-describe('agent-mount override (ANON_PI_AGENT_MOUNT, option 3)', () => {
-	it('defaults to /opt/pi-agent', () => {
-		expect(resolveAgentMount(base)).toBe('/opt/pi-agent');
-		expect(resolveAgentMount(base)).toBe(DEFAULT_CONTAINER_AGENT_DIR);
-	});
-
-	it('honours an absolute override (e.g. a root image ~/.pi/agent)', () => {
-		expect(resolveAgentMount({...base, agentMount: '/root/.pi/agent'})).toBe(
-			'/root/.pi/agent',
-		);
-	});
-
-	it('threads the override into BOTH the -v target and the env var, in lockstep', () => {
-		const plan = buildRunPlan(
-			{...base, agentMount: '/root/.pi/agent'},
-			'/work/recon',
-			seedAlways,
-			sessionAbsent,
-		);
-		expect(plan.agentMount).toBe('/root/.pi/agent');
-		expect(plan.netcageArgs).toContain(
-			`${plan.sessionAgentDir}:/root/.pi/agent`,
-		);
-		expect(plan.netcageArgs).toContain(`${PI_AGENT_DIR_ENV}=/root/.pi/agent`);
-	});
-
-	it('rejects a ~-relative mount (podman does not expand ~)', () => {
-		expect(() =>
-			resolveAgentMount({...base, agentMount: '~/.pi/agent'}),
-		).toThrow(AnonPiError);
-		expect(() =>
-			buildRunPlan(
-				{...base, agentMount: '~/.pi/agent'},
-				'/w',
-				seedAlways,
-				sessionAbsent,
-			),
-		).toThrow(/ABSOLUTE/);
-	});
-
-	it('rejects a relative mount', () => {
-		expect(() => resolveAgentMount({...base, agentMount: 'pi-agent'})).toThrow(
-			AnonPiError,
-		);
-	});
-
-	it('treats an empty override as unset (falls back to default)', () => {
-		expect(resolveAgentMount({...base, agentMount: ''})).toBe(
-			DEFAULT_CONTAINER_AGENT_DIR,
-		);
+	it('runs pi via a copy-then-exec shell step so the image config survives', () => {
+		// ... IMAGE sh -c '<copy>; exec pi'
+		const i = plan.netcageArgs.indexOf('my/pi:tag');
+		expect(i).toBeGreaterThan(-1);
+		expect(plan.netcageArgs[i + 1]).toBe('sh');
+		expect(plan.netcageArgs[i + 2]).toBe('-c');
+		const cmd = plan.netcageArgs[i + 3];
+		expect(cmd).toContain('cp /anon-pi-seed/models.json');
+		expect(cmd).toContain('$HOME/.pi/agent');
+		expect(cmd).toContain('exec pi');
 	});
 });
 
@@ -267,7 +269,8 @@ describe('envFromProcess mapping', () => {
 			ANON_PI_HOME: '/ah',
 			ANON_PI_CONFIG: '/seed',
 			XDG_CONFIG_HOME: '/xdg',
-			ANON_PI_AGENT_MOUNT: '/root/.pi/agent',
+			ANON_PI_SOURCE_MODELS: '/src/models.json',
+			PI_CODING_AGENT_DIR: '/opt/pi',
 		});
 		expect(env).toMatchObject({
 			home: '/home/z',
@@ -277,7 +280,8 @@ describe('envFromProcess mapping', () => {
 			anonPiHome: '/ah',
 			configSeed: '/seed',
 			xdgConfigHome: '/xdg',
-			agentMount: '/root/.pi/agent',
+			sourceModels: '/src/models.json',
+			piAgentDir: '/opt/pi',
 		});
 	});
 });

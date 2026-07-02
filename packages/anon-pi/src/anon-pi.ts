@@ -18,7 +18,6 @@
 //   - Session identity = the ABSOLUTE workdir path (hashed). Same folder resumes
 //     the same session config+state; reseed is manual (delete the session dir).
 
-import {createHash} from 'node:crypto';
 import {existsSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {dirname, isAbsolute, join, resolve} from 'node:path';
@@ -28,16 +27,28 @@ import {fileURLToPath} from 'node:url';
 export const CONTAINER_WORKDIR = '/work';
 
 /**
- * The DEFAULT container path the seeded pi config is mounted at (the pi global).
- * Absolute and image-independent: both podman (the -v target) and pi (the
- * PI_CODING_AGENT_DIR env) agree on it with no home-resolution guessing. A user
- * who knows their image's home can override it (ANON_PI_AGENT_MOUNT) to the
- * standard `~/.pi/agent` location, e.g. /root/.pi/agent for a root image.
+ * Where the seed (just models.json) is mounted read-only in the container. The
+ * run command copies models.json FROM here INTO the container's own
+ * ~/.pi/agent, so it LAYERS onto the image's config (extensions/skills the image
+ * installed survive) instead of replacing it. This is why we mount+copy rather
+ * than mount-as-agent-dir: mounting over ~/.pi/agent would shadow the image's
+ * extensions.
  */
-export const DEFAULT_CONTAINER_AGENT_DIR = '/opt/pi-agent';
+export const CONTAINER_SEED_DIR = '/anon-pi-seed';
 
-/** The pi env var that overrides its config dir (see pi config.ts getAgentDir). */
-export const PI_AGENT_DIR_ENV = 'PI_CODING_AGENT_DIR';
+/**
+ * The container command: copy the seeded models.json into pi's own config dir
+ * (creating it if absent), then exec pi. `$HOME/.pi/agent` is pi's default
+ * config dir when PI_CODING_AGENT_DIR is unset, i.e. exactly where the image
+ * installed pi + any extensions, so the copy augments rather than shadows.
+ */
+export const CONTAINER_RUN_CMD =
+	`mkdir -p "$HOME/.pi/agent" && ` +
+	`cp ${CONTAINER_SEED_DIR}/models.json "$HOME/.pi/agent/models.json" && ` +
+	`exec pi`;
+
+/** The single file the seed carries: pi's model/provider registry. */
+export const MODELS_FILE = 'models.json';
 
 /** Inputs resolved from the environment + argv, injected so this stays pure. */
 export interface AnonPiEnv {
@@ -56,34 +67,24 @@ export interface AnonPiEnv {
 	/** XDG_CONFIG_HOME, if set (used to derive the default anon-pi home). */
 	xdgConfigHome?: string;
 	/**
-	 * The ABSOLUTE container path to mount the seeded config at (and point pi's
-	 * PI_CODING_AGENT_DIR at). Default /opt/pi-agent. Set it to your image's real
-	 * `~/.pi/agent` (e.g. /root/.pi/agent) if you want the standard location.
-	 * MUST be absolute: podman does not expand `~`, so a `~`-relative value would
-	 * be mounted literally. Rejected if it starts with `~` or is not absolute.
-	 */
-	agentMount?: string;
-	/**
 	 * Absolute path to the Dockerfile.pi that ships with anon-pi, used only to
 	 * make the missing-image error's build command concrete. cli.ts resolves it
 	 * from import.meta.url; when absent the message falls back to a bare
 	 * `Dockerfile.pi`.
 	 */
 	dockerfilePath?: string;
+	/** `import` source models.json override (ANON_PI_SOURCE_MODELS). */
+	sourceModels?: string;
+	/** The host pi agent dir override (PI_CODING_AGENT_DIR), used to find models.json. */
+	piAgentDir?: string;
 }
 
 /** The fully-resolved run plan cli.ts executes. */
 export interface RunPlan {
 	/** Absolute workdir on the host (mounted at /work). */
 	workdir: string;
-	/** The per-session seeded config dir on the host (mounted as the pi global). */
-	sessionAgentDir: string;
-	/** The canonical seed dir to copy FROM (read-only by convention). */
+	/** The seed dir on the host (holds models.json), mounted read-only at /anon-pi-seed. */
 	configSeed: string;
-	/** The absolute container path the session config is mounted at (== pi's config dir). */
-	agentMount: string;
-	/** True iff the session dir does not exist yet and must be seeded from configSeed. */
-	needsSeed: boolean;
 	/** The argv passed to `netcage` (after the `netcage` program name). */
 	netcageArgs: string[];
 }
@@ -93,33 +94,7 @@ const DEFAULT_PROXY = 'socks5h://127.0.0.1:9050';
 /** A user-facing error whose message is meant to be printed verbatim (no stack). */
 export class AnonPiError extends Error {}
 
-/**
- * Resolve the container agent-mount path: ANON_PI_AGENT_MOUNT or the default.
- * It MUST be an absolute container path, because it is BOTH the podman `-v`
- * target AND pi's PI_CODING_AGENT_DIR, and podman (unlike pi) does not expand
- * `~`. A `~`-relative or relative value is rejected loudly rather than silently
- * mounted at a literal `~` directory or a cwd-relative path.
- */
-export function resolveAgentMount(env: AnonPiEnv): string {
-	const raw =
-		env.agentMount && env.agentMount.trim() !== ''
-			? env.agentMount.trim()
-			: DEFAULT_CONTAINER_AGENT_DIR;
-	if (raw.startsWith('~')) {
-		throw new AnonPiError(
-			`anon-pi: ANON_PI_AGENT_MOUNT must be an ABSOLUTE container path, not \`${raw}\`. ` +
-				'podman does not expand `~`; use the concrete home, e.g. /root/.pi/agent.',
-		);
-	}
-	if (!raw.startsWith('/')) {
-		throw new AnonPiError(
-			`anon-pi: ANON_PI_AGENT_MOUNT must be an ABSOLUTE container path, not \`${raw}\` (it is both the mount target and pi's config dir).`,
-		);
-	}
-	return raw;
-}
-
-/** Resolve the anon-pi home dir (holds the canonical seed + per-session state). */
+/** Resolve the anon-pi home dir (holds the seed). */
 export function resolveAnonPiHome(env: AnonPiEnv): string {
 	if (env.anonPiHome) return resolve(env.anonPiHome);
 	const base =
@@ -129,44 +104,134 @@ export function resolveAnonPiHome(env: AnonPiEnv): string {
 	return join(base, 'anon-pi');
 }
 
-/** The canonical seed dir (copied FROM, never mounted). */
+/** The seed dir (holds models.json), mounted read-only into the container. */
 export function resolveConfigSeed(env: AnonPiEnv): string {
 	if (env.configSeed) return resolve(env.configSeed);
 	return join(resolveAnonPiHome(env), 'agent');
 }
 
 /**
- * Session id = a stable short hash of the ABSOLUTE workdir path, so re-running
- * anon-pi on the same folder resumes the same session config+state, and moving
- * the folder starts a new session (documented, accepted).
+ * Normalise a proxy-less host:port key from an ANON_PI_LLM value or a provider
+ * baseUrl, so `192.168.1.150:8080` matches `http://192.168.1.150:8080/v1`.
+ * Returns `host` (no port) or `host:port`, lowercased, scheme/path stripped.
  */
-export function sessionId(absWorkdir: string): string {
-	return createHash('sha256').update(absWorkdir).digest('hex').slice(0, 16);
+export function hostPortKey(value: string): string {
+	let v = value.trim();
+	const scheme = v.indexOf('://');
+	if (scheme >= 0) v = v.slice(scheme + 3);
+	v = v.split('/')[0]; // drop path (/v1, ...)
+	v = v.replace(/^[^@]*@/, ''); // drop any user:pass@
+	return v.toLowerCase();
 }
 
-/** The per-session seeded config dir on the host for a given workdir. */
-export function sessionAgentDir(env: AnonPiEnv, absWorkdir: string): string {
-	return join(
-		resolveAnonPiHome(env),
-		'sessions',
-		sessionId(absWorkdir),
-		'agent',
-	);
+/**
+ * A pi provider entry (as it appears under models.json `providers[name]`). Only
+ * the fields anon-pi reads are typed; the rest is preserved verbatim.
+ */
+export interface PiProvider {
+	baseUrl?: string;
+	apiKey?: string;
+	api?: string;
+	models?: unknown[];
+	[k: string]: unknown;
+}
+
+/** Parsed shape of a pi models.json (only `providers` is required). */
+export interface PiModelsFile {
+	providers?: Record<string, PiProvider>;
+	[k: string]: unknown;
+}
+
+/** The result of picking the ANON_PI_LLM provider out of a host models.json. */
+export interface ImportResult {
+	/** The provider key (e.g. "llamacpp-router"). */
+	name: string;
+	/** The barebones models.json to write (just the matched provider). */
+	models: PiModelsFile;
+	/** True if the matched provider's apiKey looks like a REAL secret (warn). */
+	apiKeyLooksReal: boolean;
+}
+
+/** apiKey values that are NOT real secrets (safe to carry into the seed). */
+const BENIGN_API_KEYS = new Set(['', 'none', 'ollama', 'no-key', 'local']);
+
+/**
+ * PURE: given a parsed host models.json and the ANON_PI_LLM value, select the
+ * provider whose baseUrl points at that host:port and return a barebones
+ * models.json carrying ONLY that provider (verbatim, with its models). Throws
+ * AnonPiError if nothing matches. Carries no other provider (so etherplay /
+ * google / paid API keys never enter the seed).
+ */
+export function pickProviderForLlm(
+	hostModels: PiModelsFile,
+	llmDirect: string,
+): ImportResult {
+	const providers = hostModels.providers ?? {};
+	const want = hostPortKey(llmDirect);
+
+	const matches: string[] = [];
+	for (const [name, p] of Object.entries(providers)) {
+		if (!p || typeof p !== 'object' || !p.baseUrl) continue;
+		if (hostPortKey(p.baseUrl) === want) matches.push(name);
+	}
+
+	if (matches.length === 0) {
+		const known = Object.entries(providers)
+			.filter(([, p]) => p && p.baseUrl)
+			.map(([n, p]) => `  ${n}: ${p.baseUrl}`)
+			.join('\n');
+		throw new AnonPiError(
+			`anon-pi import: no provider in your host models.json points at ANON_PI_LLM (${want}).\n` +
+				(known
+					? `Providers found:\n${known}\n`
+					: 'No providers with a baseUrl were found.\n') +
+				'Set ANON_PI_LLM to the host:port of a provider above, or add that provider to pi first.',
+		);
+	}
+
+	const name = matches[0];
+	const provider = providers[name];
+	const key = (provider.apiKey ?? '').trim().toLowerCase();
+	const apiKeyLooksReal = !BENIGN_API_KEYS.has(key);
+
+	return {
+		name,
+		models: {providers: {[name]: provider}},
+		apiKeyLooksReal,
+	};
+}
+
+/**
+ * The default host models.json path `import` reads FROM. Overridable via
+ * ANON_PI_SOURCE_MODELS; defaults to the real pi config (~/.pi/agent/models.json
+ * under the container-less host HOME, or PI_CODING_AGENT_DIR if the user set it).
+ */
+export function resolveSourceModelsPath(env: AnonPiEnv): string {
+	if (env.sourceModels && env.sourceModels.trim() !== '') {
+		return resolve(env.sourceModels);
+	}
+	const agentDir =
+		env.piAgentDir && env.piAgentDir.trim() !== ''
+			? env.piAgentDir
+			: join(env.home, '.pi', 'agent');
+	return join(agentDir, MODELS_FILE);
 }
 
 /**
  * Build the run plan from the environment + the (optional) workdir arg. PURE: it
- * resolves paths and composes the netcage argv, and reports whether a seed copy
- * is needed, but performs NO filesystem writes or spawns. It THROWS AnonPiError
- * for the two hard preconditions (missing image, missing llm) so the required
- * inputs fail loud; the missing-SEED check is left to cli.ts (it needs a real
- * `existsSync`), but `needsSeed` is derived from the injected `seedExists`.
+ * resolves paths and composes the netcage argv, performing NO filesystem writes
+ * or spawns. It THROWS AnonPiError for the hard preconditions (missing image,
+ * missing llm, missing seed models.json) so the required inputs fail loud.
+ *
+ * The seed (models.json) is mounted READ-ONLY at /anon-pi-seed and copied into
+ * the container's own ~/.pi/agent by the run command, so it LAYERS onto the
+ * image's config (image-installed extensions/skills survive) rather than
+ * shadowing it.
  */
 export function buildRunPlan(
 	env: AnonPiEnv,
 	workdirArg: string | undefined,
-	seedExists: (dir: string) => boolean,
-	sessionExists: (dir: string) => boolean,
+	seedModelsExists: (modelsJsonPath: string) => boolean,
 ): RunPlan {
 	if (!env.image || env.image.trim() === '') {
 		// dockerfilePath is injected (cli.ts resolves the shipped Dockerfile.pi via
@@ -203,21 +268,21 @@ export function buildRunPlan(
 	const workdir = isAbsolute(raw) ? raw : resolve(raw);
 
 	const configSeed = resolveConfigSeed(env);
-	if (!seedExists(configSeed)) {
+	const modelsJson = join(configSeed, MODELS_FILE);
+	if (!seedModelsExists(modelsJson)) {
 		throw new AnonPiError(
-			`anon-pi: canonical config not found at ${configSeed}.\n` +
-				'anon-pi never populates it for you. Create it yourself with the pi config you want\n' +
-				'(anon accounts, chosen models/skills, and a trust.json that trusts /work), e.g.:\n' +
-				`  mkdir -p ${configSeed}\n` +
-				`  cp -a ~/.pi/agent/. ${configSeed}/    # then remove any identity you do not want anonymized\n` +
-				'See the README (Populating the seed) for the trust.json requirement.',
+			`anon-pi: no seed models.json at ${modelsJson}.\n` +
+				'\n' +
+				'anon-pi never populates it for you. Generate it from your local model:\n' +
+				'\n' +
+				'anon-pi import\n' +
+				'\n' +
+				'`import` reads your host ~/.pi/agent/models.json, picks the provider that\n' +
+				'serves ANON_PI_LLM, and writes just that provider here (no auth for other\n' +
+				'providers, no sessions, no identity). See the README (Populating the seed).',
 		);
 	}
 
-	const sessionDir = sessionAgentDir(env, workdir);
-	const needsSeed = !sessionExists(sessionDir);
-
-	const agentMount = resolveAgentMount(env);
 	const proxy =
 		env.proxy && env.proxy.trim() !== '' ? env.proxy : DEFAULT_PROXY;
 
@@ -231,19 +296,19 @@ export function buildRunPlan(
 		'-v',
 		workdir, // netcage defaults a target-less -v to /work and cwd to /work
 		'-v',
-		`${sessionDir}:${agentMount}`,
-		'-e',
-		`${PI_AGENT_DIR_ENV}=${agentMount}`,
+		// Mount the seed READ-ONLY at a neutral path; the run command copies
+		// models.json into the container's own ~/.pi/agent so image extensions
+		// survive (see CONTAINER_RUN_CMD).
+		`${configSeed}:${CONTAINER_SEED_DIR}:ro`,
 		env.image,
-		'pi',
+		'sh',
+		'-c',
+		CONTAINER_RUN_CMD,
 	];
 
 	return {
 		workdir,
-		sessionAgentDir: sessionDir,
 		configSeed,
-		agentMount,
-		needsSeed,
 		netcageArgs,
 	};
 }
@@ -282,8 +347,9 @@ export function envFromProcess(
 		image: penv.ANON_PI_IMAGE,
 		llmDirect: penv.ANON_PI_LLM,
 		xdgConfigHome: penv.XDG_CONFIG_HOME,
-		agentMount: penv.ANON_PI_AGENT_MOUNT,
 		dockerfilePath: shippedDockerfilePath(),
+		sourceModels: penv.ANON_PI_SOURCE_MODELS,
+		piAgentDir: penv.PI_CODING_AGENT_DIR,
 	};
 }
 
@@ -291,33 +357,37 @@ export function envFromProcess(
 export const HELP = `anon-pi - launch pi inside a netcage (anonymized egress + one direct local model)
 
 USAGE
-  anon-pi [WORKDIR]
+  anon-pi [WORKDIR]     launch pi jailed, working in WORKDIR (default: cwd)
+  anon-pi import        write the seed models.json from your local model
 
-  WORKDIR   the host folder pi works in (mounted at /work). Defaults to the
-            current directory. The session config+state is keyed to this folder.
+  WORKDIR   the host folder pi works in (mounted at ${CONTAINER_WORKDIR}; pi's cwd). Files pi
+            writes there land on the host.
 
 WHAT IT DOES
-  Seeds a per-workdir writable copy of your canonical anon-pi config into
-  ~/.config/anon-pi/sessions/<hash>/agent, mounts it as pi's global config
-  (${PI_AGENT_DIR_ENV}=<mount>, default ${DEFAULT_CONTAINER_AGENT_DIR}), mounts WORKDIR at
-  ${CONTAINER_WORKDIR}, opens ONE direct hole to your local model, and runs pi with all other
-  egress forced through the socks5h proxy, fail-closed. Requires \`netcage\`.
+  Runs pi inside netcage with all web/DNS egress forced through the socks5h
+  proxy (fail-closed) and ONE direct hole to your local model (ANON_PI_LLM).
+  The seed models.json is mounted read-only and COPIED into the container's own
+  ~/.pi/agent at start, so it layers onto the image's config: extensions and
+  skills you baked into the image survive. Requires \`netcage\`.
+
+import
+  Reads your host ~/.pi/agent/models.json, picks the provider whose baseUrl
+  serves ANON_PI_LLM, and writes JUST that provider to the seed
+  (<ANON_PI_CONFIG>/models.json). No other provider's API keys, no sessions, no
+  identity. Re-run with --force to overwrite an existing seed.
 
 ENVIRONMENT
-  ANON_PI_IMAGE   (required) image with \`pi\` on PATH. No image yet? Running
-                  anon-pi without it prints a ready-to-build Dockerfile.pi
-                  recipe; see the README (Providing a pi image).
+  ANON_PI_IMAGE   (required for run) image with \`pi\` on PATH. No image yet?
+                  Running anon-pi without it prints a ready-to-build
+                  Dockerfile.pi recipe; see the README (Providing a pi image).
   ANON_PI_LLM     (required) RFC1918/link-local IP[:port] of the local model
   ANON_PI_PROXY   socks5h URL (default ${DEFAULT_PROXY})
   ANON_PI_HOME    anon-pi home (default $XDG_CONFIG_HOME/anon-pi or ~/.config/anon-pi)
-  ANON_PI_CONFIG  canonical seed dir (default <ANON_PI_HOME>/agent)
-  ANON_PI_AGENT_MOUNT  absolute container path for pi's config (default
-                  ${DEFAULT_CONTAINER_AGENT_DIR}; set to your image's ~/.pi/agent, e.g. /root/.pi/agent)
+  ANON_PI_CONFIG  seed dir holding models.json (default <ANON_PI_HOME>/agent)
+  ANON_PI_SOURCE_MODELS  (import) host models.json to read (default ~/.pi/agent/models.json)
 
 RESEED
-  Reseed is manual: delete the session dir, e.g.
-    rm -rf ~/.config/anon-pi/sessions/<hash>/agent
-  and the next run re-seeds it from the canonical config.
+  anon-pi import --force  regenerates the seed models.json.
 
 PLATFORM
   Linux only (via netcage's netns/nft jail). On macOS/Windows it works only

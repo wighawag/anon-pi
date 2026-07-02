@@ -5,8 +5,10 @@
 # package, plus the handful of tools pi's built-in bash/grep/find expect.
 #
 # Note: unlike the upstream `Dockerfile.pi`, this image sets NO ENTRYPOINT and
-# NO config volume. anon-pi passes `pi` as the run command and mounts pi's config
-# itself (PI_CODING_AGENT_DIR), so the image just needs `pi` reachable on PATH.
+# NO config volume. anon-pi passes `pi` as the run command and copies just its
+# models.json into this image's ~/.pi/agent at start, so the image just needs
+# `pi` reachable on PATH. Anything else you want in the anon session (extensions,
+# skills, and their services) belongs HERE, in the image.
 #
 # Build (pin a digest for reproducibility once pushed to a registry):
 #   podman build -t localhost/anon-pi-pi:latest -f Dockerfile.pi .
@@ -19,5 +21,25 @@ RUN apt-get update \
 
 # The official pi coding agent CLI (puts `pi` on PATH).
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+
+# --- Optional: extensions + skills (the capability layer) -------------------
+# Install extensions with `pi install` (it records them in settings), NOT a
+# global npm install. Uncomment what you want in the anon persona:
+#
+#   RUN pi install npm:pi-subagents
+#   RUN pi install npm:pi-plan-mode
+#
+# Some extensions need a running service. pi-webveil, for example, uses searxng
+# for search; searxng must ALSO be installed and configured in this image, and
+# it must be happy talking out through a socks5h proxy (netcage forces all egress
+# through the proxy at runtime, DNS included). Sketch:
+#
+#   RUN pi install npm:pi-webveil
+#   # + install & configure searxng here (its own RUN steps / config), pointed
+#   #   at a proxy-only egress. See the webveil docs.
+#
+# Trust /work up front so pi does not prompt on every run (anon-pi never writes
+# this for you):
+#   RUN mkdir -p /root/.pi/agent && printf '{"/work": true}\n' > /root/.pi/agent/trust.json
 
 WORKDIR /work
