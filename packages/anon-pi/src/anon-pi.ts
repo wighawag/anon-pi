@@ -273,7 +273,22 @@ export function buildRunPlan(
 		// default would anonymize through the wrong endpoint, or fail deep in the
 		// jail with a confusing DNS error, if the guessed proxy is not actually up.
 		throw new AnonPiError(
-			'anon-pi: set ANON_PI_PROXY to your socks5h proxy (e.g. ANON_PI_PROXY=socks5h://127.0.0.1:9050 for Tor, or wherever your wireproxy/ssh -D listens). anon-pi has no default: the proxy is what makes the session anonymous, so it is never guessed.',
+			'anon-pi: set ANON_PI_PROXY to your socks5h proxy. anon-pi has no default:\n' +
+				'the proxy is what makes the session anonymous, so it is never guessed.\n' +
+				'\n' +
+				'Pick the one you run (copy-paste), then re-run anon-pi:\n' +
+				'\n' +
+				'# Tor (system tor / Tor Browser bundle default port)\n' +
+				'export ANON_PI_PROXY=socks5h://127.0.0.1:9050\n' +
+				'\n' +
+				'# wireproxy -> a WireGuard VPN (Mullvad, Proton, ...); use YOUR configured\n' +
+				'# [Socks5] BindAddress port (1080 in wireproxy examples):\n' +
+				'export ANON_PI_PROXY=socks5h://127.0.0.1:1080\n' +
+				'\n' +
+				'# an SSH dynamic-forward (ssh -D 1080 host) or any other socks5h endpoint\n' +
+				'export ANON_PI_PROXY=socks5h://127.0.0.1:1080\n' +
+				'\n' +
+				'Only socks5h:// is accepted (plain socks5:// resolves DNS locally and leaks).',
 		);
 	}
 

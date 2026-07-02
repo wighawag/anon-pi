@@ -165,6 +165,23 @@ describe('buildRunPlan required inputs', () => {
 		).toThrow(/never guessed|no default/i);
 	});
 
+	it('the missing-proxy error offers copy-paste Tor + wireproxy options', () => {
+		let msg = '';
+		try {
+			buildRunPlan({...base, proxy: ''}, '/w', seedPresent);
+		} catch (e) {
+			msg = (e as Error).message;
+		}
+		for (const line of msg.split('\n')) {
+			if (line.startsWith('export ')) continue;
+			expect(/^\s+export\b/.test(line)).toBe(false);
+		}
+		expect(msg).toContain('export ANON_PI_PROXY=socks5h://127.0.0.1:9050'); // Tor
+		expect(msg).toContain('export ANON_PI_PROXY=socks5h://127.0.0.1:1080'); // wireproxy/ssh
+		expect(msg.toLowerCase()).toContain('tor');
+		expect(msg.toLowerCase()).toContain('wireproxy');
+	});
+
 	it('missing-image error is copy-pasteable and mentions both Dockerfiles', () => {
 		let msg = '';
 		try {

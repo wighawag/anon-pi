@@ -7,4 +7,5 @@ anon-pi is an anonymity tool, so the proxy is the single most important input an
 must never be guessed: a silent default can anonymize through the wrong endpoint
 (or none) and fail confusingly deep in the jail. It now errors like
 `ANON_PI_IMAGE`/`ANON_PI_LLM` when unset, mirroring netcage, which itself refuses
-to run without `--proxy` (fail-closed).
+to run without `--proxy` (fail-closed). The error lists copy-paste `export` lines
+for the common proxies (Tor on `9050`, wireproxy/ssh -D on `1080`).
