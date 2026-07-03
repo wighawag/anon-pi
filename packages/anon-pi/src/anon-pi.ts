@@ -580,6 +580,163 @@ export type LaunchPlan =
 			netcageArgs: string[];
 	  };
 
+// --- Grammar A: the pure argv -> ParsedLaunch parser -------------------------
+//
+// A bare positional is a PROJECT; `-m` picks the machine. The CLI (cli.ts)
+// combines the ParsedLaunch with config/machine reads (proxy, llm, image, home,
+// projects root) into a LaunchIntent and runs resolveRunPlan. Kept PURE (argv
+// in -> struct out, or AnonPiError) so parsing + the reserved-name guard are
+// unit-testable; the CLI stays thin I/O.
+
+/** The machine bare `anon-pi` launches when no `-m` and no config default. */
+export const DEFAULT_MACHINE = 'default';
+
+/**
+ * A parsed grammar-A launch. `mode` is `menu` when no project/shell target was
+ * chosen (bare `anon-pi`, or `-m <machine>` / `--mount <parent>` with no
+ * project): the CLI runs the host-side menu. `pi`/`shell` carry the chosen
+ * target. `project` is a validated project name, the `.` root token, or
+ * undefined (menu / shell-at-home). `mountParent` is the `--mount` HOST parent
+ * (a path, NOT a name-namespaced token). `keep` is `--keep` (default false =>
+ * throwaway `--rm`). `piArgs` are the trailing tokens forwarded to pi (pi mode
+ * only; undefined otherwise).
+ */
+export interface ParsedLaunch {
+	mode: LaunchMode;
+	machine: string;
+	/**
+	 * True iff `-m`/`--machine` was given explicitly (so the CLI can let an
+	 * explicit `-m default` win over `config.defaultMachine`, rather than treat
+	 * the DEFAULT_MACHINE value as "unset").
+	 */
+	machineExplicit: boolean;
+	project?: string;
+	mountParent?: string;
+	keep: boolean;
+	piArgs?: string[];
+}
+
+/**
+ * PURE: parse grammar A into a ParsedLaunch. Consumes the anon-pi flags
+ * (`-m <machine>`, `--shell`, `--mount <parent>`, `--keep`/`--rm`) LEFT of the
+ * project positional; the FIRST bare positional is the project (`.` allowed as
+ * the root token). In pi mode every token AFTER the project is forwarded to pi
+ * verbatim (so `anon-pi recon -p '...'` works) — anon-pi flags must come before
+ * the project. In shell/menu mode a stray extra positional is an error (bash has
+ * no forwarded-args grammar; the menu takes no project).
+ *
+ * Validates the project name and the `-m` machine name via validateName (the
+ * reserved-name guard); `--mount <parent>` is a HOST path in its own namespace,
+ * distinct from the project-name namespace (NAME vs `--mount` exclusivity), so
+ * it is NOT name-validated here. Throws AnonPiError for an unknown option, a
+ * missing `-m`/`--mount` argument, a contradictory `--keep --rm`, or a bad name.
+ */
+export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
+	let machine = DEFAULT_MACHINE;
+	let machineSet = false;
+	let shell = false;
+	let mountParent: string | undefined;
+	let keepSeen = false;
+	let rmSeen = false;
+	let project: string | undefined;
+	let piArgs: string[] | undefined;
+
+	const fail = (msg: string): never => {
+		throw new AnonPiError(`anon-pi: ${msg}\nRun \`anon-pi --help\`.`);
+	};
+
+	let i = 0;
+	for (; i < args.length; i++) {
+		const a = args[i];
+		if (a === '-m' || a === '--machine') {
+			const v = args[++i];
+			if (v === undefined) fail(`${a} needs a machine name`);
+			machine = validateName(v as string, 'machine');
+			machineSet = true;
+			continue;
+		}
+		if (a === '--shell') {
+			shell = true;
+			continue;
+		}
+		if (a === '--mount') {
+			const v = args[++i];
+			if (v === undefined) fail('--mount needs a HOST parent path');
+			mountParent = v as string;
+			continue;
+		}
+		if (a === '--keep') {
+			keepSeen = true;
+			continue;
+		}
+		if (a === '--rm') {
+			rmSeen = true;
+			continue;
+		}
+		if (a === '.') {
+			// the root token is a valid project positional (not a name).
+			project = ROOT_TOKEN;
+			i++;
+			break;
+		}
+		if (a.startsWith('-')) {
+			fail(`unknown option: ${a}`);
+		}
+		// the first bare positional is the project.
+		project = validateName(a, 'project');
+		i++;
+		break;
+	}
+
+	if (keepSeen && rmSeen) {
+		fail('--keep and --rm are contradictory (pick one; --rm is the default)');
+	}
+
+	// tokens remaining after the project.
+	const rest = args.slice(i);
+	if (shell) {
+		if (rest.length > 0) {
+			fail(
+				`--shell takes at most one project, got extra: ${rest.join(' ')} ` +
+					'(a shell forwards no args; run pi from inside it instead)',
+			);
+		}
+		return {
+			mode: 'shell',
+			machine,
+			machineExplicit: machineSet,
+			project,
+			mountParent,
+			keep: keepSeen,
+		};
+	}
+
+	if (project === undefined) {
+		// no project + no --shell: the menu (bare, or -m/--mount with no project).
+		if (rest.length > 0) fail(`unexpected argument: ${rest[0]}`);
+		return {
+			mode: 'menu',
+			machine,
+			machineExplicit: machineSet,
+			project: undefined,
+			mountParent,
+			keep: keepSeen,
+		};
+	}
+
+	// pi mode: every token after the project is forwarded to pi verbatim.
+	if (rest.length > 0) piArgs = rest.slice();
+	return {
+		mode: 'pi',
+		machine,
+		machineExplicit: machineSet,
+		project,
+		mountParent,
+		keep: keepSeen,
+		piArgs,
+	};
+}
+
 /**
  * PURE: resolve a LaunchIntent into a LaunchPlan, composing the netcage argv for
  * every mode. Never spawns, never touches the filesystem: `homeFresh` reports
@@ -1356,57 +1513,43 @@ function isTruthy(v: string | undefined): boolean {
 }
 
 /** The --help text (kept here so it is covered by the same module). */
-export const HELP = `anon-pi - launch pi inside a netcage (anonymized egress + one direct local model)
+export const HELP = `anon-pi - run pi on anonymized, jailed machines (netcage: forced egress + one direct local model)
 
 USAGE
-  anon-pi [WORKDIR]     launch pi jailed, working in WORKDIR (default: cwd)
-  anon-pi import        seed models.json from your local model
+  anon-pi                        MENU: pick a project (pi), a shell, or a new project
+  anon-pi <project>              pi in the project (${CONTAINER_PROJECTS_ROOT}/<project>); exit pi -> host
+  anon-pi <project> <pi-args…>   forward args to pi (headless/one-shot; no TTY needed)
+  anon-pi --shell [<project>]    a jailed bash (at ~, or cd'd into <project>) - the project-hopper
+  anon-pi -m <machine> [<p>]     the same, on <machine> (its own image + home + conversations)
+  anon-pi --mount <parent> [<p>] root at a HOST parent folder instead of the projects root
+  anon-pi init                   onboard: verify your proxy, capture your local model, pick an image
+  anon-pi machine …              manage machines (create / list / set-image / rm)
 
-  WORKDIR   the host folder pi works in (mounted at ${CONTAINER_WORKDIR}; pi's cwd). Files pi
-            writes there land on the host.
+  <project>   a folder under the projects root (mounted at ${CONTAINER_PROJECTS_ROOT}; pi's cwd). \`.\` means
+              the root itself (a scratch pi at ${CONTAINER_PROJECTS_ROOT}, ${CONTAINER_MOUNT_ROOT} for --mount, or ~).
+
+  [--rm]      throwaway container this run (the DEFAULT; deleted on exit).
+  [--keep]    leave the container KEPT so its filesystem survives (apt install,
+              quit, re-enter). anon-pi finds it by netcage's managed label and
+              \`netcage start\`s it on re-entry.
 
 WHAT IT DOES
-  Runs pi inside netcage with all web/DNS egress forced through the socks5h
-  proxy (fail-closed) and ONE direct hole to your local model (ANON_PI_LLM).
-
-  STATEFUL by default: a persistent per-workdir home
-  (<ANON_PI_HOME>/state/<workdir>/agent) is mounted at the container's
-  ~/.pi/agent, so your conversations, history, settings (model choice), and any
-  extensions you \`pi install\` persist across launches. Re-running in the same
-  folder resumes it. On a FRESH home, the image's staged defaults (extensions,
-  trust) and your imported models.json are seeded in once; after that pi owns the
-  home and nothing is overwritten. Requires \`netcage\`.
-
-  --ephemeral (or ANON_PI_EPHEMERAL=1): mount NO writable state; pi writes to the
-  container's own --rm layer, gone on exit. Nothing writable touches the host,
-  no cleanup, no leftover-on-crash.
-
-  --fresh: delete this workdir's persistent state home first, so the (possibly
-  rebuilt) image's defaults + your imported models.json are re-seeded. Use it
-  after rebuilding your image to pick up new extensions/config.
-
-import
-  Reads your host ~/.pi/agent/models.json, picks the provider whose baseUrl
-  serves ANON_PI_LLM, and writes JUST that provider to the canonical seed
-  (<ANON_PI_CONFIG>/models.json). No other provider's API keys, no sessions, no
-  identity. It SEEDS a fresh home; models you later add inside pi persist and are
-  never clobbered. Re-run with --force to overwrite the canonical seed.
+  Runs pi inside netcage with all web/DNS egress forced through the socks5h proxy
+  (fail-closed) and ONE direct hole to your local model (ANON_PI_LLM). A MACHINE
+  is an image + a persistent HOST home (bind-mounted at ${CONTAINER_HOME_ROOT}) holding your pi
+  config, extensions, and conversations; the container is disposable, so \`--rm\`
+  loses nothing. Files (projects) are global by default; conversations are
+  per-machine. On a FRESH machine home the image's staged defaults + your
+  models.json are seeded in once; after that pi owns the home. Requires \`netcage\`.
 
 ENVIRONMENT
-  ANON_PI_IMAGE   (required for run) image with \`pi\` on PATH. No image yet?
-                  Running anon-pi without it prints a ready-to-build
-                  Dockerfile.pi recipe; see the README (Providing a pi image).
-  ANON_PI_LLM     (required) RFC1918/link-local IP[:port] of the local model
   ANON_PI_PROXY   (required) socks5h URL of your proxy (Tor/wireproxy/ssh -D).
                   No default: the proxy is what anonymizes, so it is never guessed.
-  ANON_PI_EPHEMERAL  set to 1 for a throwaway (non-persistent) session
-  ANON_PI_HOME    anon-pi home (default $XDG_CONFIG_HOME/anon-pi or ~/.config/anon-pi)
-  ANON_PI_CONFIG  canonical seed dir holding models.json (default <ANON_PI_HOME>/agent)
-  ANON_PI_SOURCE_MODELS  (import) host models.json to read (default ~/.pi/agent/models.json)
-
-RESET A SESSION
-  anon-pi --fresh [WORKDIR]   drop the session home and re-seed on this launch.
-  Or delete it by hand: rm -rf <ANON_PI_HOME>/state/<workdir-slug>/agent
+  ANON_PI_LLM     (required) RFC1918/link-local IP[:port] of the local model
+  ANON_PI_IMAGE   image with \`pi\` on PATH, used when a machine has no image set.
+                  No image yet? See the README (Providing a pi image).
+  ANON_PI_HOME    anon-pi workspace dir (default ~/.anon-pi; NOT under ~/.config)
+  ANON_PI_PROJECTS  projects root override (host dir mounted at ${CONTAINER_PROJECTS_ROOT})
 
 PLATFORM
   Linux only (via netcage's netns/nft jail). On macOS/Windows it works only
