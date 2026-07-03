@@ -4,11 +4,11 @@
 # bash/grep/find expect.
 #
 # HOW anon-pi USES THIS IMAGE (stateful model):
-#   anon-pi mounts a PERSISTENT per-workdir host dir at the container's
-#   ~/.pi/agent, so pi's sessions/history/settings and any extensions you
-#   `pi install` persist across launches. On a FRESH home, anon-pi seeds it once
-#   from this image's STAGING dir (/opt/anon-pi-seed/agent) + your imported
-#   models.json, then stamps a marker and never overwrites again.
+#   anon-pi mounts a machine's PERSISTENT host home at the container's /root, so
+#   pi's sessions/history/settings and any extensions you `pi install` persist
+#   across launches. On a FRESH home, anon-pi seeds ~/.pi/agent once from this
+#   image's STAGING dir (/opt/anon-pi-seed/agent) + your imported models.json,
+#   then stamps a marker and never overwrites again.
 #
 #   So image defaults (extensions, trust.json) go in the STAGING dir, NOT in
 #   ~/.pi/agent (which is the mount and would be shadowed). Set
@@ -27,13 +27,23 @@ RUN apt-get update \
 # The official pi coding agent CLI (puts `pi` on PATH).
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
+# Ensure /root has base shell dotfiles present in the image. The machine home
+# bind-mounts over /root, so on a FRESH home these are the defaults the seed can
+# promote / a shell can fall back to (a bare debian /root may omit .bashrc).
+RUN for f in .bashrc .profile; do \
+		[ -f "/root/$f" ] || { [ -f "/etc/skel/$f" ] && cp "/etc/skel/$f" "/root/$f"; }; \
+	done; true
+
 # The staging dir anon-pi promotes into a fresh home on first launch.
 ENV ANON_PI_STAGE=/opt/anon-pi-seed/agent
 RUN mkdir -p "$ANON_PI_STAGE"
 
-# Trust /work so pi does not prompt on the mounted project (staged, so it lands
-# in the persistent home on first launch; anon-pi never writes this for you).
-RUN printf '{"/work": true}\n' > "$ANON_PI_STAGE/trust.json"
+# Trust the two cwd roots pi launches into so it never prompts on the mounted
+# project (staged, so it lands in the persistent machine home on first launch;
+# anon-pi never writes this for you):
+#   /projects : the projects-root cwd (a project is /projects/<name>)
+#   /work     : the distinct --mount root cwd (--mount <parent> mounts at /work)
+RUN printf '{"/projects": true, "/work": true}\n' > "$ANON_PI_STAGE/trust.json"
 
 # --- Optional: extensions + skills (the capability layer) -------------------
 # Install into the STAGING dir (PI_CODING_AGENT_DIR), so `pi install` records the
@@ -48,4 +58,6 @@ RUN printf '{"/work": true}\n' > "$ANON_PI_STAGE/trust.json"
 # installs and configures that service in the image too. See the worked example
 # examples/Dockerfile.pi-webveil.
 
-WORKDIR /work
+# The default cwd is the projects root /projects (the projects-root mount
+# target); a bare `--mount` re-roots the cwd at the distinct /work instead.
+WORKDIR /projects

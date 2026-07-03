@@ -66,7 +66,9 @@ RUN mkdir -p /etc/searxng \
 ENV SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml
 
 # webveil.json + trust.json go in the STAGING dir (promoted into the persistent
-# home on first launch). webveil points at the Unix socket, backend hop DIRECT
+# machine home on first launch). trust.json trusts both cwd roots pi launches
+# into (/projects, the projects-root cwd; and /work, the distinct --mount root)
+# so pi never prompts. webveil points at the Unix socket, backend hop DIRECT
 # (netcage anonymizes it): no webveil-side proxy config is needed in-jail because
 # netcage forces every process's egress through the proxy.
 RUN printf '%s\n' \
@@ -76,7 +78,7 @@ RUN printf '%s\n' \
 		'  "egress": { "mode": "direct" }' \
 		'}' \
 		> "$ANON_PI_STAGE/webveil.json" \
-	&& printf '{"/work": true}\n' > "$ANON_PI_STAGE/trust.json"
+	&& printf '{"/projects": true, "/work": true}\n' > "$ANON_PI_STAGE/trust.json"
 
 # --- entrypoint: start SearXNG (HTTP over the Unix socket), then exec CMD ------
 # anon-pi passes `sh -c 'cp ... && exec pi'` as the CMD; a Dockerfile ENTRYPOINT
@@ -97,4 +99,8 @@ RUN mkdir -p /run/searxng && printf '%s\n' \
 	&& chmod +x /usr/local/bin/anon-pi-entrypoint
 ENTRYPOINT ["/usr/local/bin/anon-pi-entrypoint"]
 
-WORKDIR /work
+# The default cwd is the projects root /projects (the projects-root mount
+# target); a bare `--mount` re-roots the cwd at the distinct /work instead. The
+# entrypoint composes: it starts SearXNG then execs anon-pi's seed-if-fresh CMD
+# in this cwd.
+WORKDIR /projects
