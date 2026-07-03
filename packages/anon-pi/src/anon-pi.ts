@@ -832,6 +832,153 @@ export function resolveRunVsStart(
 	return match ? {action: 'start', ref: match.ref} : {action: 'run'};
 }
 
+// --- The bare-launch menu: choice-list + per-machine project-usage record ----
+//
+// anon-pi's bare launch shows a HOST-side arrow-key menu of a machine's
+// projects BEFORE any jail runs. This module owns only the PURE data the menu
+// renders; the CLI reads the real dirs (the projects root + each machine home's
+// sessions dir) and renders the raw-mode TUI (the cli-bare-launch-menu-tui
+// task). Everything here takes SUPPLIED listings so it stays unit-testable.
+//
+// Conversations are per-machine (each machine's home keeps its own pi
+// sessions), but project FILES are global (the same folder is shared across
+// machines). pi keys a session by its launch cwd, so a project used on a machine
+// leaves a session dir at machines/<M>/home/.pi/agent/sessions/<slug>/, where
+// <slug> is pi's cwd convention over /projects/<name> (projectSessionSlug),
+// machine-invariant. "Used on" is therefore DERIVED from which machine homes
+// contain that session dir - no marker file.
+
+/**
+ * PURE: the pi session-dir slug for a project, i.e. pathSlug of its jail cwd
+ * `/projects/<name>`. Because the cwd is the SAME on every machine (files are
+ * global, the projects root is mounted at /projects everywhere), this slug is
+ * MACHINE-INVARIANT: the same shared project is recognised in each machine's
+ * sessions dir. Validates the name (rejecting traversal) as projectContainerCwd
+ * does. e.g. `alpha` -> `--projects-alpha--`.
+ */
+export function projectSessionSlug(name: string): string {
+	return pathSlug(projectContainerCwd(name));
+}
+
+/**
+ * The pure choice-list the bare-launch menu renders. `projects` are the
+ * folder-safe project names (sorted, case-insensitive) offered as pi launches;
+ * `here` is the `.` root token (a scratch pi at the root itself); `canNew` /
+ * `canShell` gate the `+ new project…` and `shell` affordances. It carries NO
+ * usage annotation (that is deriveProjectUsage, keyed by project name), so a
+ * caller can render the list alone or joined with usage.
+ */
+export interface MenuChoiceList {
+	/** The folder-safe project names, sorted case-insensitively for a stable menu. */
+	projects: string[];
+	/** The `.` "here" entry: a scratch pi at the root itself (ROOT_TOKEN). */
+	here: string;
+	/** Whether the `+ new project…` affordance is offered (always true today). */
+	canNew: boolean;
+	/** Whether the `shell` affordance is offered (always true today). */
+	canShell: boolean;
+}
+
+/**
+ * PURE: build the menu choice-list from a SUPPLIED projects-root listing (the
+ * CLI's real `readdir` of the projects root). Entries that are not folder-safe
+ * project names (dotfiles like `.git`, `..`, path-separator names, whitespace,
+ * reserved tokens) are DROPPED silently: they can never be a valid project
+ * launch (validateName would reject them), and the `.` root is the separate
+ * `here` entry, not a listed project. The surviving names are sorted
+ * case-insensitively so the menu order is stable regardless of dir-read order.
+ *
+ * `canNew` / `canShell` default TRUE (both affordances are always offered
+ * today); they are fields so a later policy can gate them without a signature
+ * change. An empty projects root still offers here / new / shell.
+ */
+export function buildMenuChoiceList(args: {
+	projects: readonly string[];
+	canNew?: boolean;
+	canShell?: boolean;
+}): MenuChoiceList {
+	const projects = args.projects.filter(isProjectName).sort((a, b) => {
+		const la = a.toLowerCase();
+		const lb = b.toLowerCase();
+		if (la < lb) return -1;
+		if (la > lb) return 1;
+		// Case-insensitive ties keep a deterministic order via the raw compare.
+		return a < b ? -1 : a > b ? 1 : 0;
+	});
+	return {
+		projects,
+		here: ROOT_TOKEN,
+		canNew: args.canNew ?? true,
+		canShell: args.canShell ?? true,
+	};
+}
+
+/** True iff `name` is a folder-safe project name (validateName would accept it). */
+function isProjectName(name: string): boolean {
+	try {
+		validateName(name, 'project');
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * A per-machine session-dir listing: for each machine name, the slugs present
+ * under machines/<M>/home/.pi/agent/sessions/. The CLI derives this by reading
+ * each machine home's sessions dir; the pure derivation takes it as input. Only
+ * the project session slugs (projectSessionSlug) are matched; any other slug
+ * (e.g. a `.`/`~`/`--mount` scratch session) is simply not a project so it does
+ * not appear in the usage record.
+ */
+export type SessionDirListing = Record<string, readonly string[]>;
+
+/** The usage record for ONE project: which machines used it + a current-new flag. */
+export interface ProjectUsage {
+	/** The project name (as supplied; validated). */
+	project: string;
+	/**
+	 * The machine names whose home contains this project's session dir, sorted
+	 * (a stable, machine-invariant "used on" list derived from session presence).
+	 */
+	machines: string[];
+	/**
+	 * True when the CURRENT machine has NO session dir for this project yet (it is
+	 * new for this machine, even if other machines have used the shared files).
+	 */
+	currentMachineIsNew: boolean;
+}
+
+/**
+ * PURE: derive the per-machine project-usage record from SUPPLIED session-dir
+ * presence (no marker file). For each supplied project, in the SUPPLIED order,
+ * it reports which machines' homes contain that project's (machine-invariant)
+ * session slug, and whether the CURRENT machine is new for it.
+ *
+ * The project ORDER is preserved (the caller orders the menu, e.g. via
+ * buildMenuChoiceList); only the per-project `machines` list is sorted, so the
+ * "used on" annotation is stable. Validates each project name (rejecting
+ * traversal) via projectSessionSlug.
+ */
+export function deriveProjectUsage(args: {
+	projects: readonly string[];
+	currentMachine: string;
+	sessions: SessionDirListing;
+}): ProjectUsage[] {
+	const {projects, currentMachine, sessions} = args;
+	const machineNames = Object.keys(sessions);
+	return projects.map((project) => {
+		const slug = projectSessionSlug(project);
+		const machines = machineNames
+			.filter((m) => (sessions[m] ?? []).includes(slug))
+			.sort();
+		const currentMachineIsNew = !(sessions[currentMachine] ?? []).includes(
+			slug,
+		);
+		return {project, machines, currentMachineIsNew};
+	});
+}
+
 /**
  * The CANONICAL host seed dir holding models.json (written by `anon-pi import`).
  * Mounted read-only so the first-launch seed can copy models.json into a fresh
