@@ -722,6 +722,116 @@ function containerSeedThen(seedVersion: string, exec: string): string {
 	);
 }
 
+// --- The run-vs-start decision for kept (netcage.managed) containers ---------
+//
+// The exploratory `--keep` flow: run a container, tweak the system (apt install
+// ...), quit, then re-enter with the SAME launch and RESUME it via `netcage
+// start` (the container filesystem survives). Throwaway (`--rm`) is the default
+// and is ALWAYS a fresh `run`.
+//
+// This module owns only the PURE decision: given a resolved LaunchIntent and a
+// SUPPLIED listing of kept containers, decide `start` (a matching kept container
+// is present) vs `run` without `--rm` (absent). The netcage QUERY (how to ask
+// netcage for its labelled containers, e.g. `netcage ps` filtered by the
+// `netcage.managed` label) is the CLI's impure job; the pure rule receives its
+// RESULT (the listing) so the decision stays unit-testable. anon-pi invents NO
+// registry file: netcage's `netcage.managed` label IS the record.
+
+/**
+ * A kept `netcage.managed` container, as the CLI's netcage query surfaces it to
+ * the pure decision. Only the two fields the DECISION needs are typed:
+ *   - `key`: the anon-pi launch-identity key (keptContainerKey) the CLI stamped
+ *     onto the container at `run` time (a netcage label / container name) and
+ *     reads back from the label; this is what a launch matches against.
+ *   - `ref`: how to address the container for `netcage start` (its id or name).
+ * The CLI is free to carry more; the pure rule reads only these.
+ */
+export interface KeptContainer {
+	/** The anon-pi launch-identity key stamped on the container (keptContainerKey). */
+	key: string;
+	/** The container ref (id or name) to pass to `netcage start`. */
+	ref: string;
+}
+
+/**
+ * The run-vs-start decision. `run` = `netcage run` a fresh container (WITHOUT
+ * `--rm` under `--keep`, so it is left kept; the run argv itself is
+ * resolveRunPlan's job). `start` = `netcage start <ref>` an existing kept
+ * container whose identity matches this launch.
+ */
+export type RunVsStart = {action: 'run'} | {action: 'start'; ref: string};
+
+/**
+ * PURE: the launch-identity match key for a kept container, derived ENTIRELY
+ * from the (machine, projects-root, project) identity (ADR-0002). It is what
+ * decides whether an existing kept `netcage.managed` container IS the one a
+ * `--keep` launch should resume.
+ *
+ * The fields, and why each is load-bearing:
+ *   - `machine.name`: a kept container mounts THIS machine's home at /root; a
+ *     same-project container on another machine is a different environment.
+ *   - `projectsRoot`: the host dir mounted at /projects; two launches with the
+ *     same project name but different roots are different working trees.
+ *   - `mountParent` (or '' when absent): `--mount` re-roots into a DIFFERENT
+ *     host parent at /work, so a `--mount` launch is a distinct identity from
+ *     the projects-root launch of the same name.
+ *   - the resolved container `cwd`: this already encodes the project token
+ *     (`/projects/<p>`, `/work/<p>`, `.` -> a root, or /root for a bare shell)
+ *     AND which root it sits under, so it is pi's conversation key too. Using
+ *     the cwd keeps the container identity aligned with the conversation the
+ *     kept container hosts.
+ *
+ * DELIBERATELY EXCLUDED (not part of identity): `--keep`/`--rm` (the throwaway
+ * choice for THIS run), the proxy + the direct-hole llm (forced-egress inputs),
+ * forwarded pi args, and the seed. Two launches that differ only in those must
+ * resolve to the SAME kept container.
+ *
+ * The key is a single opaque string (a `\n`-joined, field-tagged record) so the
+ * CLI can stamp it verbatim onto a netcage label and match on string equality;
+ * its internal shape is not a contract (compare only keys this function makes).
+ */
+export function keptContainerKey(intent: LaunchIntent): string {
+	const {machine, projectsRoot, project, mountParent} = intent;
+	const mounted = nonEmpty(mountParent) !== undefined;
+	const rootKind: RootKind = mounted ? 'mount' : 'projects';
+	// The same cwd resolution resolveRunPlan uses, so the key names the exact
+	// container a matching launch would run in (its conversation key).
+	const cwd =
+		project === undefined ? CONTAINER_HOME_ROOT : resolveCwd(rootKind, project);
+	return [
+		`machine=${machine.name}`,
+		`projectsRoot=${projectsRoot}`,
+		`mountParent=${nonEmpty(mountParent) ?? ''}`,
+		`cwd=${cwd}`,
+	].join('\n');
+}
+
+/**
+ * PURE: decide run-vs-start for a launch given a SUPPLIED listing of kept
+ * `netcage.managed` containers (the CLI's netcage query result).
+ *
+ *   - `--rm` (throwaway, `intent.keep !== true`): ALWAYS a fresh `run`. The
+ *     listing is NOT consulted (a throwaway launch never resumes a kept box).
+ *   - `--keep`: a kept container whose `key` equals this launch's
+ *     keptContainerKey is present -> `start` it (by its `ref`); else -> `run`
+ *     (resolveRunPlan leaves it kept because `--keep` omits `--rm`).
+ *
+ * Never spawns, never queries netcage: the listing is injected, so the whole
+ * decision is a pure function of (intent, listing).
+ */
+export function resolveRunVsStart(
+	intent: LaunchIntent,
+	kept: readonly KeptContainer[],
+): RunVsStart {
+	// Throwaway short-circuit: a `--rm` launch is always a fresh run and never
+	// consults the listing (it must not resume a kept container).
+	if (intent.keep !== true) return {action: 'run'};
+
+	const want = keptContainerKey(intent);
+	const match = kept.find((c) => c.key === want);
+	return match ? {action: 'start', ref: match.ref} : {action: 'run'};
+}
+
 /**
  * The CANONICAL host seed dir holding models.json (written by `anon-pi import`).
  * Mounted read-only so the first-launch seed can copy models.json into a fresh
