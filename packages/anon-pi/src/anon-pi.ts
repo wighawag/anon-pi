@@ -49,6 +49,16 @@ export const CONTAINER_MOUNT_ROOT = '/work';
 export const CONTAINER_MACHINE_HOME = '~';
 
 /**
+ * The REAL container path the machine home is bind-mounted at (the source is
+ * the host `machineHomeDir`). This is what a shell-at-`~` launch actually cwds
+ * into (`-w /root`), distinct from CONTAINER_MACHINE_HOME (`~`), which is the
+ * human-readable menu token. It is the parent of CONTAINER_AGENT_DIR
+ * (`/root/.pi/agent`); the seed-if-fresh promotes the image's `/root` defaults +
+ * pi staging into the mounted home here.
+ */
+export const CONTAINER_HOME_ROOT = '/root';
+
+/**
  * The container path pi uses as its config+state home. anon-pi mounts a
  * PERSISTENT host dir here (Model B), so everything pi writes, sessions,
  * history, settings (your model choice), `pi install`ed extensions, downloaded
@@ -464,6 +474,252 @@ export function resolveLlm(args: {
 	env: {llmDirect?: string};
 }): string | undefined {
 	return nonEmpty(args.env.llmDirect) ?? nonEmpty(args.config?.llm);
+}
+
+// --- The per-machine RunPlan resolver ----------------------------------------
+//
+// The heart of the machines+projects rework: given a resolved launch intent
+// (machine + mode + project token + the forced-egress inputs), compose the
+// netcage argv for every mode, ALWAYS carrying the two invariant mounts
+// (<home>:/root, <projects-root>:/projects) and the forced-egress flags
+// (--proxy + exactly one --allow-direct). PURE: no spawn, no fs.
+//
+// This REPLACES the old per-workdir buildRunPlan's shape with a per-machine one.
+// buildRunPlan is left dead-but-present below (cli.ts still calls it until the
+// CLI is migrated); its coordinated removal is owned by a later task.
+
+/** A resolved machine: its host home (bind-mounted at /root) + its image. */
+export interface Machine {
+	/** The machine's name (already validated by validateName elsewhere). */
+	name: string;
+	/** The persistent HOST home dir (machineHomeDir), bind-mounted at /root. */
+	home: string;
+	/** The container image with `pi` on PATH for this machine. */
+	image: string;
+}
+
+/**
+ * What a launch runs. `menu` is the BARE launch: no target is chosen yet, so no
+ * netcage argv is composed (the host-side TUI picks a project/shell, THEN a
+ * fresh intent is resolved into a launch plan). `pi` runs pi (optionally with
+ * forwarded args); `shell` runs bash (the project-hopper, since pi cannot cd).
+ */
+export type LaunchMode = 'menu' | 'pi' | 'shell';
+
+/**
+ * A parsed launch intent, injected so the resolver stays pure. The proxy + the
+ * direct-hole llm are threaded in RESOLVED (via resolveProxy/resolveLlm); the
+ * resolver re-asserts them non-empty so a plan can NEVER be produced without the
+ * forced-egress flags (fail-closed is the anonymity invariant).
+ */
+export interface LaunchIntent {
+	/** The machine to launch on (home + image). */
+	machine: Machine;
+	/** menu (bare) | pi | shell. */
+	mode: LaunchMode;
+	/**
+	 * The resolved HOST projects root, bind-mounted at /projects. One of the two
+	 * invariant mounts, present on every launch regardless of --mount.
+	 */
+	projectsRoot: string;
+	/**
+	 * The project token: a validated project name, the root token `.`, or
+	 * undefined (shell-at-home / menu). Resolves the cwd via resolveCwd.
+	 */
+	project?: string;
+	/**
+	 * `--mount <parent>`: a resolved HOST parent path. When set it adds EXACTLY
+	 * one mount (<parent>:/work) and re-roots the cwd there (/work[/<project>]);
+	 * it changes nothing else (the two invariant mounts stay). Sidesteps podman
+	 * mount immutability (we never remount a running box).
+	 */
+	mountParent?: string;
+	/** Extra args forwarded to `pi` (headless/one-shot). Ignored for shell. */
+	piArgs?: string[];
+	/**
+	 * `--keep`: omit `--rm` so the container is left KEPT (its filesystem
+	 * survives the apt-install/re-enter flow). Default (false) => `--rm`
+	 * (throwaway); the machine home persists regardless (it is a host mount).
+	 */
+	keep?: boolean;
+	/** The resolved socks5h proxy (REQUIRED; the resolver fails closed without it). */
+	proxy: string;
+	/** The resolved local-model direct target (REQUIRED: the one --allow-direct hole). */
+	llmDirect: string;
+	/**
+	 * The host models.json to mount read-only for the first-launch seed, keyed to
+	 * THIS machine (e.g. <machine-dir>/models.json). Omitted => no seed mount (pi
+	 * starts with no models; you add them in-session). Distinct from the legacy
+	 * per-import resolveConfigSeed.
+	 */
+	modelsSeed?: string;
+	/** The seed version stamped into a fresh home's marker. Default SEED_VERSION. */
+	seedVersion?: string;
+}
+
+/**
+ * The resolved launch plan. A discriminated union so the BARE `menu` mode is a
+ * distinct, argv-less marker (the host-side TUI runs first) while every real
+ * launch carries a composed netcage argv. The forced-egress invariant is
+ * asserted on the `launch` variant's netcageArgs by construction.
+ */
+export type LaunchPlan =
+	| {
+			/** Bare launch: run the host-side menu, then re-resolve into a launch. */
+			kind: 'menu';
+			machine: Machine;
+	  }
+	| {
+			kind: 'launch';
+			machine: Machine;
+			/** The jail cwd (`-w`): /projects[/<p>], /work[/<p>] (--mount), or /root (shell ~). */
+			cwd: string;
+			/** True when the machine home is fresh (informational; the seed is marker-guarded). */
+			fresh: boolean;
+			/** The argv passed to `netcage` (after the `netcage` program name). */
+			netcageArgs: string[];
+	  };
+
+/**
+ * PURE: resolve a LaunchIntent into a LaunchPlan, composing the netcage argv for
+ * every mode. Never spawns, never touches the filesystem: `homeFresh` reports
+ * whether the machine home has been seeded (so `fresh` is known) and is the only
+ * capability injected.
+ *
+ * Invariants held on EVERY composed argv:
+ *   - the two mounts <home>:/root and <projectsRoot>:/projects, always;
+ *   - --mount adds EXACTLY <parent>:/work and re-roots cwd, nothing else;
+ *   - --proxy <p> + exactly one --allow-direct <llm> (forced egress, fail-closed);
+ *   - --rm by default, omitted only under --keep.
+ *
+ * Throws AnonPiError (a plan is NEVER produced) when the image, the machine
+ * home, the proxy, or the direct-hole llm is missing.
+ */
+export function resolveRunPlan(
+	intent: LaunchIntent,
+	homeFresh: (machineHome: string) => boolean,
+): LaunchPlan {
+	const {machine, mode, projectsRoot, project, mountParent} = intent;
+
+	// Forced egress FIRST, on every path incl. the menu marker: a plan can never
+	// be produced without the proxy + the one direct hole (fail-closed).
+	const proxy = nonEmpty(intent.proxy);
+	if (proxy === undefined) throw new AnonPiError(PROXY_REQUIRED_MESSAGE);
+	const llm = nonEmpty(intent.llmDirect);
+	if (llm === undefined) {
+		throw new AnonPiError(
+			'anon-pi: no local-model direct target: set ANON_PI_LLM (or config.llm) to the ' +
+				'RFC1918/link-local IP[:port] of the local model. It is the ONE direct hole; ' +
+				'all other egress stays forced through the proxy.',
+		);
+	}
+	if (nonEmpty(machine.image) === undefined) {
+		throw new AnonPiError(
+			`anon-pi: machine ${JSON.stringify(machine.name)} has no image. Set one with ` +
+				'`anon-pi machine set-image` or in its machine.json.',
+		);
+	}
+	if (nonEmpty(machine.home) === undefined) {
+		throw new AnonPiError(
+			`anon-pi: machine ${JSON.stringify(machine.name)} has no resolved home dir.`,
+		);
+	}
+
+	// Bare launch: defer to the host-side menu; compose no argv yet (but the
+	// forced-egress checks above have already run, so a menu is never a way to
+	// slip past the proxy requirement).
+	if (mode === 'menu') {
+		return {kind: 'menu', machine};
+	}
+
+	const mounted = nonEmpty(mountParent) !== undefined;
+	// Which root the cwd resolves under: /work when --mount, else /projects.
+	const rootKind: RootKind = mounted ? 'mount' : 'projects';
+
+	// cwd: shell with no project sits at the machine home (/root); otherwise the
+	// project token (a name or `.`) resolves under the active root uniformly.
+	const cwd =
+		project === undefined ? CONTAINER_HOME_ROOT : resolveCwd(rootKind, project);
+
+	const fresh = homeFresh(machine.home);
+	const seedVersion = intent.seedVersion ?? SEED_VERSION;
+	const directTarget = hostPortKey(llm);
+	const modelsSeed = nonEmpty(intent.modelsSeed);
+
+	// Interactive modes (interactive pi, shell) need a TTY; a HEADLESS pi run
+	// (`<project> <pi-args…>`) must work WITHOUT one, so `-it` is omitted there
+	// (podman fails to allocate a TTY on a non-tty stdin). The CLI's broader
+	// no-TTY discipline (erroring when an interactive mode has no TTY) is a later
+	// task; here the argv simply omits -it for the one headless shape.
+	const headless = mode === 'pi' && !!intent.piArgs && intent.piArgs.length > 0;
+
+	const netcageArgs: string[] = ['run'];
+	// --rm by DEFAULT (throwaway); --keep leaves the container kept.
+	if (intent.keep !== true) netcageArgs.push('--rm');
+	// Forced egress: the proxy + the ONE direct hole. Never omitted.
+	netcageArgs.push('--proxy', proxy, '--allow-direct', directTarget);
+	if (!headless) netcageArgs.push('-it');
+	// The TWO invariant mounts, ALWAYS.
+	netcageArgs.push('-v', `${machine.home}:${CONTAINER_HOME_ROOT}`);
+	netcageArgs.push('-v', `${projectsRoot}:${CONTAINER_PROJECTS_ROOT}`);
+	// --mount adds EXACTLY the one parent mount at /work (distinct from /projects,
+	// so the two roots never collide). Nothing else changes.
+	if (mounted) {
+		netcageArgs.push('-v', `${mountParent}:${CONTAINER_MOUNT_ROOT}`);
+	}
+	// The generated models.json read-only for the first-launch seed, when present.
+	if (modelsSeed !== undefined) {
+		netcageArgs.push('-v', `${modelsSeed}:${CONTAINER_MODELS_SEED}:ro`);
+	}
+	// The jail cwd.
+	netcageArgs.push('-w', cwd);
+	// The image, then the command: a marker-guarded seed-if-fresh then the tool.
+	// pi (with forwarded args) for pi mode; bash for a shell. The seed shape is
+	// containerRunCmd re-pointed at the machine home (/root), so a fresh machine
+	// home gets the image's staged defaults + models.json once.
+	netcageArgs.push(machine.image);
+	if (mode === 'shell') {
+		// A jailed bash: seed-if-fresh (so a fresh home still gets .bashrc etc.),
+		// then exec bash.
+		netcageArgs.push('sh', '-c', containerSeedThen(seedVersion, 'exec bash'));
+	} else if (intent.piArgs && intent.piArgs.length > 0) {
+		// Forward args: seed-if-fresh, then exec pi with the args. The args are the
+		// shell's positional argv ($@) so they are forwarded verbatim (no re-quote).
+		netcageArgs.push(
+			'sh',
+			'-c',
+			containerSeedThen(seedVersion, 'exec pi "$@"'),
+			'pi',
+			...intent.piArgs,
+		);
+	} else {
+		// Interactive pi: seed-if-fresh, then exec pi.
+		netcageArgs.push('sh', '-c', containerSeedThen(seedVersion, 'exec pi'));
+	}
+
+	return {kind: 'launch', machine, cwd, fresh, netcageArgs};
+}
+
+/**
+ * The marker-guarded seed-if-fresh prefix (reused across pi/bash), followed by
+ * the given exec. On a FRESH machine home (no `.anon-pi-seed` marker under
+ * /root/.pi/agent) it promotes the image's staged pi defaults
+ * (/opt/anon-pi-seed/agent) + the mounted models.json into the home and stamps
+ * the marker; on a seeded home it does nothing. Then it runs `exec`. This is
+ * `containerRunCmd`'s shape (already /root-pointed), generalised over the tool.
+ */
+function containerSeedThen(seedVersion: string, exec: string): string {
+	const agent = CONTAINER_AGENT_DIR;
+	const marker = `${agent}/${SEED_MARKER}`;
+	return (
+		`mkdir -p "${agent}" && ` +
+		`if [ ! -f "${marker}" ]; then ` +
+		`{ [ -d "${CONTAINER_STAGE_DIR}" ] && cp -a "${CONTAINER_STAGE_DIR}/." "${agent}/" || true; } && ` +
+		`{ [ -f "${CONTAINER_MODELS_SEED}" ] && cp "${CONTAINER_MODELS_SEED}" "${agent}/${MODELS_FILE}" || true; } && ` +
+		`printf '%s\\n' "${seedVersion}" > "${marker}"; ` +
+		`fi && ` +
+		`${exec}`
+	);
 }
 
 /**
