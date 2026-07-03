@@ -29,11 +29,29 @@ Deliver, in the pure module (`src/anon-pi.ts`), the resolvers and merge logic:
   anonymity invariant, keep it).
 
 Keep everything pure and injectable (no filesystem reads inside the resolvers;
-pass parsed config + env in, mirroring the existing `AnonPiEnv` pattern). The
-old per-workdir seed/state model (`state/<slug>/agent`, `ANON_PI_CONFIG`,
-`import`-oriented `resolveConfigSeed`) is being replaced; this task introduces the
-new layout resolvers alongside, without yet deleting the CLI consumers (later
-tasks migrate/remove them).
+pass parsed config + env in, mirroring the existing `AnonPiEnv` pattern).
+
+**ADDITIVE ONLY — do NOT remove fields still read downstream.** This is the FIRST
+task in the chain; the old `buildRunPlan` (in `anon-pi.ts`) and the old `cli.ts`
+launch path still read `AnonPiEnv.ephemeral`/`configSeed`/`sourceModels` and the
+old env keys. Removing those fields here would break the still-present readers'
+build (`pnpm -r build` in the gate). So: ADD the new layout resolvers +
+config-layer fields (e.g. `projects`/`ANON_PI_PROJECTS`) ALONGSIDE the existing
+ones; the old fields/keys are removed later by the tasks that delete their last
+readers (`launch-run-plan-resolution` retires `buildRunPlan`;
+`cli-launch-surface-grammar-a` retires the `--ephemeral`/per-workdir cli.ts path
+and does the final `AnonPiEnv`/`envFromProcess` cleanup).
+
+**Test blocks:** this task ADDS new pure-module tests for the layout/config
+resolvers + the new-var mapping. The ONE existing thing it must update is the
+`resolveAnonPiHome` cases inside the `path resolution` block, because the home
+DEFAULT changes from `~/.config/anon-pi` to `~/.anon-pi/` (changing
+`resolveAnonPiHome` and not its test would leave a red test). Update ONLY those
+`resolveAnonPiHome` cases. LEAVE the `resolveConfigSeed`/`ANON_PI_CONFIG` cases,
+`envFromProcess mapping`, `buildRunPlan*`, `stateAgentDir`, and the import blocks
+alone \u2014 they are retired later by the tasks that remove their production readers
+(so the gate stays green at every step). If you add an `ANON_PI_PROJECTS`
+assertion, APPEND it without deleting any old key.
 
 ## Acceptance criteria
 
@@ -46,6 +64,15 @@ tasks migrate/remove them).
       top).
 - [ ] Proxy/llm: env overrides config; a missing proxy fails closed with the
       existing required-proxy guidance (never a guessed default).
+- [ ] This task is ADDITIVE: it adds the new layout/config resolvers + fields
+      without removing `AnonPiEnv` fields or env keys still read by the old
+      `buildRunPlan`/`cli.ts` (those are removed by the tasks that retire their
+      readers); `pnpm -r build` + `pnpm -r test` stay green at this step.
+- [ ] The `resolveAnonPiHome` cases in `path resolution` are updated to the new
+      `~/.anon-pi/` default (the only existing test cases this task touches);
+      `resolveConfigSeed`/env-key removals are left to their later owners.
+- [ ] New tests cover the new resolvers + the new-var mapping (e.g.
+      `ANON_PI_PROJECTS`), appended without deleting old keys.
 - [ ] Tests cover the new behaviour (mirror the repo's existing pure-module test
       style in `packages/anon-pi/test/`): config load, each precedence layer,
       env-over-config, and the fail-closed missing-proxy path.

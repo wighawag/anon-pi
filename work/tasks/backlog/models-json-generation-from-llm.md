@@ -26,11 +26,18 @@ In the pure module (`src/anon-pi.ts`):
 **This task OWNS retiring the `import`-source pure logic + its tests.** Because
 `import` is dropped (no CLI path will call them after this task and
 `cli-launch-surface-grammar-a`/`cli-init-onboarding`), remove
-`pickProviderForLlm` and `resolveSourceModelsPath` and rewrite/delete the
-`anon-pi.test.ts` cases pinned to them (the `pickProviderForLlm (import
-selection)` and `resolveSourceModelsPath (import reads FROM)` describe blocks).
-The `verify` gate runs `pnpm -r test`, so leave no red tests behind. (The
-per-workdir `buildRunPlan`/`stateAgentDir` retirement is owned by
+`pickProviderForLlm` and `resolveSourceModelsPath` and rewrite/delete ONLY the
+`anon-pi.test.ts` describe blocks pinned to them — `pickProviderForLlm (import
+selection)` and `resolveSourceModelsPath (import reads FROM)`. The `verify` gate
+runs `pnpm -r test`, so leave no red tests behind.
+
+**Shared test file — REBASE, do not fight.** This task is `blockedBy`
+`launch-run-plan-resolution`, which has ALREADY rewritten the launch/state
+describe blocks in the SAME `anon-pi.test.ts` (buildRunPlan/stateAgentDir/
+resolveConfigSeed) and handed the file over with only the two import blocks
+remaining. Build on THAT restructured file: touch only the two import blocks;
+do not re-touch the launch/state blocks it already retired. (The per-workdir
+`buildRunPlan`/`stateAgentDir` retirement is owned by
 `launch-run-plan-resolution`; the `HELP`/`import`-dispatch retirement by
 `cli-launch-surface-grammar-a`.)
 
@@ -43,8 +50,10 @@ per-workdir `buildRunPlan`/`stateAgentDir` retirement is owned by
 - [ ] No host `~/.pi/agent/models.json` is read (the `import` source model is
       gone).
 - [ ] The `import`-source pure logic is RETIRED: `pickProviderForLlm` and
-      `resolveSourceModelsPath` are removed and the `anon-pi.test.ts` cases
-      pinned to them are rewritten/deleted (no red tests remain).
+      `resolveSourceModelsPath` are removed and ONLY their two `anon-pi.test.ts`
+      describe blocks (`pickProviderForLlm`, `resolveSourceModelsPath`) are
+      rewritten/deleted; the launch/state blocks already retired by
+      `launch-run-plan-resolution` are not re-touched (no red tests remain).
 - [ ] Tests cover the new behaviour (mirror existing pure-module test style):
       generation from each endpoint form, single-provider output.
 - [ ] Every change produces a changeset; the `verify` gate passes (green
@@ -81,10 +90,14 @@ seed-if-fresh (other tasks) write it into the machine home.
 
 Test the generator at its seam (each endpoint form → single-provider output).
 You OWN retiring the `import`-source pure logic: remove `pickProviderForLlm` and
-`resolveSourceModelsPath` and rewrite/delete their `anon-pi.test.ts` cases (the
-`verify` gate runs `pnpm -r test`, so no red tests may remain). "Done" = the
-generator + the retired import-source logic + tests all green under `verify`,
-with a changeset.
+`resolveSourceModelsPath` and rewrite/delete ONLY their two `anon-pi.test.ts`
+describe blocks (`pickProviderForLlm`, `resolveSourceModelsPath`); the `verify`
+gate runs `pnpm -r test`, so no red tests may remain. IMPORTANT: this task is
+serialized AFTER `launch-run-plan-resolution`, which already retired the
+launch/state describe blocks in the SAME test file and left only the two import
+blocks for you — rebase onto that restructured file and touch only those two
+blocks (do not re-retire the launch/state ones). "Done" = the generator + the
+retired import-source logic + tests all green under `verify`, with a changeset.
 
 > RECORD non-obvious in-scope decisions (the provider api shape) as a
 > `## Decisions` note, or an ADR if it meets the gate.

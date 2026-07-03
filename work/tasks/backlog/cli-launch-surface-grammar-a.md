@@ -43,10 +43,16 @@ wired in next).
 runs `pnpm -r test`, so nothing may stay red): rewrite the `HELP` string to the
 new model (drop `import`/`--fresh`/`--ephemeral`/the per-workdir docs), delete
 or rewrite `cli-fresh.test.ts` (the `--fresh` flow it exercises is gone), and
-retire any CLI test locked to `--ephemeral`/`import`/the per-workdir launch. The
-pure-module `buildRunPlan`/`stateAgentDir` retirement is owned by
-`launch-run-plan-resolution` (already landed as a blocker); the `import`-source
-pure logic by `models-json-generation-from-llm`.
+retire any CLI test locked to `--ephemeral`/`import`/the per-workdir launch.
+Because this task removes the LAST readers of the dead env fields in `cli.ts`
+(the `--ephemeral` flow), it ALSO owns the final `AnonPiEnv`/`envFromProcess`
+cleanup: drop the `ephemeral`/`configSeed`/`sourceModels` fields + the
+`ANON_PI_EPHEMERAL`/`ANON_PI_CONFIG`/`ANON_PI_SOURCE_MODELS` mappings, and rewrite
+the `envFromProcess mapping` describe block in `anon-pi.test.ts` accordingly (the
+earlier tasks left these in place precisely so no mid-chain build broke). The
+pure-module `buildRunPlan`/`stateAgentDir`/`resolveConfigSeed` retirement is owned
+by `launch-run-plan-resolution` (a blocker); the `import`-source pure logic by
+`models-json-generation-from-llm`.
 
 ## Acceptance criteria
 
@@ -66,6 +72,10 @@ pure logic by `models-json-generation-from-llm`.
 - [ ] The `HELP` string is rewritten to the new model (machines + projects +
       init + menu + `--shell`/`--mount`/`--keep`/`--rm`); it no longer documents
       `import`/`--fresh`/`--ephemeral` or the per-workdir home.
+- [ ] The dead `AnonPiEnv`/`envFromProcess` fields are cleaned up now that their
+      last readers are gone: `ephemeral`/`configSeed`/`sourceModels` +
+      `ANON_PI_EPHEMERAL`/`ANON_PI_CONFIG`/`ANON_PI_SOURCE_MODELS` are dropped and
+      the `envFromProcess mapping` describe block is rewritten (no red tests).
 - [ ] Tests cover parsing + dispatch decisions at the pure seam (the RunPlan +
       run-vs-start inputs); the raw spawn/TTY I/O stays thin/untested. Mirror the
       existing `cli-*.test.ts` style.
@@ -106,9 +116,14 @@ inherited stdio propagating the exit code. Drop the old per-workdir launch,
 You OWN retiring the legacy CLI surface + its tests so the `verify` gate stays
 green (it runs `pnpm -r test`): rewrite the `HELP` string to the new model, and
 delete/rewrite `cli-fresh.test.ts` plus any CLI test asserting the removed
-`--ephemeral`/`import`/per-workdir flags. (The pure-module `buildRunPlan`
-retirement is owned by the `launch-run-plan-resolution` blocker; the
-`import`-source pure logic by `models-json-generation-from-llm`.)
+`--ephemeral`/`import`/per-workdir flags. Because you remove the LAST readers of
+the dead env fields (the `--ephemeral` cli.ts flow), you also do the final
+`AnonPiEnv`/`envFromProcess` cleanup: drop `ephemeral`/`configSeed`/`sourceModels`
++ their `ANON_PI_*` mappings and rewrite the `envFromProcess mapping` test block
+(earlier tasks deliberately left these so no mid-chain build broke). (The
+pure-module `buildRunPlan`/`stateAgentDir`/`resolveConfigSeed` retirement is owned
+by the `launch-run-plan-resolution` blocker; the `import`-source pure logic by
+`models-json-generation-from-llm`.)
 
 Keep the interactive menu TUI OUT of this task — wire bare launch to a menu
 hook/stub the next task fills. Keep logic in the pure module; `cli.ts` stays thin
