@@ -265,6 +265,19 @@ README:
 - Rewrite: machines + projects + init; the `--mount` "one folder only" caveat;
   proxy detection-then-verify honesty; migration note; env vars as overrides.
 
+## 13b. Dependency: netcage lifecycle (may thin this plan)
+
+There is a proposed netcage PRD, `podman-fidelity-and-lifecycle` (in the netcage
+repo, `work/prds/proposed/`), to split jail teardown (sidecar, always) from
+tool-container lifecycle (podman `--rm` semantics) and add named/reusable jailed
+containers + a jail-aware `netcage start`. If that lands, a **machine** becomes a
+**netcage environment** (a named, reusable, jailed container with persistent
+state), and THIS plan THINS: anon-pi would provide only the pi seed
+(extensions/models/trust), the LLM/proxy config + `init`, and the project<->
+machine binding, and CONSUME netcage machines instead of orchestrating
+persistence via volume-mounts-over-a-throwaway-container. Revisit sections 2, 5,
+8, 10 once the netcage lifecycle change is decided.
+
 ## 14. Deferred / dropped / open
 
 - **`--isolated`**: DROPPED. Machines are the isolation unit; projects bind to one
