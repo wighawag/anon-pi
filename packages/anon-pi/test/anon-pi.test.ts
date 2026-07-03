@@ -1,17 +1,29 @@
 import {describe, it, expect} from 'vitest';
+import {resolve as pathResolve} from 'node:path';
 import {
 	AnonPiError,
 	buildRunPlan,
+	builtinProjectsRoot,
 	CONTAINER_AGENT_DIR,
 	envFromProcess,
 	hostPortKey,
+	machineDir,
+	machineHomeDir,
+	machineJsonPath,
+	parseConfigJson,
+	parseMachineJson,
 	pathSlug,
 	pickProviderForLlm,
 	resolveAnonPiHome,
 	resolveConfigSeed,
+	resolveLlm,
+	resolveProjectsRoot,
+	resolveProxy,
 	resolveSourceModelsPath,
 	stateAgentDir,
+	type AnonPiConfig,
 	type AnonPiEnv,
+	type MachineConfig,
 	type PiModelsFile,
 } from '../src/index.js';
 
@@ -31,13 +43,15 @@ const plan = (env: AnonPiEnv, wd = '/work/recon') =>
 	buildRunPlan(env, wd, seedPresent, stateFresh);
 
 describe('path resolution', () => {
-	it('defaults the anon-pi home to ~/.config/anon-pi', () => {
-		expect(resolveAnonPiHome(base)).toBe('/home/u/.config/anon-pi');
+	it('defaults the anon-pi home to ~/.anon-pi (NOT ~/.config)', () => {
+		expect(resolveAnonPiHome(base)).toBe('/home/u/.anon-pi');
 	});
 
-	it('honours XDG_CONFIG_HOME for the home', () => {
+	it('does NOT put the new home under XDG_CONFIG_HOME', () => {
+		// the dedicated, browsable workspace folder lives at ~/.anon-pi, not
+		// under ~/.config, so XDG_CONFIG_HOME no longer moves it.
 		expect(resolveAnonPiHome({...base, xdgConfigHome: '/cfg'})).toBe(
-			'/cfg/anon-pi',
+			'/home/u/.anon-pi',
 		);
 	});
 
@@ -45,12 +59,200 @@ describe('path resolution', () => {
 		expect(resolveAnonPiHome({...base, anonPiHome: '/opt/ap'})).toBe('/opt/ap');
 	});
 
-	it('defaults the seed to <home>/agent', () => {
+	// NOTE: resolveConfigSeed keeps the LEGACY ~/.config/anon-pi default on
+	// purpose (it + ANON_PI_CONFIG are read by the still-present old import path;
+	// they are retired by a later task). See the ## Decisions note in the done
+	// record.
+	it('defaults the seed to the legacy <~/.config/anon-pi>/agent', () => {
 		expect(resolveConfigSeed(base)).toBe('/home/u/.config/anon-pi/agent');
 	});
 
 	it('honours ANON_PI_CONFIG seed override', () => {
 		expect(resolveConfigSeed({...base, configSeed: '/seed'})).toBe('/seed');
+	});
+});
+
+describe('workspace layout (machines + projects)', () => {
+	it('machineDir is <home>/machines/<name>', () => {
+		expect(machineDir(base, 'recon')).toBe('/home/u/.anon-pi/machines/recon');
+		expect(machineDir({...base, anonPiHome: '/opt/ap'}, 'recon')).toBe(
+			'/opt/ap/machines/recon',
+		);
+	});
+
+	it('machineHomeDir is <home>/machines/<name>/home (bind-mounted at /root)', () => {
+		expect(machineHomeDir(base, 'recon')).toBe(
+			'/home/u/.anon-pi/machines/recon/home',
+		);
+	});
+
+	it('machineJsonPath is <home>/machines/<name>/machine.json', () => {
+		expect(machineJsonPath(base, 'recon')).toBe(
+			'/home/u/.anon-pi/machines/recon/machine.json',
+		);
+	});
+
+	it('builtinProjectsRoot is the default global <home>/projects', () => {
+		expect(builtinProjectsRoot(base)).toBe('/home/u/.anon-pi/projects');
+	});
+});
+
+describe('parseConfigJson (config.json shape)', () => {
+	it('parses { proxy, llm, defaultMachine, projects? }', () => {
+		const c = parseConfigJson({
+			proxy: 'socks5h://127.0.0.1:9050',
+			llm: '192.168.1.150:8080',
+			defaultMachine: 'recon',
+			projects: '/data/projects',
+		});
+		expect(c).toEqual({
+			proxy: 'socks5h://127.0.0.1:9050',
+			llm: '192.168.1.150:8080',
+			defaultMachine: 'recon',
+			projects: '/data/projects',
+		});
+	});
+
+	it('tolerates an absent/partial config (all fields optional)', () => {
+		expect(parseConfigJson({})).toEqual({});
+		expect(parseConfigJson(undefined)).toEqual({});
+		expect(parseConfigJson(null)).toEqual({});
+	});
+
+	it('ignores non-string fields (defensive against a hand-edited file)', () => {
+		const c = parseConfigJson({proxy: 123, projects: {}, defaultMachine: []});
+		expect(c.proxy).toBeUndefined();
+		expect(c.projects).toBeUndefined();
+		expect(c.defaultMachine).toBeUndefined();
+	});
+});
+
+describe('parseMachineJson (machine.json shape)', () => {
+	it('parses { image, projects? }', () => {
+		expect(
+			parseMachineJson({image: 'my/pi:tag', projects: '/m/projects'}),
+		).toEqual({image: 'my/pi:tag', projects: '/m/projects'});
+	});
+
+	it('tolerates an absent/partial machine.json', () => {
+		expect(parseMachineJson({})).toEqual({});
+		expect(parseMachineJson(undefined)).toEqual({});
+	});
+});
+
+describe('resolveProjectsRoot (env > machine > config > built-in)', () => {
+	const cfg: AnonPiConfig = {projects: '/config/projects'};
+	const machine: MachineConfig = {projects: '/machine/projects'};
+
+	it('falls back to the built-in <home>/projects when nothing is set', () => {
+		expect(resolveProjectsRoot({env: base})).toBe('/home/u/.anon-pi/projects');
+	});
+
+	it('config.projects overrides the built-in', () => {
+		expect(resolveProjectsRoot({env: base, config: cfg})).toBe(
+			'/config/projects',
+		);
+	});
+
+	it('machine.projects overrides config.projects', () => {
+		expect(resolveProjectsRoot({env: base, config: cfg, machine})).toBe(
+			'/machine/projects',
+		);
+	});
+
+	it('env ANON_PI_PROJECTS overrides machine + config', () => {
+		expect(
+			resolveProjectsRoot({
+				env: {...base, projects: '/env/projects'},
+				config: cfg,
+				machine,
+			}),
+		).toBe('/env/projects');
+	});
+
+	it('the later --mount CLI override slots on top of env', () => {
+		// documented top layer: cli.ts passes a resolved mountParent later.
+		expect(
+			resolveProjectsRoot({
+				env: {...base, projects: '/env/projects'},
+				config: cfg,
+				machine,
+				mountParent: '/host/dev',
+			}),
+		).toBe('/host/dev');
+	});
+
+	it('resolves a relative override to an absolute path', () => {
+		expect(
+			resolveProjectsRoot({env: base, config: {projects: 'rel/projects'}}),
+		).toBe(pathResolve('rel/projects'));
+	});
+});
+
+describe('resolveProxy (env over config; REQUIRED / fail-closed)', () => {
+	it('uses config.proxy when env has none', () => {
+		expect(resolveProxy({config: {proxy: 'socks5h://c:1'}, env: {}})).toBe(
+			'socks5h://c:1',
+		);
+	});
+
+	it('env ANON_PI_PROXY overrides config.proxy', () => {
+		expect(
+			resolveProxy({
+				config: {proxy: 'socks5h://c:1'},
+				env: {proxy: 'socks5h://e:2'},
+			}),
+		).toBe('socks5h://e:2');
+	});
+
+	it('fails closed with the verbatim guidance when neither supplies a proxy', () => {
+		expect(() => resolveProxy({config: {}, env: {}})).toThrow(AnonPiError);
+		let msg = '';
+		try {
+			resolveProxy({config: {}, env: {}});
+		} catch (e) {
+			msg = (e as Error).message;
+		}
+		expect(msg).toMatch(/never guessed|no default/i);
+		expect(msg).toContain('export ANON_PI_PROXY=socks5h://127.0.0.1:9050'); // Tor
+		expect(msg).toContain('export ANON_PI_PROXY=socks5h://127.0.0.1:1080'); // wireproxy
+		// same verbatim message the legacy buildRunPlan emits (single source)
+		let planMsg = '';
+		try {
+			buildRunPlan(
+				{...base, proxy: ''},
+				'/w',
+				() => true,
+				() => false,
+			);
+		} catch (e) {
+			planMsg = (e as Error).message;
+		}
+		expect(msg).toBe(planMsg);
+	});
+
+	it('treats a blank/whitespace proxy as missing (fail-closed)', () => {
+		expect(() =>
+			resolveProxy({config: {proxy: '   '}, env: {proxy: ''}}),
+		).toThrow(AnonPiError);
+	});
+});
+
+describe('resolveLlm (env over config)', () => {
+	it('uses config.llm when env has none', () => {
+		expect(resolveLlm({config: {llm: '10.0.0.1:1'}, env: {}})).toBe(
+			'10.0.0.1:1',
+		);
+	});
+
+	it('env ANON_PI_LLM overrides config.llm', () => {
+		expect(
+			resolveLlm({config: {llm: '10.0.0.1:1'}, env: {llmDirect: '10.0.0.2:2'}}),
+		).toBe('10.0.0.2:2');
+	});
+
+	it('returns undefined when neither supplies an llm (not fail-closed here)', () => {
+		expect(resolveLlm({config: {}, env: {}})).toBeUndefined();
 	});
 });
 
@@ -346,6 +548,7 @@ describe('envFromProcess mapping', () => {
 			ANON_PI_SOURCE_MODELS: '/src/models.json',
 			PI_CODING_AGENT_DIR: '/opt/pi',
 			ANON_PI_EPHEMERAL: '1',
+			ANON_PI_PROJECTS: '/data/projects',
 		});
 		expect(env).toMatchObject({
 			home: '/home/z',
@@ -358,6 +561,7 @@ describe('envFromProcess mapping', () => {
 			sourceModels: '/src/models.json',
 			piAgentDir: '/opt/pi',
 			ephemeral: true,
+			projects: '/data/projects',
 		});
 	});
 
