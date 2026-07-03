@@ -91,8 +91,14 @@ export interface AnonPiEnv {
 	home: string;
 	/** socks5h proxy URL. REQUIRED (no default: the proxy is what anonymizes). */
 	proxy?: string;
-	/** The anon-pi home dir. Default $XDG_CONFIG_HOME/anon-pi or ~/.config/anon-pi. */
+	/** The anon-pi home dir. Default ~/.anon-pi (NOT under ~/.config). */
 	anonPiHome?: string;
+	/**
+	 * Projects-root override from env (ANON_PI_PROJECTS). Sits above
+	 * machine.json/config.json in the projects-root chain, below the later
+	 * --mount CLI override. See resolveProjectsRoot.
+	 */
+	projects?: string;
 	/** Override the canonical seed dir. Default <anonPiHome>/agent. */
 	configSeed?: string;
 	/** The container image that has `pi` on PATH. REQUIRED. */
@@ -144,8 +150,49 @@ export interface RunPlan {
 /** A user-facing error whose message is meant to be printed verbatim (no stack). */
 export class AnonPiError extends Error {}
 
-/** Resolve the anon-pi home dir (holds the seed). */
+/**
+ * The verbatim guidance printed when no proxy is supplied. Kept as a single
+ * source so every fail-closed path (the legacy buildRunPlan AND the new
+ * resolveProxy) emits byte-identical copy-pasteable guidance. The proxy is
+ * REQUIRED and never guessed: it is what anonymizes egress (fail-closed is the
+ * anonymity invariant).
+ */
+export const PROXY_REQUIRED_MESSAGE =
+	'anon-pi: set ANON_PI_PROXY to your socks5h proxy. anon-pi has no default:\n' +
+	'the proxy is what makes the session anonymous, so it is never guessed.\n' +
+	'\n' +
+	'Pick the one you run (copy-paste), then re-run anon-pi:\n' +
+	'\n' +
+	'# Tor (system tor / Tor Browser bundle default port)\n' +
+	'export ANON_PI_PROXY=socks5h://127.0.0.1:9050\n' +
+	'\n' +
+	'# wireproxy -> a WireGuard VPN (Mullvad, Proton, ...); use YOUR configured\n' +
+	'# [Socks5] BindAddress port (1080 in wireproxy examples):\n' +
+	'export ANON_PI_PROXY=socks5h://127.0.0.1:1080\n' +
+	'\n' +
+	'# an SSH dynamic-forward (ssh -D 1080 host) or any other socks5h endpoint\n' +
+	'export ANON_PI_PROXY=socks5h://127.0.0.1:1080\n' +
+	'\n' +
+	'Only socks5h:// is accepted (plain socks5:// resolves DNS locally and leaks).';
+
+/**
+ * Resolve the anon-pi home dir: the dedicated, browsable workspace folder
+ * (`~/.anon-pi/`, NOT under `~/.config`), holding config.json, machines/<M>/,
+ * and the default global projects root. Overridable via ANON_PI_HOME.
+ */
 export function resolveAnonPiHome(env: AnonPiEnv): string {
+	if (env.anonPiHome) return resolve(env.anonPiHome);
+	return join(env.home, '.anon-pi');
+}
+
+/**
+ * The LEGACY anon-pi home (`$XDG_CONFIG_HOME/anon-pi` or `~/.config/anon-pi`).
+ * Still used by the pre-workspace seed resolvers (resolveConfigSeed,
+ * stateAgentDir) that the old `import`/`buildRunPlan` path reads; those are
+ * retired by a later task. Kept SEPARATE from resolveAnonPiHome so moving the
+ * NEW home to `~/.anon-pi` does not silently relocate the legacy seed/state.
+ */
+function legacyAnonPiHome(env: AnonPiEnv): string {
 	if (env.anonPiHome) return resolve(env.anonPiHome);
 	const base =
 		env.xdgConfigHome && env.xdgConfigHome.trim() !== ''
@@ -154,14 +201,151 @@ export function resolveAnonPiHome(env: AnonPiEnv): string {
 	return join(base, 'anon-pi');
 }
 
+/** A machine's directory: <home>/machines/<name> (holds machine.json + home/). */
+export function machineDir(env: AnonPiEnv, name: string): string {
+	return join(resolveAnonPiHome(env), 'machines', name);
+}
+
+/** A machine's persistent HOST home: <home>/machines/<name>/home (bind-mounted at /root). */
+export function machineHomeDir(env: AnonPiEnv, name: string): string {
+	return join(machineDir(env, name), 'home');
+}
+
+/** A machine's machine.json path: <home>/machines/<name>/machine.json. */
+export function machineJsonPath(env: AnonPiEnv, name: string): string {
+	return join(machineDir(env, name), 'machine.json');
+}
+
+/** The built-in default global projects root: <home>/projects. */
+export function builtinProjectsRoot(env: AnonPiEnv): string {
+	return join(resolveAnonPiHome(env), 'projects');
+}
+
+/** Parsed shape of config.json. All fields optional (a hand-edited file may omit any). */
+export interface AnonPiConfig {
+	/** socks5h proxy URL. */
+	proxy?: string;
+	/** The local-model direct target (host[:port]). */
+	llm?: string;
+	/** The machine bare `anon-pi` launches by default. */
+	defaultMachine?: string;
+	/** Override the projects root (host dir mounted at /projects). */
+	projects?: string;
+}
+
+/** Parsed shape of a per-machine machine.json. All fields optional. */
+export interface MachineConfig {
+	/** The container image with `pi` on PATH for this machine. */
+	image?: string;
+	/** Per-machine projects-root override (above config, below env/--mount). */
+	projects?: string;
+}
+
+/** Pick a string field from a parsed-JSON object, or undefined if absent/non-string. */
+function strField(o: unknown, key: string): string | undefined {
+	if (!o || typeof o !== 'object') return undefined;
+	const v = (o as Record<string, unknown>)[key];
+	return typeof v === 'string' ? v : undefined;
+}
+
+/**
+ * PURE: parse an already-JSON-decoded config.json value into an AnonPiConfig,
+ * keeping only the known string fields (defensive against a hand-edited file).
+ * Tolerates undefined/null/partial input (an absent config is `{}`).
+ */
+export function parseConfigJson(raw: unknown): AnonPiConfig {
+	const out: AnonPiConfig = {};
+	const proxy = strField(raw, 'proxy');
+	if (proxy !== undefined) out.proxy = proxy;
+	const llm = strField(raw, 'llm');
+	if (llm !== undefined) out.llm = llm;
+	const defaultMachine = strField(raw, 'defaultMachine');
+	if (defaultMachine !== undefined) out.defaultMachine = defaultMachine;
+	const projects = strField(raw, 'projects');
+	if (projects !== undefined) out.projects = projects;
+	return out;
+}
+
+/**
+ * PURE: parse an already-JSON-decoded machine.json value into a MachineConfig.
+ * Tolerates undefined/null/partial input (an absent machine.json is `{}`).
+ */
+export function parseMachineJson(raw: unknown): MachineConfig {
+	const out: MachineConfig = {};
+	const image = strField(raw, 'image');
+	if (image !== undefined) out.image = image;
+	const projects = strField(raw, 'projects');
+	if (projects !== undefined) out.projects = projects;
+	return out;
+}
+
+/** A non-empty (after-trim) string, or undefined. */
+function nonEmpty(v: string | undefined): string | undefined {
+	return v && v.trim() !== '' ? v.trim() : undefined;
+}
+
+/**
+ * PURE: resolve the projects root (the host dir mounted at /projects) with the
+ * decided precedence, highest first:
+ *   --mount (CLI) > env ANON_PI_PROJECTS > machine.json.projects >
+ *   config.json.projects > built-in <home>/projects
+ * This task delivers the config/env/machine layers; `mountParent` is the
+ * documented top slot the later --mount CLI task threads in (pass the resolved
+ * host parent). A relative override is resolved to an absolute path.
+ */
+export function resolveProjectsRoot(args: {
+	env: AnonPiEnv;
+	config?: AnonPiConfig;
+	machine?: MachineConfig;
+	/** The later --mount CLI override (a HOST parent path); top of the chain. */
+	mountParent?: string;
+}): string {
+	const {env, config, machine, mountParent} = args;
+	const pick =
+		nonEmpty(mountParent) ??
+		nonEmpty(env.projects) ??
+		nonEmpty(machine?.projects) ??
+		nonEmpty(config?.projects);
+	if (pick !== undefined) return resolve(pick);
+	return builtinProjectsRoot(env);
+}
+
+/**
+ * PURE: resolve the proxy with env-over-config precedence, REQUIRED /
+ * fail-closed. Throws AnonPiError with the verbatim PROXY_REQUIRED_MESSAGE when
+ * neither env nor config supplies a non-empty proxy (never a guessed default:
+ * fail-closed is the anonymity invariant).
+ */
+export function resolveProxy(args: {
+	config?: AnonPiConfig;
+	env: {proxy?: string};
+}): string {
+	const pick = nonEmpty(args.env.proxy) ?? nonEmpty(args.config?.proxy);
+	if (pick === undefined) throw new AnonPiError(PROXY_REQUIRED_MESSAGE);
+	return pick;
+}
+
+/**
+ * PURE: resolve the local-model direct target with env-over-config precedence.
+ * Unlike the proxy this is NOT fail-closed here (a launch with no local model
+ * is a later decision); returns undefined when neither supplies one.
+ */
+export function resolveLlm(args: {
+	config?: AnonPiConfig;
+	env: {llmDirect?: string};
+}): string | undefined {
+	return nonEmpty(args.env.llmDirect) ?? nonEmpty(args.config?.llm);
+}
+
 /**
  * The CANONICAL host seed dir holding models.json (written by `anon-pi import`).
  * Mounted read-only so the first-launch seed can copy models.json into a fresh
- * persistent home. Workdir-independent (import does not need a workdir).
+ * persistent home. Workdir-independent (import does not need a workdir). Uses
+ * the LEGACY home (retired by a later task).
  */
 export function resolveConfigSeed(env: AnonPiEnv): string {
 	if (env.configSeed) return resolve(env.configSeed);
-	return join(resolveAnonPiHome(env), 'agent');
+	return join(legacyAnonPiHome(env), 'agent');
 }
 
 /**
@@ -180,7 +364,7 @@ export function pathSlug(absPath: string): string {
  *   <anonPiHome>/state/<slug>/agent
  */
 export function stateAgentDir(env: AnonPiEnv, absWorkdir: string): string {
-	return join(resolveAnonPiHome(env), 'state', pathSlug(absWorkdir), 'agent');
+	return join(legacyAnonPiHome(env), 'state', pathSlug(absWorkdir), 'agent');
 }
 
 /**
@@ -353,24 +537,7 @@ export function buildRunPlan(
 		// guessed (mirrors netcage, which fails closed without --proxy). A silent
 		// default would anonymize through the wrong endpoint, or fail deep in the
 		// jail with a confusing DNS error, if the guessed proxy is not actually up.
-		throw new AnonPiError(
-			'anon-pi: set ANON_PI_PROXY to your socks5h proxy. anon-pi has no default:\n' +
-				'the proxy is what makes the session anonymous, so it is never guessed.\n' +
-				'\n' +
-				'Pick the one you run (copy-paste), then re-run anon-pi:\n' +
-				'\n' +
-				'# Tor (system tor / Tor Browser bundle default port)\n' +
-				'export ANON_PI_PROXY=socks5h://127.0.0.1:9050\n' +
-				'\n' +
-				'# wireproxy -> a WireGuard VPN (Mullvad, Proton, ...); use YOUR configured\n' +
-				'# [Socks5] BindAddress port (1080 in wireproxy examples):\n' +
-				'export ANON_PI_PROXY=socks5h://127.0.0.1:1080\n' +
-				'\n' +
-				'# an SSH dynamic-forward (ssh -D 1080 host) or any other socks5h endpoint\n' +
-				'export ANON_PI_PROXY=socks5h://127.0.0.1:1080\n' +
-				'\n' +
-				'Only socks5h:// is accepted (plain socks5:// resolves DNS locally and leaks).',
-		);
+		throw new AnonPiError(PROXY_REQUIRED_MESSAGE);
 	}
 
 	const home = env.home;
@@ -477,6 +644,7 @@ export function envFromProcess(
 		home: penv.HOME ?? homedir(),
 		proxy: penv.ANON_PI_PROXY,
 		anonPiHome: penv.ANON_PI_HOME,
+		projects: penv.ANON_PI_PROJECTS,
 		configSeed: penv.ANON_PI_CONFIG,
 		image: penv.ANON_PI_IMAGE,
 		llmDirect: penv.ANON_PI_LLM,
