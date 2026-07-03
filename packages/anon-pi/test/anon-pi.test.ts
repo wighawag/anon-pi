@@ -6,6 +6,7 @@ import {
 	builtinProjectsRoot,
 	CONTAINER_AGENT_DIR,
 	envFromProcess,
+	generateModelsJson,
 	hostPortKey,
 	machineDir,
 	machineHomeDir,
@@ -270,6 +271,66 @@ describe('hostPortKey (ANON_PI_LLM vs provider baseUrl matching)', () => {
 
 	it('handles a host with no port', () => {
 		expect(hostPortKey('http://model.local/v1')).toBe('model.local');
+	});
+});
+
+describe('generateModelsJson (endpoint-driven, no host read)', () => {
+	// every endpoint form normalises to the same host:port via hostPortKey, so
+	// they all produce the SAME single-provider models.json.
+	const forms = [
+		'192.168.1.150:8080',
+		'http://192.168.1.150:8080',
+		'http://192.168.1.150:8080/v1',
+		'HTTP://192.168.1.150:8080/v1',
+	];
+
+	it('generates a barebones models.json from each endpoint form', () => {
+		for (const llm of forms) {
+			const m = generateModelsJson(llm);
+			const names = Object.keys(m.providers ?? {});
+			// ONLY the one local provider (no host secrets, no other providers)
+			expect(names).toHaveLength(1);
+			const provider = m.providers?.[names[0]];
+			expect(provider).toBeDefined();
+			// baseUrl points at the normalised host:port (scheme/path stripped, lowercased)
+			expect(provider?.baseUrl).toContain('192.168.1.150:8080');
+		}
+	});
+
+	it('carries ONLY the one local provider (no other providers)', () => {
+		const m = generateModelsJson('192.168.1.150:8080');
+		expect(Object.keys(m.providers ?? {})).toHaveLength(1);
+	});
+
+	it('normalises the endpoint via hostPortKey into the baseUrl', () => {
+		const m = generateModelsJson('http://User:Pass@192.168.1.150:8080/v1');
+		const name = Object.keys(m.providers ?? {})[0];
+		const baseUrl = m.providers?.[name]?.baseUrl ?? '';
+		// user:pass@ dropped, scheme/path stripped from the host:port core
+		expect(baseUrl).toContain('192.168.1.150:8080');
+		expect(baseUrl).not.toContain('User');
+		expect(baseUrl).not.toContain('Pass');
+	});
+
+	it('handles a bare host with no port', () => {
+		const m = generateModelsJson('http://model.local/v1');
+		const name = Object.keys(m.providers ?? {})[0];
+		expect(m.providers?.[name]?.baseUrl).toContain('model.local');
+	});
+
+	it('carries no real apiKey (a benign local placeholder only)', () => {
+		const m = generateModelsJson('192.168.1.150:8080');
+		const name = Object.keys(m.providers ?? {})[0];
+		const key = (m.providers?.[name]?.apiKey ?? '').toLowerCase();
+		expect(['', 'none', 'no-key', 'local', 'ollama']).toContain(key);
+	});
+
+	it('is a plain object with no host-file provenance', () => {
+		// endpoint in -> object out; the generator NEVER reads a host models.json,
+		// so two calls with the same endpoint are deep-equal (pure).
+		expect(generateModelsJson('192.168.1.150:8080')).toEqual(
+			generateModelsJson('192.168.1.150:8080'),
+		);
 	});
 });
 

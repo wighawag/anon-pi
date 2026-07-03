@@ -767,6 +767,55 @@ export function hostPortKey(value: string): string {
 }
 
 /**
+ * The provider key anon-pi gives the single local provider it generates. A
+ * neutral, host-agnostic name (matches the CONTEXT glossary's "local model"):
+ * it carries NO host identity, unlike the old `import` path which kept the
+ * host's own provider key.
+ */
+export const LOCAL_PROVIDER_NAME = 'local';
+
+/**
+ * The pi `api` dialect the generated local provider speaks. Local model servers
+ * (llama.cpp, ollama, LM Studio, vLLM, ...) are overwhelmingly OpenAI-compatible
+ * and serve the completions API under `/v1`, so this is the safe default for an
+ * endpoint captured by `init` (there is no host models.json to copy a dialect
+ * from anymore). See the ## Decisions note in the done record.
+ */
+export const LOCAL_PROVIDER_API = 'openai-completions';
+
+/**
+ * A benign, non-secret apiKey for the local provider (a LAN model rarely needs a
+ * real key). It is in BENIGN_API_KEYS so nothing ever flags it as a real secret.
+ */
+export const LOCAL_PROVIDER_API_KEY = 'none';
+
+/**
+ * PURE: synthesize a barebones pi `models.json` from a single `llm` endpoint
+ * (a URL, `ip:port`, or bare ip). It normalises the endpoint with `hostPortKey`
+ * (drops scheme/path/user:pass@, lowercases) and returns a models.json carrying
+ * exactly ONE local provider pointed at that endpoint.
+ *
+ * This REPLACES the old `import`-from-host-models.json flow: it reads NO host pi
+ * config, so no other provider, no paid API key, no session identity can leak
+ * into the seed. Endpoint in -> object out; `init` / seed-if-fresh write the
+ * result into the machine home.
+ *
+ * The baseUrl is `http://<host[:port]>/v1` (the OpenAI-compatible convention the
+ * completions api uses); the api dialect + benign apiKey are the LOCAL_PROVIDER_*
+ * constants.
+ */
+export function generateModelsJson(llmEndpoint: string): PiModelsFile {
+	const hostPort = hostPortKey(llmEndpoint);
+	const provider: PiProvider = {
+		api: LOCAL_PROVIDER_API,
+		apiKey: LOCAL_PROVIDER_API_KEY,
+		baseUrl: `http://${hostPort}/v1`,
+		models: [],
+	};
+	return {providers: {[LOCAL_PROVIDER_NAME]: provider}};
+}
+
+/**
  * A pi provider entry (as it appears under models.json `providers[name]`). Only
  * the fields anon-pi reads are typed; the rest is preserved verbatim.
  */
