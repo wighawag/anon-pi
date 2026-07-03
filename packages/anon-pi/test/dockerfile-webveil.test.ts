@@ -146,8 +146,35 @@ describe('examples/Dockerfile.pi-webveil structure', () => {
 		expect(dockerfile).not.toMatch(/> \/root\/\.pi\/agent\//);
 	});
 
-	it('pre-trusts /work (staged) so pi does not prompt on the mounted project', () => {
+	it('sets WORKDIR to the projects root /projects (pi default cwd)', () => {
+		// Agrees with the RunPlan: /projects is the projects-root cwd; /work is the
+		// DISTINCT --mount root, never the default WORKDIR.
+		expect(dockerfile).toMatch(/^WORKDIR\s+\/projects\s*$/m);
+		expect(dockerfile).not.toMatch(/^WORKDIR\s+\/work\s*$/m);
+	});
+
+	it('pre-trusts BOTH cwd roots (/projects and /work) so pi does not prompt', () => {
 		expect(dockerfile).toMatch(/\$ANON_PI_STAGE\/trust\.json/);
-		expect(dockerfile).toContain('"/work": true');
+		const trust = extractTrustJson(dockerfile);
+		expect(trust['/projects']).toBe(true);
+		expect(trust['/work']).toBe(true);
 	});
 });
+
+/**
+ * Parse the object written by the
+ * `... && printf '{...}\n' > "$ANON_PI_STAGE/trust.json"` line as JSON, so the
+ * assertions read the actual trusted-paths map rather than a brittle substring.
+ */
+function extractTrustJson(text: string): Record<string, boolean> {
+	const line = text
+		.split('\n')
+		.find((l) => l.includes('trust.json') && l.includes('printf'));
+	expect(line, 'no printf ... > trust.json line').toBeTruthy();
+	const m = /printf\s+'([^']*)'\s*>\s*"\$ANON_PI_STAGE\/trust\.json"/.exec(
+		line as string,
+	);
+	expect(m, 'no single-quoted printf payload for trust.json').toBeTruthy();
+	const payload = (m as RegExpExecArray)[1].replace(/\\n$/, '');
+	return JSON.parse(payload) as Record<string, boolean>;
+}
