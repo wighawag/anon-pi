@@ -2,7 +2,7 @@
 title: CLI data verbs — --delete-home [machine] and --delete-project <project>
 slug: cli-data-verbs-delete-home-project
 prd: machines-and-projects-workspace
-blockedBy: [machine-and-project-resolvers, cli-launch-surface-grammar-a]
+blockedBy: [machine-and-project-resolvers, cli-launch-surface-grammar-a, cli-machine-verbs]
 covers: [19]
 ---
 
@@ -46,8 +46,10 @@ home delete drops one machine's convos but not the project files.
 
 - `machine-and-project-resolvers` (the machine-home + project-folder + session
   slug resolvers these verbs target).
-- `cli-launch-surface-grammar-a` (shared `src/cli.ts`; serialized to avoid
-  conflicts).
+- `cli-launch-surface-grammar-a` (the base launch path in the shared `src/cli.ts`).
+- `cli-machine-verbs` (the PRECEDING `cli-*` task in the `src/cli.ts` chain: the
+  `cli-*` tasks all edit `src/cli.ts`, so they are chained one-after-another to
+  avoid parallel same-file conflicts; build on the version machine-verbs landed).
 
 ## Prompt
 

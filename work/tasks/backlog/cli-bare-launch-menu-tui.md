@@ -2,7 +2,7 @@
 title: CLI bare-launch menu (host-side arrow-key TUI)
 slug: cli-bare-launch-menu-tui
 prd: machines-and-projects-workspace
-blockedBy: [menu-choice-list-and-project-usage, cli-launch-surface-grammar-a]
+blockedBy: [menu-choice-list-and-project-usage, cli-launch-surface-grammar-a, cli-init-onboarding]
 covers: [1, 2, 16]
 ---
 
@@ -57,7 +57,11 @@ TUI.
 - `menu-choice-list-and-project-usage` (the pure choice-list + usage record it
   renders).
 - `cli-launch-surface-grammar-a` (the launch entry points selections dispatch to,
-  and the shared `src/cli.ts`).
+  and the base of the shared `src/cli.ts`).
+- `cli-init-onboarding` (the PRECEDING `cli-*` task in the `src/cli.ts` chain: the
+  `cli-*` tasks all edit `src/cli.ts`, so they are chained one-after-another to
+  avoid parallel same-file conflicts; this is the LAST link, so build on its
+  version).
 
 ## Prompt
 

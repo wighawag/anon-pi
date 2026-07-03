@@ -2,7 +2,7 @@
 title: CLI init onboarding — proxy detect+verify, llm capture, image pick, write config
 slug: cli-init-onboarding
 prd: machines-and-projects-workspace
-blockedBy: [workspace-layout-and-config, models-json-generation-from-llm, cli-launch-surface-grammar-a]
+blockedBy: [workspace-layout-and-config, models-json-generation-from-llm, cli-launch-surface-grammar-a, cli-data-verbs-delete-home-project]
 covers: [17]
 ---
 
@@ -64,8 +64,10 @@ prompts are the thin impure I/O.
 
 - `workspace-layout-and-config` (the `config.json` shape + layout it writes).
 - `models-json-generation-from-llm` (generates the provider from the endpoint).
-- `cli-launch-surface-grammar-a` (shared `src/cli.ts`; serialized to avoid
-  conflicts).
+- `cli-launch-surface-grammar-a` (the base launch path in the shared `src/cli.ts`).
+- `cli-data-verbs-delete-home-project` (the PRECEDING `cli-*` task in the
+  `src/cli.ts` chain: the `cli-*` tasks all edit `src/cli.ts`, so they are chained
+  one-after-another to avoid parallel same-file conflicts; build on its version).
 
 ## Prompt
 

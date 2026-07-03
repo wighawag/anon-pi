@@ -39,34 +39,20 @@ In the pure module (`src/anon-pi.ts`), resolve a RunPlan carrying:
 Keep it pure (no spawns, no fs writes). This is the heart of the rework;
 `buildRunPlan`'s old per-workdir shape is replaced by this per-machine one.
 
-**This task OWNS retiring the legacy launch/state surface it replaces** (the
-`verify` gate runs `pnpm -r test`, so the old tests must go GREEN, not linger
-red): remove/replace the old `buildRunPlan` (per-workdir shape), `stateAgentDir`,
-`resolveConfigSeed` (its last reader was the old `buildRunPlan` you are removing),
-and the now-dead per-workdir container-path constants. Also perform the
-container-path CONSTANT rename in the pure module (`CONTAINER_WORKDIR` + related →
-`/projects`, plus the distinct `--mount` `/work`), so the later
-`images-projects-path-rename` task only edits the Dockerfiles + `trust.json`.
+Keep this task ADDITIVE to the pure module: ADD the new per-machine RunPlan
+resolver + its new tests, and do the container-path CONSTANT rename
+(`CONTAINER_WORKDIR`/related to `/projects`, plus the distinct `--mount`
+`/work`) so the later `images-projects-path-rename` task only edits the
+Dockerfiles + `trust.json`.
 
-**Test-file ownership (shared, split by describe-block).** `anon-pi.test.ts`
-mixes launch/state cases and `import`-selection cases. THIS task owns
-rewriting/retiring the launch/state describe blocks: `buildRunPlan required
-inputs`, `buildRunPlan statefulness`, `buildRunPlan netcage argv`, `stateAgentDir
-(persistent per-workdir home)`, and the `resolveConfigSeed`/`ANON_PI_CONFIG`
-cases inside `path resolution` (its `resolveAnonPiHome` cases were already updated
-by the `workspace-layout-and-config` blocker to the `~/.anon-pi/` default; you
-remove only the now-dead `resolveConfigSeed` cases). LEAVE the
-`import`-selection blocks (`pickProviderForLlm (import selection)`,
-`resolveSourceModelsPath (import reads FROM)`) untouched — those are retired by
-`models-json-generation-from-llm`, which is `blockedBy` THIS task and rebases
-onto the file you leave. Do not delete the whole file; hand it over with only the
-import blocks remaining. LEAVE `hostPortKey` and `pathSlug` as-is (they survive
-unchanged), and LEAVE the `envFromProcess mapping` block alone: its dead-env-key
-cleanup (`ANON_PI_CONFIG`/`ANON_PI_SOURCE_MODELS`/`ANON_PI_EPHEMERAL`) is owned by
-`cli-launch-surface-grammar-a` (the last launch-path reader of those fields).
-(The `HELP` string and the
-`--fresh`/`--ephemeral`/`import` CLI surface are retired by
-`cli-launch-surface-grammar-a`.)
+**Do NOT delete the old `buildRunPlan`/`stateAgentDir`/`resolveConfigSeed` here.**
+`cli.ts` still imports and calls them, so removing them now would break
+`pnpm -r build` (the gate) before the CLI is migrated. Leave them in place,
+dead-but-present; the coordinated removal of the WHOLE legacy pure surface (those
+symbols + `pickProviderForLlm`/`resolveSourceModelsPath` + the `HELP` string +
+the dead `envFromProcess`/`AnonPiEnv` fields) and their `anon-pi.test.ts` describe
+blocks is owned by `cli-launch-surface-grammar-a`, the one task that also removes
+their last readers in `cli.ts`, so the build stays green. This task only ADDS.
 
 ## Acceptance criteria
 
@@ -86,22 +72,17 @@ cleanup (`ANON_PI_CONFIG`/`ANON_PI_SOURCE_MODELS`/`ANON_PI_EPHEMERAL`) is owned 
 - [ ] Tests cover the new behaviour (mirror existing pure-module test style),
       including the two-mount invariant, `--rm` on/off, forwarded args, and the
       forced-egress-on-every-mode assertion.
-- [ ] The legacy launch/state surface this replaces is RETIRED, not left dead:
-      old `buildRunPlan` (per-workdir shape), `stateAgentDir`, `resolveConfigSeed`,
-      and the dead per-workdir container-path constants are removed/replaced, and
-      the `anon-pi.test.ts` `buildRunPlan`/`stateAgentDir` blocks + the
-      `resolveConfigSeed`/`ANON_PI_CONFIG` cases in `path resolution` are rewritten
-      or deleted (no red tests remain). `envFromProcess mapping` is left to
-      `cli-launch-surface-grammar-a`.
-- [ ] The `import`-selection describe blocks in `anon-pi.test.ts`
-      (`pickProviderForLlm`, `resolveSourceModelsPath`) are LEFT INTACT for
-      `models-json-generation-from-llm` (which is serialized after this task); the
-      test file is handed over, not deleted wholesale.
+- [ ] This task is ADDITIVE to the pure module: it does NOT delete the old
+      `buildRunPlan`/`stateAgentDir`/`resolveConfigSeed` (still called by `cli.ts`,
+      so deleting them now would break `pnpm -r build`). Their coordinated removal
+      is owned by `cli-launch-surface-grammar-a`. No existing describe block is
+      rewritten here.
 - [ ] The container-path constant is renamed in the pure module
       (`CONTAINER_WORKDIR`/related → `/projects`, distinct `--mount` `/work`), so
       the images task only touches Dockerfiles + `trust.json`.
 - [ ] Every change produces a changeset; the `verify` gate passes (green
-      `pnpm -r test`, no lingering failures from the retired model).
+      `pnpm -r build` + `pnpm -r test` at THIS step, with the old symbols still
+      present and unused by the new code).
 - [ ] Tests ISOLATE any path derivation against a temp anon-pi home; no real
       `~/.anon-pi` is touched.
 
@@ -134,28 +115,21 @@ apt-install/re-enter flow). Forward `<pi-args…>` through to `pi`; `--shell`
 runs `bash`. Keep the marker-guarded seed-if-fresh but keyed per MACHINE home
 (reuse the `containerRunCmd` seed shape, re-pointed at `/root`).
 
-You OWN retiring the launch/state surface this replaces (verify runs `pnpm -r
-test`, so nothing may stay red): remove/replace the old `buildRunPlan`,
-`stateAgentDir`, and `resolveConfigSeed`, plus the dead per-workdir
-container-path constants, and rewrite or delete their `anon-pi.test.ts` describe
-blocks (`buildRunPlan required inputs`, `buildRunPlan statefulness`, `buildRunPlan
-netcage argv`, `stateAgentDir (persistent per-workdir home)`, and the
-`resolveConfigSeed`/`ANON_PI_CONFIG` cases in `path resolution`). Do the
-container-path CONSTANT rename here too (`CONTAINER_WORKDIR`/related →
-`/projects`; distinct `--mount` `/work`), so the images task only edits the
-Dockerfiles + `trust.json`. Do NOT touch: the `resolveAnonPiHome` cases in `path
-resolution` (already updated by `workspace-layout-and-config`), the
-`envFromProcess mapping` block (its dead-env-key cleanup is owned by
-`cli-launch-surface-grammar-a`), the `import`-source logic
-`pickProviderForLlm`/`resolveSourceModelsPath` (retired by
-`models-json-generation-from-llm`, serialized after you), or the
-`HELP`/`--fresh`/`--ephemeral`/`import` CLI surface (retired by
-`cli-launch-surface-grammar-a`). Hand `anon-pi.test.ts` over with the import
-blocks intact.
+Keep this task ADDITIVE to the pure module: ADD the new RunPlan resolver + its
+new tests, and do the container-path CONSTANT rename (`CONTAINER_WORKDIR`/related
+→ `/projects`; distinct `--mount` `/work`) so the images task only edits the
+Dockerfiles + `trust.json`. Do NOT delete the old
+`buildRunPlan`/`stateAgentDir`/`resolveConfigSeed` (or any other legacy symbol):
+`cli.ts` still calls them, so removing them now breaks `pnpm -r build` before the
+CLI is migrated. Leave them dead-but-present. The coordinated removal of the whole
+legacy pure surface (those symbols + `pickProviderForLlm`/`resolveSourceModelsPath`
++ the `HELP` string + the dead `envFromProcess`/`AnonPiEnv` fields) and their
+`anon-pi.test.ts` describe blocks is owned by `cli-launch-surface-grammar-a`, the
+one task that also removes their last `cli.ts` readers so the build stays green.
 
 Keep it PURE (no spawn/fs). Test every mode at the RunPlan seam, and assert the
-forced-egress argv on EVERY mode. "Done" = the RunPlan resolver + the retired
-legacy surface + tests all green under `verify` (no lingering failures), with a
+forced-egress argv on EVERY mode. "Done" = the new RunPlan resolver + the constant
+rename + tests all green under `verify` (old symbols still present, unused), with a
 changeset. The run-vs-start (kept-container) DECISION and the CLI spawn are
 separate later tasks; this task only produces the plan.
 

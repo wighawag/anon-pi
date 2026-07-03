@@ -23,23 +23,21 @@ In the pure module (`src/anon-pi.ts`):
 - Keep it pure (endpoint in → models.json object out); the CLI writes it into the
   machine home.
 
-**This task OWNS retiring the `import`-source pure logic + its tests.** Because
-`import` is dropped (no CLI path will call them after this task and
-`cli-launch-surface-grammar-a`/`cli-init-onboarding`), remove
-`pickProviderForLlm` and `resolveSourceModelsPath` and rewrite/delete ONLY the
-`anon-pi.test.ts` describe blocks pinned to them — `pickProviderForLlm (import
-selection)` and `resolveSourceModelsPath (import reads FROM)`. The `verify` gate
-runs `pnpm -r test`, so leave no red tests behind.
+**This task is ADDITIVE: it does NOT delete the old `import`-source logic.**
+`cli.ts` still imports and calls `pickProviderForLlm` and
+`resolveSourceModelsPath` (in its `import` subcommand), so removing them here
+would break `pnpm -r build` before the CLI is migrated. ADD the new endpoint-driven
+generator + its new tests, and LEAVE `pickProviderForLlm`/`resolveSourceModelsPath`
+and their `anon-pi.test.ts` describe blocks in place, dead-but-present. Their
+coordinated removal (together with the other legacy pure symbols and the `import`
+CLI dispatch that reads them) is owned by `cli-launch-surface-grammar-a`, the task
+that removes their last `cli.ts` readers so the build stays green.
 
-**Shared test file — REBASE, do not fight.** This task is `blockedBy`
-`launch-run-plan-resolution`, which has ALREADY rewritten the launch/state
-describe blocks in the SAME `anon-pi.test.ts` (buildRunPlan/stateAgentDir/
-resolveConfigSeed) and handed the file over with only the two import blocks
-remaining. Build on THAT restructured file: touch only the two import blocks;
-do not re-touch the launch/state blocks it already retired. (The per-workdir
-`buildRunPlan`/`stateAgentDir` retirement is owned by
-`launch-run-plan-resolution`; the `HELP`/`import`-dispatch retirement by
-`cli-launch-surface-grammar-a`.)
+**Same-file ordering.** This task is `blockedBy` `launch-run-plan-resolution`
+only to SERIALIZE the additive edits both make to `src/anon-pi.ts` (each adds a
+function; run-plan also renames the container-path constant), avoiding a
+same-file merge conflict — there is no logical dependency and neither retires the
+other's symbols.
 
 ## Acceptance criteria
 
@@ -49,15 +47,14 @@ do not re-touch the launch/state blocks it already retired. (The per-workdir
       other providers — the anonymity hygiene the old `import` preserved).
 - [ ] No host `~/.pi/agent/models.json` is read (the `import` source model is
       gone).
-- [ ] The `import`-source pure logic is RETIRED: `pickProviderForLlm` and
-      `resolveSourceModelsPath` are removed and ONLY their two `anon-pi.test.ts`
-      describe blocks (`pickProviderForLlm`, `resolveSourceModelsPath`) are
-      rewritten/deleted; the launch/state blocks already retired by
-      `launch-run-plan-resolution` are not re-touched (no red tests remain).
+- [ ] This task is ADDITIVE: `pickProviderForLlm`/`resolveSourceModelsPath` and
+      their `anon-pi.test.ts` blocks are LEFT IN PLACE (still called by `cli.ts`'s
+      `import` path; removing them now breaks `pnpm -r build`). Their removal is
+      owned by `cli-launch-surface-grammar-a`. No existing block is rewritten here.
 - [ ] Tests cover the new behaviour (mirror existing pure-module test style):
       generation from each endpoint form, single-provider output.
 - [ ] Every change produces a changeset; the `verify` gate passes (green
-      `pnpm -r test`).
+      `pnpm -r build` + `pnpm -r test`, old import-source symbols still present).
 - [ ] Tests write nothing outside temp fixtures (the generator is pure; any
       file-write test isolates to a temp dir).
 
@@ -89,15 +86,14 @@ config (no leakage of other providers/keys). Keep it pure; `init` and
 seed-if-fresh (other tasks) write it into the machine home.
 
 Test the generator at its seam (each endpoint form → single-provider output).
-You OWN retiring the `import`-source pure logic: remove `pickProviderForLlm` and
-`resolveSourceModelsPath` and rewrite/delete ONLY their two `anon-pi.test.ts`
-describe blocks (`pickProviderForLlm`, `resolveSourceModelsPath`); the `verify`
-gate runs `pnpm -r test`, so no red tests may remain. IMPORTANT: this task is
-serialized AFTER `launch-run-plan-resolution`, which already retired the
-launch/state describe blocks in the SAME test file and left only the two import
-blocks for you — rebase onto that restructured file and touch only those two
-blocks (do not re-retire the launch/state ones). "Done" = the generator + the
-retired import-source logic + tests all green under `verify`, with a changeset.
+This task is ADDITIVE: do NOT remove `pickProviderForLlm`/`resolveSourceModelsPath`
+or their test blocks — `cli.ts`'s `import` path still calls them, so removing them
+now breaks `pnpm -r build`. Leave them dead-but-present; their removal is owned by
+`cli-launch-surface-grammar-a` (which removes the last readers). This task is
+`blockedBy` `launch-run-plan-resolution` only to serialize the additive
+`src/anon-pi.ts` edits (avoid a same-file conflict); it does not depend on or
+touch that task's symbols. "Done" = the new generator + its new tests green under
+`verify` (`pnpm -r build` + `pnpm -r test`), with a changeset.
 
 > RECORD non-obvious in-scope decisions (the provider api shape) as a
 > `## Decisions` note, or an ADR if it meets the gate.

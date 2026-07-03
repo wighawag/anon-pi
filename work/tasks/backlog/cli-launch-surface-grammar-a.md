@@ -2,7 +2,7 @@
 title: CLI launch surface (grammar A) — parse, run-vs-start query, spawn netcage
 slug: cli-launch-surface-grammar-a
 prd: machines-and-projects-workspace
-blockedBy: [launch-run-plan-resolution, run-vs-start-kept-container-decision]
+blockedBy: [launch-run-plan-resolution, run-vs-start-kept-container-decision, models-json-generation-from-llm]
 covers: [3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 16, 20]
 ---
 
@@ -39,20 +39,35 @@ of THIS task — bare launch dispatches to the menu task's entry point (add a
 stub/hook so this task can land with `<project>`/`--shell` working and the menu
 wired in next).
 
-**This task OWNS retiring the legacy CLI surface + its tests** (the `verify` gate
-runs `pnpm -r test`, so nothing may stay red): rewrite the `HELP` string to the
-new model (drop `import`/`--fresh`/`--ephemeral`/the per-workdir docs), delete
-or rewrite `cli-fresh.test.ts` (the `--fresh` flow it exercises is gone), and
-retire any CLI test locked to `--ephemeral`/`import`/the per-workdir launch.
-Because this task removes the LAST readers of the dead env fields in `cli.ts`
-(the `--ephemeral` flow), it ALSO owns the final `AnonPiEnv`/`envFromProcess`
-cleanup: drop the `ephemeral`/`configSeed`/`sourceModels` fields + the
-`ANON_PI_EPHEMERAL`/`ANON_PI_CONFIG`/`ANON_PI_SOURCE_MODELS` mappings, and rewrite
-the `envFromProcess mapping` describe block in `anon-pi.test.ts` accordingly (the
-earlier tasks left these in place precisely so no mid-chain build broke). The
-pure-module `buildRunPlan`/`stateAgentDir`/`resolveConfigSeed` retirement is owned
-by `launch-run-plan-resolution` (a blocker); the `import`-source pure logic by
-`models-json-generation-from-llm`.
+**This task OWNS the COORDINATED removal of the entire legacy surface** (the
+`verify` gate runs `pnpm -r build && pnpm -r test`, so it must stay green: the
+readers and the symbols they read go in the SAME task). By the time this task
+runs, the new RunPlan resolver (`launch-run-plan-resolution`) and the new
+models.json generator (`models-json-generation-from-llm`) already exist ALONGSIDE
+the old symbols, which are still present only because `cli.ts` still reads them.
+This task rewrites `cli.ts` onto the new pure surface and THEN deletes, in one
+green step:
+
+- the old pure-module symbols now that their only reader (`cli.ts`) is gone:
+  `buildRunPlan` (old shape), `stateAgentDir`, `resolveConfigSeed`,
+  `pickProviderForLlm`, `resolveSourceModelsPath`, and the dead
+  `AnonPiEnv`/`envFromProcess` fields (`ephemeral`/`configSeed`/`sourceModels` +
+  the `ANON_PI_EPHEMERAL`/`ANON_PI_CONFIG`/`ANON_PI_SOURCE_MODELS` mappings);
+- their `anon-pi.test.ts` describe blocks: `buildRunPlan required inputs`,
+  `buildRunPlan statefulness`, `buildRunPlan netcage argv`, `stateAgentDir
+  (persistent per-workdir home)`, `pickProviderForLlm (import selection)`,
+  `resolveSourceModelsPath (import reads FROM)`, the `resolveConfigSeed`/
+  `ANON_PI_CONFIG` cases in `path resolution`, and the `envFromProcess mapping`
+  block (LEAVE the `resolveAnonPiHome` cases in `path resolution` — already
+  updated by `workspace-layout-and-config` — and the surviving `hostPortKey`/
+  `pathSlug` blocks);
+- the `HELP` string (rewrite to the new model, dropping
+  `import`/`--fresh`/`--ephemeral`/the per-workdir docs) and the CLI tests
+  (`cli-fresh.test.ts` + any test asserting `--ephemeral`/`import`/the per-workdir
+  launch).
+
+(The container-path CONSTANT rename to `/projects` was already done by
+`launch-run-plan-resolution`.)
 
 ## Acceptance criteria
 
@@ -76,6 +91,15 @@ by `launch-run-plan-resolution` (a blocker); the `import`-source pure logic by
       last readers are gone: `ephemeral`/`configSeed`/`sourceModels` +
       `ANON_PI_EPHEMERAL`/`ANON_PI_CONFIG`/`ANON_PI_SOURCE_MODELS` are dropped and
       the `envFromProcess mapping` describe block is rewritten (no red tests).
+- [ ] The now-orphaned legacy PURE symbols are removed in this same task (their
+      only reader was `cli.ts`, now rewritten): `buildRunPlan` (old shape),
+      `stateAgentDir`, `resolveConfigSeed`, `pickProviderForLlm`,
+      `resolveSourceModelsPath`, plus their `anon-pi.test.ts` describe blocks
+      (`buildRunPlan*`, `stateAgentDir`, `pickProviderForLlm`,
+      `resolveSourceModelsPath`, and the `resolveConfigSeed` cases in `path
+      resolution`). `resolveAnonPiHome`/`hostPortKey`/`pathSlug` are kept.
+- [ ] `pnpm -r build` + `pnpm -r test` are GREEN in this task with NO dangling
+      references (the reader rewrite + the symbol removal land together).
 - [ ] Tests cover parsing + dispatch decisions at the pure seam (the RunPlan +
       run-vs-start inputs); the raw spawn/TTY I/O stays thin/untested. Mirror the
       existing `cli-*.test.ts` style.
@@ -86,9 +110,14 @@ by `launch-run-plan-resolution` (a blocker); the `import`-source pure logic by
 
 ## Blocked by
 
-- `launch-run-plan-resolution` (the RunPlan it executes).
+- `launch-run-plan-resolution` (the RunPlan it executes; adds the new pure surface
+  this task rewrites `cli.ts` onto, then removes the old one).
 - `run-vs-start-kept-container-decision` (the decision rule + query seam it wires
   to real netcage).
+- `models-json-generation-from-llm` (adds the new generator ALONGSIDE the old
+  `import`-source symbols; this task then removes those old symbols as the last
+  step of the coordinated legacy-surface removal — so it must land after the
+  generator exists and after the old symbols are no longer needed by new code).
 
 ## Prompt
 
@@ -113,17 +142,22 @@ container if present, else `netcage run`; `--rm` always fresh), and spawn with
 inherited stdio propagating the exit code. Drop the old per-workdir launch,
 `--ephemeral`/`--fresh`, and `import` dispatch.
 
-You OWN retiring the legacy CLI surface + its tests so the `verify` gate stays
-green (it runs `pnpm -r test`): rewrite the `HELP` string to the new model, and
-delete/rewrite `cli-fresh.test.ts` plus any CLI test asserting the removed
-`--ephemeral`/`import`/per-workdir flags. Because you remove the LAST readers of
-the dead env fields (the `--ephemeral` cli.ts flow), you also do the final
-`AnonPiEnv`/`envFromProcess` cleanup: drop `ephemeral`/`configSeed`/`sourceModels`
-+ their `ANON_PI_*` mappings and rewrite the `envFromProcess mapping` test block
-(earlier tasks deliberately left these so no mid-chain build broke). (The
-pure-module `buildRunPlan`/`stateAgentDir`/`resolveConfigSeed` retirement is owned
-by the `launch-run-plan-resolution` blocker; the `import`-source pure logic by
-`models-json-generation-from-llm`.)
+You OWN the COORDINATED removal of the whole legacy surface, because the `verify`
+gate runs `pnpm -r build && pnpm -r test` and `cli.ts` is the LAST reader of the
+old symbols. The prior tasks ADDED the new RunPlan resolver + models.json
+generator alongside the old symbols and deliberately did NOT delete them (that
+would have broken the build while `cli.ts` still called them). Now that you
+rewrite `cli.ts` onto the new surface, delete in the SAME green step: the old
+pure symbols `buildRunPlan`/`stateAgentDir`/`resolveConfigSeed`/
+`pickProviderForLlm`/`resolveSourceModelsPath`, the dead
+`AnonPiEnv`/`envFromProcess` fields
+(`ephemeral`/`configSeed`/`sourceModels` + their `ANON_PI_*` mappings), the `HELP`
+string (rewrite to the new model), `cli-fresh.test.ts`, and the corresponding
+`anon-pi.test.ts` describe blocks (`buildRunPlan*`, `stateAgentDir`,
+`pickProviderForLlm`, `resolveSourceModelsPath`, the `resolveConfigSeed` cases in
+`path resolution`, and `envFromProcess mapping`). KEEP the `resolveAnonPiHome`
+cases and the `hostPortKey`/`pathSlug` blocks. End with no dangling references and
+a green build.
 
 Keep the interactive menu TUI OUT of this task — wire bare launch to a menu
 hook/stub the next task fills. Keep logic in the pure module; `cli.ts` stays thin
@@ -131,8 +165,11 @@ I/O. "Done" = `<project>`, `<project> <args>`, `--shell`, `-m`, `--mount`,
 `--keep`/`--rm` all working end-to-end, tests green under `verify`, with a
 changeset.
 
-Note: this task and the other `cli-*` tasks all edit `src/cli.ts` and are
-serialized via `blockedBy` to avoid conflicts — build on the landed version.
+Note: this task is the BASE of the `src/cli.ts` chain. All the `cli-*` tasks edit
+`src/cli.ts`, so they are chained one-after-another via `blockedBy` to avoid
+parallel same-file conflicts: this task first, then
+`cli-machine-verbs` → `cli-data-verbs-delete-home-project` → `cli-init-onboarding`
+→ `cli-bare-launch-menu-tui`. Each builds on the version the previous one landed.
 
 > RECORD non-obvious in-scope decisions (exit codes, exclusivity messages) as an
 > ADR if they meet the gate, else a `## Decisions` note.

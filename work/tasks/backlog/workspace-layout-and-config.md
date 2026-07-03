@@ -37,10 +37,13 @@ launch path still read `AnonPiEnv.ephemeral`/`configSeed`/`sourceModels` and the
 old env keys. Removing those fields here would break the still-present readers'
 build (`pnpm -r build` in the gate). So: ADD the new layout resolvers +
 config-layer fields (e.g. `projects`/`ANON_PI_PROJECTS`) ALONGSIDE the existing
-ones; the old fields/keys are removed later by the tasks that delete their last
-readers (`launch-run-plan-resolution` retires `buildRunPlan`;
-`cli-launch-surface-grammar-a` retires the `--ephemeral`/per-workdir cli.ts path
-and does the final `AnonPiEnv`/`envFromProcess` cleanup).
+ones; the old fields/keys/symbols are removed later, in ONE coordinated green
+step, by `cli-launch-surface-grammar-a` — the task that rewrites `cli.ts` (the
+last reader) and only THEN deletes the orphaned pure symbols
+(`buildRunPlan`/`stateAgentDir`/`resolveConfigSeed`/`pickProviderForLlm`/
+`resolveSourceModelsPath`), the dead `AnonPiEnv`/`envFromProcess` fields, and the
+`HELP` string. (`launch-run-plan-resolution` and `models-json-generation-from-llm`
+only ADD the new pure surface; they do not delete the old.)
 
 **Test blocks:** this task ADDS new pure-module tests for the layout/config
 resolvers + the new-var mapping. The ONE existing thing it must update is the
