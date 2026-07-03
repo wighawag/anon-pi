@@ -27,6 +27,28 @@ import {fileURLToPath} from 'node:url';
 export const CONTAINER_WORKDIR = '/work';
 
 /**
+ * The jail cwd root for the projects-root launch: the projects root is mounted
+ * here and a project `<name>` is `/projects/<name>` (pi keys a conversation by
+ * its launch cwd, so `/projects/<name>` is the conversation key). This is the
+ * new machines+projects mount, distinct from the legacy CONTAINER_WORKDIR.
+ */
+export const CONTAINER_PROJECTS_ROOT = '/projects';
+
+/**
+ * The jail cwd root for a `--mount <parent>` launch: the HOST parent is mounted
+ * here (kept DISTINCT from /projects so the two roots never collide), and a
+ * project `<name>` is `/work/<name>`. See ADR-0001 (`--mount` keeps `/work`).
+ */
+export const CONTAINER_MOUNT_ROOT = '/work';
+
+/**
+ * The jail cwd root for a machine (its persistent home, bind-mounted at /root).
+ * A machine root has no named subfolders: only the root token `.` (a scratch pi
+ * / shell at `~`) is valid. Written as `~` so it reads as "the machine home".
+ */
+export const CONTAINER_MACHINE_HOME = '~';
+
+/**
  * The container path pi uses as its config+state home. anon-pi mounts a
  * PERSISTENT host dir here (Model B), so everything pi writes, sessions,
  * history, settings (your model choice), `pi install`ed extensions, downloaded
@@ -219,6 +241,113 @@ export function machineJsonPath(env: AnonPiEnv, name: string): string {
 /** The built-in default global projects root: <home>/projects. */
 export function builtinProjectsRoot(env: AnonPiEnv): string {
 	return join(resolveAnonPiHome(env), 'projects');
+}
+
+// --- Name validation + the "." root token ------------------------------------
+
+/**
+ * The project token meaning "the root itself": cwd `/projects` (projects root),
+ * `/work` (`--mount`), or `~` (a machine home). It is NOT a valid machine or
+ * project name (validateName rejects it) so a folder can never shadow it.
+ */
+export const ROOT_TOKEN = '.';
+
+/**
+ * Reserved names that a machine/project may NOT take (case-sensitive). Kept
+ * DELIBERATELY minimal: only the two structural path tokens. `.` is the root
+ * token (see ROOT_TOKEN); `..` is parent-traversal. Both are also rejected by
+ * the leading-dot / `..` structural checks below, but are listed here so the
+ * reserved-name concept is explicit and extendable. `--mount`'s `/work` is a
+ * CONTAINER path, not a name in this namespace, so it needs no reservation.
+ */
+export const RESERVED_NAMES: readonly string[] = ['.', '..'];
+
+/** What a name names, for a clear validation error. */
+export type NameKind = 'machine' | 'project';
+
+/**
+ * PURE: validate a machine or project name as a safe single path segment, and
+ * return it unchanged on success. Rejects (with AnonPiError):
+ *   - empty
+ *   - a path separator `/` or `\`, or a colon `:`
+ *   - the traversal token `..` (and any leading dot, incl. `.`)
+ *   - any whitespace
+ *   - a reserved name (RESERVED_NAMES)
+ * A valid name is thus a single folder segment safe to join under the projects
+ * root or the machines dir with no traversal or drive/scheme surprises.
+ */
+export function validateName(name: string, kind: NameKind): string {
+	const bad = (why: string): never => {
+		throw new AnonPiError(
+			`anon-pi: invalid ${kind} name ${JSON.stringify(name)}: ${why}. ` +
+				`A ${kind} name must be a single folder segment (no / \\ : whitespace, ` +
+				`no leading dot, not "..").`,
+		);
+	};
+	if (name === '') return bad('it is empty');
+	if (/[/\\:]/.test(name)) return bad('it contains / \\ or :');
+	if (/\s/.test(name)) return bad('it contains whitespace');
+	if (name.startsWith('.')) return bad('it starts with a dot');
+	if (name === '..') return bad('it is the parent-traversal token');
+	if (RESERVED_NAMES.includes(name)) return bad('it is a reserved name');
+	return name;
+}
+
+/**
+ * PURE: map a validated project `<name>` to its host folder under the resolved
+ * projects root (the parent from resolveProjectsRoot / a `--mount` parent).
+ * Validates the name (rejecting traversal) so the join stays inside the root.
+ */
+export function projectHostDir(projectsRoot: string, name: string): string {
+	return join(projectsRoot, validateName(name, 'project'));
+}
+
+/**
+ * PURE: the jail cwd for a validated project `<name>`: `/projects/<name>`. This
+ * is pi's conversation key (pi keys a session by its launch cwd). Validates the
+ * name. For the `--mount` root use resolveCwd('mount', name) (=> /work/<name>).
+ */
+export function projectContainerCwd(name: string): string {
+	return `${CONTAINER_PROJECTS_ROOT}/${validateName(name, 'project')}`;
+}
+
+/** Which mounted root a launch cwds into (see the CONTAINER_* root constants). */
+export type RootKind = 'projects' | 'mount' | 'machine';
+
+/** True iff `token` is exactly the root token `.` ("the root itself"). */
+export function isRootToken(token: string | undefined): boolean {
+	return token === ROOT_TOKEN;
+}
+
+/** PURE: the jail cwd of a root itself: /projects, /work (mount), or ~ (machine). */
+export function rootCwd(kind: RootKind): string {
+	switch (kind) {
+		case 'projects':
+			return CONTAINER_PROJECTS_ROOT;
+		case 'mount':
+			return CONTAINER_MOUNT_ROOT;
+		case 'machine':
+			return CONTAINER_MACHINE_HOME;
+	}
+}
+
+/**
+ * PURE: resolve a launch's jail cwd UNIFORMLY from a `token` and its root kind.
+ * The root token `.` means "the root itself" (rootCwd) in every context; any
+ * other token is a project name resolved to `<root>/<name>` (validated). A
+ * machine root has no named subfolders (projects live at /projects or /work,
+ * never under the machine home), so a non-`.` token for a machine is rejected.
+ * This is the one seam so `anon-pi --mount <p> .` and a menu "here" entry agree.
+ */
+export function resolveCwd(kind: RootKind, token: string): string {
+	if (isRootToken(token)) return rootCwd(kind);
+	if (kind === 'machine') {
+		throw new AnonPiError(
+			`anon-pi: a machine root takes only "${ROOT_TOKEN}" (the machine home ${CONTAINER_MACHINE_HOME}), ` +
+				`not a named project ${JSON.stringify(token)}. Projects live under /projects or /work.`,
+		);
+	}
+	return `${rootCwd(kind)}/${validateName(token, 'project')}`;
 }
 
 /** Parsed shape of config.json. All fields optional (a hand-edited file may omit any). */
