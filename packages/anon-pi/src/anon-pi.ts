@@ -2907,12 +2907,16 @@ export function anonPiVersion(): string | undefined {
  *   - `set-image <name> <ref>`: name validated; the new image ref (non-empty).
  *   - `rm <name> [--yes]`: name validated; `yes` skips the confirm (the CLI
  *     still enforces the non-TTY abort when `yes` is false).
+ *   - `snapshot <machine> <new-name> [--image-tag <ref>]`: both names validated;
+ *     commits the source machine's running container into a new image and
+ *     creates <new-name> pinned to it (the CLI does the netcage commit + create).
  */
 export type MachineCommand =
 	| {verb: 'create'; name: string; image?: string}
 	| {verb: 'list'}
 	| {verb: 'set-image'; name: string; image: string}
-	| {verb: 'rm'; name: string; yes: boolean};
+	| {verb: 'rm'; name: string; yes: boolean}
+	| {verb: 'snapshot'; source: string; name: string; imageTag?: string};
 
 /**
  * PURE: parse the tokens AFTER `machine` into a MachineCommand. Validates the
@@ -2934,7 +2938,9 @@ export function parseMachineArgs(args: readonly string[]): MachineCommand {
 
 	const verb = args[0];
 	if (verb === undefined) {
-		fail('`machine` needs a subcommand: create | list | set-image | rm');
+		fail(
+			'`machine` needs a subcommand: create | list | set-image | rm | snapshot',
+		);
 	}
 
 	const rest = args.slice(1);
@@ -3006,9 +3012,58 @@ export function parseMachineArgs(args: readonly string[]): MachineCommand {
 		return {verb: 'rm', name: name as string, yes};
 	}
 
+	if (verb === 'snapshot') {
+		// snapshot <source-machine> <new-name> [--image-tag <ref>]: commit the
+		// source machine's running container into a new image and create <new-name>
+		// pinned to it. Both names are validated (safe machine segments); the
+		// image tag, if given, is a free-form ref.
+		let source: string | undefined;
+		let name: string | undefined;
+		let imageTag: string | undefined;
+		for (let i = 0; i < rest.length; i++) {
+			const a = rest[i];
+			if (a === '--image-tag') {
+				const v = rest[++i];
+				if (v === undefined) fail('--image-tag needs an image ref');
+				imageTag = v as string;
+				continue;
+			}
+			if (a.startsWith('-')) fail(`unknown option: ${a}`);
+			if (source === undefined) {
+				source = validateName(a, 'machine');
+			} else if (name === undefined) {
+				name = validateName(a, 'machine');
+			} else {
+				fail(`machine snapshot takes <machine> <new-name>, got extra: ${a}`);
+			}
+		}
+		if (source === undefined || name === undefined)
+			fail('machine snapshot needs a <machine> and a <new-name>');
+		return {
+			verb: 'snapshot',
+			source: source as string,
+			name: name as string,
+			imageTag: nonEmpty(imageTag),
+		};
+	}
+
 	return fail(
-		`unknown machine subcommand: ${verb} (create | list | set-image | rm)`,
+		`unknown machine subcommand: ${verb} (create | list | set-image | rm | snapshot)`,
 	);
+}
+
+/**
+ * PURE: the default image ref a `machine snapshot` writes when `--image-tag` is
+ * not given: `anon-pi/<name>:snapshot-<ts>`, where <ts> is a compact UTC stamp
+ * (YYYYMMDDHHMMSS) derived from `now`. Deterministic in `now` so it is unit
+ * testable. The name is a validated machine name (a safe image-path segment).
+ */
+export function snapshotImageRef(name: string, now: Date): string {
+	const p = (n: number, w = 2): string => String(n).padStart(w, '0');
+	const ts =
+		`${now.getUTCFullYear()}${p(now.getUTCMonth() + 1)}${p(now.getUTCDate())}` +
+		`${p(now.getUTCHours())}${p(now.getUTCMinutes())}${p(now.getUTCSeconds())}`;
+	return `anon-pi/${name}:snapshot-${ts}`;
 }
 
 /**
@@ -3086,7 +3141,7 @@ USAGE
   anon-pi -m <machine> [<p>]     the same, on <machine> (its own image + home + conversations)
   anon-pi --mount <parent> [<p>] root at a HOST parent folder instead of the projects root
   anon-pi init                   onboard: verify your proxy, capture your local model, pick an image
-  anon-pi machine …              manage machines (create / list / set-image / rm)
+  anon-pi machine …              manage machines (create / list / set-image / rm / snapshot)
   anon-pi --delete-home [<m>]    delete a machine's home (config + convos); keep its image pin + files
   anon-pi --delete-project <p>   delete a project's files + its per-machine sessions; keep the homes
 

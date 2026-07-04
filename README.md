@@ -217,6 +217,8 @@ anon-pi --keep recon       # keep this container; re-entering resumes it
 
 anon-pi finds a kept container by netcage's managed label and `netcage start`s it on re-entry. `--keep` and `--rm` together is an error (pick one; `--rm` is the default).
 
+If you did NOT pass `--keep` but, mid-session, realise you want to preserve what you installed, you can snapshot the **still-running** container into a new machine without exiting (see `machine snapshot` below). The catch is timing: once pi exits, a throwaway (`--rm`) container is already gone, so snapshot only works while the session is still up.
+
 ## Managing machines
 
 ```
@@ -224,7 +226,12 @@ anon-pi machine create <name> [--image <ref>]   create a machine, pin its image
 anon-pi machine list                            list machines and their images
 anon-pi machine set-image <name> <ref>          re-pin the image (WARNS; no reseed)
 anon-pi machine rm <name> [--yes]               delete the machine + its home
+anon-pi machine snapshot <machine> <new-name> [--image-tag <ref>]
+                                                commit <machine>'s RUNNING container
+                                                into a new image + create <new-name>
 ```
+
+`snapshot` captures the current filesystem of `<machine>`'s **running** jailed container (for example after you `sudo apt install` some tools) into a new image, then creates `<new-name>` pinned to it, so you can preserve an environment you built interactively **without** having pre-decided `--keep`. The container must still be running (do not exit the session; podman pauses it briefly during the commit). The new machine gets a **fresh** home (the image is the software; the home, with your config and conversations, is a separate host mount and is not copied). It relaunches through the same forced-egress jail.
 
 A machine's home is seeded on FIRST LAUNCH, not at create. `set-image` re-pins the image only and **warns**: it does not reseed or touch the home, so the home's extensions were built for the old image. `rm` confirms on a TTY, skips the prompt with `--yes`, and aborts non-interactively without it (it never deletes unprompted in a script). `create` with no `--image` and no TTY is an error (a machine needs an image to launch).
 

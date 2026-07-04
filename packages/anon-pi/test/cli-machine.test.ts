@@ -188,6 +188,33 @@ describe('machine rm', () => {
 	});
 });
 
+describe('machine snapshot', () => {
+	it('refuses to clobber an existing target machine (before any commit)', () => {
+		const home = tempHome();
+		run(['machine', 'create', 'recon-net', '--image', 'my/pi:tag'], {home});
+		const r = run(['machine', 'snapshot', 'recon', 'recon-net'], {home});
+		expect(r.status).toBe(1);
+		expect(r.stderr).toContain('already exists');
+	});
+
+	it('with no running container (or no netcage), exits 1 and writes no machine', () => {
+		// Deterministic regardless of whether netcage is on PATH: either the
+		// netcage-missing error or the no-running-container error, both exit 1 and
+		// must NOT create the target machine. Force an empty PATH-ish netcage lookup
+		// is not portable, so we assert the invariant that holds either way.
+		const home = tempHome();
+		const r = run(['machine', 'snapshot', 'ghost', 'ghost-snap'], {home});
+		expect(r.status).toBe(1);
+		expect(existsSync(join(home, 'machines', 'ghost-snap'))).toBe(false);
+	});
+
+	it('rejects an invalid new-name / source-name (traversal guard)', () => {
+		const home = tempHome();
+		expect(run(['machine', 'snapshot', 'a/b', 'ok'], {home}).status).toBe(1);
+		expect(run(['machine', 'snapshot', 'ok', '..'], {home}).status).toBe(1);
+	});
+});
+
 describe('isolation: the real ~/.anon-pi is never touched', () => {
 	it('a full create/list/set-image/rm cycle writes only under the temp home', () => {
 		const realHome = join(homedir(), '.anon-pi');
@@ -215,6 +242,7 @@ describe('machine --help', () => {
 		expect(r.status).toBe(0);
 		expect(r.stdout).toContain('anon-pi machine - manage machines');
 		expect(r.stdout).toContain('set-image');
+		expect(r.stdout).toContain('snapshot');
 		// NOT the global top-level help header.
 		expect(r.stdout).not.toContain('launch pi inside a netcage');
 	});
