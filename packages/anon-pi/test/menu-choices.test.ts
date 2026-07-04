@@ -13,6 +13,8 @@ import {
 	buildMenuChoiceList,
 	deriveProjectUsage,
 	projectSessionSlug,
+	snapshotSessionGroups,
+	copyIncludesForHomeMinusSessions,
 	ROOT_TOKEN,
 	pathSlug,
 	type MenuChoiceList,
@@ -156,5 +158,95 @@ describe('deriveProjectUsage (per-machine, from session-dir presence)', () => {
 				sessions,
 			}),
 		).toThrow();
+	});
+});
+
+describe('snapshotSessionGroups (the snapshot session carry-over rows)', () => {
+	it('maps present slugs to PROJECT rows when the slug matches a known project', () => {
+		const rows = snapshotSessionGroups({
+			presentSlugs: [projectSessionSlug('alpha'), projectSessionSlug('beta')],
+			projects: ['alpha', 'beta', 'gamma'],
+		});
+		expect(rows).toEqual([
+			{slug: projectSessionSlug('alpha'), project: 'alpha', label: 'alpha'},
+			{slug: projectSessionSlug('beta'), project: 'beta', label: 'beta'},
+		]);
+	});
+
+	it('shows an ORPHAN slug (no current project folder) by its raw slug, never hides it', () => {
+		const orphan = projectSessionSlug('ghost');
+		const rows = snapshotSessionGroups({
+			presentSlugs: [orphan, projectSessionSlug('alpha')],
+			projects: ['alpha'], // ghost's folder is gone
+		});
+		const byProject = rows.find((r) => r.project === 'alpha');
+		const byOrphan = rows.find((r) => r.slug === orphan);
+		expect(byProject).toBeDefined();
+		expect(byOrphan).toBeDefined();
+		expect(byOrphan!.project).toBeUndefined();
+		expect(byOrphan!.label).toContain(orphan);
+	});
+
+	it('sorts named projects first (case-insensitive), then orphan slugs', () => {
+		const orphan = projectSessionSlug('zzz-gone');
+		const rows = snapshotSessionGroups({
+			presentSlugs: [
+				projectSessionSlug('Beta'),
+				orphan,
+				projectSessionSlug('alpha'),
+			],
+			projects: ['alpha', 'Beta'],
+		});
+		// named (alpha, Beta) before the orphan, regardless of input order.
+		expect(rows.map((r) => r.project ?? `<${r.slug}>`)).toEqual([
+			'alpha',
+			'Beta',
+			`<${orphan}>`,
+		]);
+	});
+
+	it('an empty present-slug set yields no rows', () => {
+		expect(
+			snapshotSessionGroups({presentSlugs: [], projects: ['alpha']}),
+		).toEqual([]);
+	});
+});
+
+describe('copyIncludesForHomeMinusSessions (the home-copy filter)', () => {
+	const sess = '/home/machines/recon/home/.pi/agent/sessions';
+	it('copies the home root, config, and non-session files', () => {
+		expect(
+			copyIncludesForHomeMinusSessions('/home/machines/recon/home', sess),
+		).toBe(true);
+		expect(
+			copyIncludesForHomeMinusSessions(
+				'/home/machines/recon/home/.pi/agent/config.json',
+				sess,
+			),
+		).toBe(true);
+		expect(
+			copyIncludesForHomeMinusSessions(
+				'/home/machines/recon/home/.bashrc',
+				sess,
+			),
+		).toBe(true);
+	});
+
+	it('EXCLUDES the sessions dir itself and everything beneath it', () => {
+		expect(copyIncludesForHomeMinusSessions(sess, sess)).toBe(false);
+		expect(
+			copyIncludesForHomeMinusSessions(`${sess}/--projects-alpha--`, sess),
+		).toBe(false);
+		expect(
+			copyIncludesForHomeMinusSessions(
+				`${sess}/--projects-alpha--/001.jsonl`,
+				sess,
+			),
+		).toBe(false);
+	});
+
+	it('does NOT exclude a sibling whose name only PREFIXES the sessions dir', () => {
+		// `sessions-backup` starts with `sessions` but is NOT under `sessions/`.
+		expect(copyIncludesForHomeMinusSessions(`${sess}-backup`, sess)).toBe(true);
 	});
 });

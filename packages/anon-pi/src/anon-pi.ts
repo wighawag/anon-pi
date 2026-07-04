@@ -2034,6 +2034,71 @@ export function deriveProjectUsage(args: {
 }
 
 /**
+ * ONE session group a `machine snapshot` can carry over: a `sessions/<slug>/`
+ * dir in the source home. `project` is the project name when the slug matches a
+ * known project's `projectSessionSlug` (else undefined: an ORPHAN slug with no
+ * matching project, still offered, labelled by its raw slug so nothing hides).
+ * `label` is the human row text. `slug` is the exact dir name to copy/delete.
+ */
+export interface SnapshotSessionGroup {
+	slug: string;
+	project?: string;
+	label: string;
+}
+
+/**
+ * PURE: the cpSync filter predicate for a snapshot's "copy the home MINUS the
+ * sessions subtree" copy: true = copy `src`, false = skip it. It rejects the
+ * sessions dir itself and everything beneath it (`<sessionsDir>` and
+ * `<sessionsDir>/...`), and copies everything else. Extracted so the
+ * home-minus-sessions contract is unit-testable without the fs.
+ */
+export function copyIncludesForHomeMinusSessions(
+	src: string,
+	sessionsDir: string,
+): boolean {
+	return src !== sessionsDir && !src.startsWith(sessionsDir + '/');
+}
+
+/**
+ * PURE: map the session-dir slugs PRESENT under a source machine's `sessions/`
+ * to per-project rows a snapshot's carry-over picker offers. For each present
+ * slug, if it equals `projectSessionSlug(<project>)` for a known project, it is a
+ * PROJECT row (labelled by the project name); otherwise an ORPHAN-slug row
+ * (labelled by the raw slug, so a session with no current project folder is
+ * still shown, never silently dropped). Rows are sorted: named projects first
+ * (case-insensitive by name), then orphan slugs (by slug), for a stable picker.
+ * The caller (CLI) does the actual copy/delete of each chosen slug dir.
+ */
+export function snapshotSessionGroups(args: {
+	presentSlugs: readonly string[];
+	projects: readonly string[];
+}): SnapshotSessionGroup[] {
+	const slugToProject = new Map<string, string>();
+	for (const p of args.projects) {
+		// projectSessionSlug validates the name; a bad project name throws, which is
+		// correct (the projects list comes from real folder names).
+		slugToProject.set(projectSessionSlug(p), p);
+	}
+	const rows: SnapshotSessionGroup[] = args.presentSlugs.map((slug) => {
+		const project = slugToProject.get(slug);
+		return project !== undefined
+			? {slug, project, label: project}
+			: {slug, label: `${slug}  (no current project folder)`};
+	});
+	const lc = (s: string): string => s.toLowerCase();
+	return rows.sort((a, b) => {
+		// named projects before orphan slugs; within each, by their label key.
+		const an = a.project !== undefined ? 0 : 1;
+		const bn = b.project !== undefined ? 0 : 1;
+		if (an !== bn) return an - bn;
+		const ak = lc(a.project ?? a.slug);
+		const bk = lc(b.project ?? b.slug);
+		return ak < bk ? -1 : ak > bk ? 1 : 0;
+	});
+}
+
+/**
  * What ONE selectable menu row launches, so the CLI can dispatch a chosen entry
  * without re-deriving anything:
  *   - `project` -> pi in `/projects/<project>` (the `anon-pi <project>` launch);

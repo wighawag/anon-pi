@@ -12,6 +12,7 @@
 // egress.
 
 import {
+	cpSync,
 	existsSync,
 	mkdirSync,
 	readdirSync,
@@ -80,6 +81,9 @@ import {
 	resolveRunVsStart,
 	serializeMachineJson,
 	snapshotImageRef,
+	snapshotSessionGroups,
+	copyIncludesForHomeMinusSessions,
+	type SnapshotSessionGroup,
 	serializeConfigJson,
 	setImageWarning,
 	keptContainerKey,
@@ -881,19 +885,131 @@ function machineSnapshot(
 		return committed;
 	}
 
-	// Create the machine pinned to the committed image (its home seeds on first
-	// launch, exactly like `machine create`).
+	// Create the machine pinned to the committed image.
 	mkdirSync(machineHomeDir(env, name), {recursive: true});
 	writeFileSync(
 		machineJsonPath(env, name),
 		serializeMachineJson({image: imageRef}),
 	);
+
+	// The source machine is the machine of the container we committed (its stamped
+	// key carries it). Copy its home into the new machine's home, EXCEPT the
+	// sessions subtree (conversations are handled separately below). Copying the
+	// config/extensions is safe + preferable to a fresh seed here: the new image IS
+	// the committed source filesystem, so the home's extensions/binaries are
+	// correct-for-the-new-image (and the copied seed marker means no reseed).
+	const sourceMachine = parseKeptKey(target.key).machine;
+	if (sourceMachine !== undefined) {
+		copyHomeMinusSessions(env, sourceMachine, name);
+	}
+
 	process.stdout.write(
 		`anon-pi: snapshotted ${target.name} into machine ${JSON.stringify(name)} ` +
 			`(image ${imageRef}) at ${targetDir}.\n` +
-			`Its home seeds fresh on first launch, e.g. \`anon-pi -m ${name} --shell\`.\n`,
+			(sourceMachine !== undefined
+				? `Copied ${JSON.stringify(sourceMachine)}'s home (config + extensions) into it.\n`
+				: 'Its home seeds fresh on first launch.\n'),
 	);
+
+	// Offer the source's conversation history, grouped by project, opt-in per
+	// project (default none). TTY only; a non-TTY snapshot carries no sessions.
+	if (sourceMachine !== undefined) {
+		carryOverSessions(env, sourceMachine, name);
+	}
 	return 0;
+}
+
+/**
+ * Recursively copy machine <source>'s home into machine <dest>'s home, EXCLUDING
+ * the `.pi/agent/sessions/` subtree (conversations are carried over separately,
+ * per-project, opt-in). Best-effort: an absent source home is a no-op (the dest
+ * just stays fresh). Uses cpSync with a filter that rejects the sessions dir and
+ * anything under it.
+ */
+function copyHomeMinusSessions(
+	env: AnonPiEnv,
+	source: string,
+	dest: string,
+): void {
+	const srcHome = machineHomeDir(env, source);
+	if (!existsSync(srcHome)) return;
+	const destHome = machineHomeDir(env, dest);
+	const sessionsPath = machineSessionsDir(env, source);
+	cpSync(srcHome, destHome, {
+		recursive: true,
+		// Exclude the sessions dir itself and everything beneath it (pure predicate).
+		filter: (src) => copyIncludesForHomeMinusSessions(src, sessionsPath),
+	});
+}
+
+/**
+ * Offer the source machine's pi conversation history (grouped BY PROJECT) as an
+ * opt-in carry-over into the new machine. Each present `sessions/<slug>/` group
+ * is a project row (or an orphan-slug row); DEFAULT all UNSELECTED, per-project
+ * COPY or SKIP. Copy duplicates that session dir into the new home. There is NO
+ * per-row move; after the copies, ONE confirmed (default No) step can delete the
+ * copied groups from the SOURCE home (the only "move"). No-TTY: copy nothing.
+ */
+function carryOverSessions(env: AnonPiEnv, source: string, dest: string): void {
+	const presentSlugs = readDirNames(machineSessionsDir(env, source));
+	if (presentSlugs.length === 0) return;
+
+	if (!process.stdin.isTTY) {
+		process.stderr.write(
+			`anon-pi: ${presentSlugs.length} conversation group(s) on ${JSON.stringify(source)} ` +
+				'were NOT copied (no TTY to choose). The new machine starts with no history.\n',
+		);
+		return;
+	}
+
+	// Label rows by project name (matching the machine-invariant slug); an orphan
+	// slug with no current project folder is still offered by its raw slug.
+	const config = readJsonConfig(env);
+	const projectsRoot = resolveProjectsRoot({env, config});
+	const groups = snapshotSessionGroups({
+		presentSlugs,
+		projects: readDirNames(projectsRoot),
+	});
+
+	process.stderr.write(
+		`anon-pi: ${JSON.stringify(source)} has ${groups.length} conversation group(s) ` +
+			'(by project). Choose COPY or SKIP for each (default SKIP):\n',
+	);
+	const copied: SnapshotSessionGroup[] = [];
+	for (const g of groups) {
+		const ans = promptLine(`  ${g.label}  [copy/SKIP]: `);
+		if (ans !== undefined && /^c(opy)?$/i.test(ans.trim())) {
+			const from = join(machineSessionsDir(env, source), g.slug);
+			const to = join(machineSessionsDir(env, dest), g.slug);
+			mkdirSync(machineSessionsDir(env, dest), {recursive: true});
+			cpSync(from, to, {recursive: true});
+			copied.push(g);
+		}
+	}
+
+	if (copied.length === 0) {
+		process.stderr.write('anon-pi: no conversation groups copied.\n');
+		return;
+	}
+	process.stderr.write(
+		`anon-pi: copied ${copied.length} conversation group(s) into ${JSON.stringify(dest)}.\n`,
+	);
+
+	// The ONLY "move": an explicit, confirmed, default-No delete from the SOURCE.
+	const ans = promptLine(
+		`Also DELETE the ${copied.length} copied group(s) from source machine ${JSON.stringify(source)}? [y/N] `,
+	);
+	if (ans !== undefined && /^y(es)?$/i.test(ans.trim())) {
+		for (const g of copied) {
+			rmSync(join(machineSessionsDir(env, source), g.slug), {
+				recursive: true,
+				force: true,
+			});
+		}
+		process.stderr.write(
+			`anon-pi: removed ${copied.length} group(s) from ${JSON.stringify(source)}.\n`,
+		);
+	}
 }
 
 // --- the destructive cleanup verbs (thin I/O over the pure resolvers) --------
@@ -2131,9 +2247,14 @@ so you can preserve an environment you built interactively WITHOUT having
 pre-decided \`--keep\`. The container is auto-detected from the running anon-pi
 containers (a picker when several are up); \`-m <machine>\` is an OPTIONAL filter,
 not a required source. The container must still be RUNNING (do not exit the
-session); podman pauses it briefly during the commit. The new machine gets a
-FRESH home (the image is the software, the home is separate). Same forced-egress
-jail on relaunch.
+session); podman pauses it briefly during the commit. Same forced-egress jail on
+relaunch.
+
+The source machine's HOME is copied into the new machine (config + extensions +
+dotfiles), MINUS its conversations. Conversations are offered separately, grouped
+BY PROJECT, opt-in per project (default SKIP), COPY or SKIP each (no TTY => none
+copied). After copying, one confirmed step (default No) can DELETE the copied
+groups from the source machine (the only "move"); COPY never touches the source.
 `;
 
 // --- impure helpers ---------------------------------------------------------
