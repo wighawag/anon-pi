@@ -1508,6 +1508,318 @@ export function resolveRunVsStart(
 	return match ? {action: 'start', ref: match.ref} : {action: 'run'};
 }
 
+// --- `forward` / `ports`: reach an in-jail server from the host --------------
+//
+// netcage owns two host-access verbs (>= 0.9.0): `netcage forward <container>
+// [<hostPort>:]<jailPort>` stands up ONE host->jail inbound forward, and `netcage
+// ports <container> --json` lists the jail's TCP LISTEN sockets image-independently
+// (it reads the sidecar's /proc/net/tcp*, so a minimal image with no ss/netstat/nc
+// still works). anon-pi wraps them so the user never handles the raw netcage
+// container name: it resolves the RUNNING anon-pi container(s) by the identity key
+// it now stamps on EVERY launch (withKeyLabel, not just --keep), disambiguates with
+// a picker annotated by the open listeners, and shells out to `netcage forward`.
+// The forced-egress invariant is untouched: `forward` adds no OUTPUT rule (ADR-0014)
+// and `ports` only reads /proc; anon-pi composes neither egress flag here.
+
+/**
+ * PURE: the decoded fields of a stamped keptContainerKey (the reverse of
+ * keptContainerKey's `k=v\n` record). Used by `forward`/`ports` to filter the
+ * running managed containers by machine + project WITHOUT reconstructing the
+ * exact key (which would couple to launchCwd). Unknown/missing fields are ''.
+ */
+export interface KeptKeyFields {
+	machine: string;
+	projectsRoot: string;
+	mountParent: string;
+	cwd: string;
+}
+
+/** PURE: parse a stamped keptContainerKey back into its fields (best-effort). */
+export function parseKeptKey(key: string): KeptKeyFields {
+	const out: KeptKeyFields = {
+		machine: '',
+		projectsRoot: '',
+		mountParent: '',
+		cwd: '',
+	};
+	for (const line of key.split('\n')) {
+		const eq = line.indexOf('=');
+		if (eq < 0) continue;
+		const k = line.slice(0, eq);
+		const v = line.slice(eq + 1);
+		if (k === 'machine') out.machine = v;
+		else if (k === 'projectsRoot') out.projectsRoot = v;
+		else if (k === 'mountParent') out.mountParent = v;
+		else if (k === 'cwd') out.cwd = v;
+	}
+	return out;
+}
+
+/**
+ * PURE: the leaf name of a stamped key's cwd, i.e. the project a container hosts
+ * (`/projects/recon` -> `recon`, `/projects` -> '.', `/work/x` -> `x`, `/root`
+ * -> '' for a bare shell). Used to filter the picker by `<project>` and to label
+ * each row. A root cwd (`/projects`, `/work`) maps to the `.` root token.
+ */
+export function keyProject(fields: KeptKeyFields): string {
+	const cwd = fields.cwd;
+	if (cwd === CONTAINER_PROJECTS_ROOT || cwd === CONTAINER_MOUNT_ROOT) {
+		return ROOT_TOKEN;
+	}
+	if (cwd === CONTAINER_HOME_ROOT) return ''; // a bare shell, no project
+	const slash = cwd.lastIndexOf('/');
+	return slash < 0 ? cwd : cwd.slice(slash + 1);
+}
+
+/**
+ * PURE: pick the RUNNING anon-pi containers a `forward`/`ports` should offer.
+ * Filters the supplied running managed containers (each with its decoded key
+ * fields) to those on `machine`, optionally narrowed to `project` (its leaf cwd
+ * name). With no project, every anon-pi container on the machine qualifies. The
+ * caller resolves 0 (error) / 1 (auto) / many (picker).
+ */
+export function resolveManagedMatches(args: {
+	containers: readonly ManagedContainer[];
+	machine: string;
+	project?: string;
+}): ManagedContainer[] {
+	const {containers, machine, project} = args;
+	return containers.filter((c) => {
+		const f = parseKeptKey(c.key);
+		if (f.machine !== machine) return false;
+		if (project !== undefined && keyProject(f) !== project) return false;
+		return true;
+	});
+}
+
+/**
+ * A RUNNING netcage-managed container the CLI surfaces to the pure forward/ports
+ * resolution: its anon-pi identity `key` (stamped label, decoded), the `ref` to
+ * pass to `netcage forward`/`ports` (id or name), and a human `name` for the
+ * picker. Mirrors KeptContainer with the display name added.
+ */
+export interface ManagedContainer {
+	key: string;
+	ref: string;
+	name: string;
+}
+
+/**
+ * A parsed, validated port argument for `forward`: the in-jail port to reach and
+ * the host port to bind it on (equal to the jail port unless a `<hostPort>:`
+ * prefix remapped it). `raw` is the exact token to hand to netcage verbatim
+ * (`3001` or `8080:3001`), so anon-pi never re-serialises netcage's grammar.
+ */
+export interface ForwardPort {
+	hostPort: number;
+	jailPort: number;
+	raw: string;
+}
+
+/**
+ * PURE: parse a `forward` port token `[<hostPort>:]<jailPort>` (docker/kubectl
+ * host-first order). One port `3001` maps host 3001 -> jail 3001; `8080:3001`
+ * maps host 8080 -> jail 3001. Both sides must be integers in 1..65535. Throws
+ * AnonPiError on a bad shape / out-of-range / extra colon, with copy-pasteable
+ * guidance. `raw` is normalised to `<host>:<jail>` only when they differ, else
+ * the bare jail port, matching netcage's own accepted forms.
+ */
+export function parsePortArg(token: string): ForwardPort {
+	const bad = (why: string): never => {
+		throw new AnonPiError(
+			`anon-pi: invalid --port ${JSON.stringify(token)}: ${why}. ` +
+				'Use <jailPort> (e.g. 3001) or <hostPort>:<jailPort> (e.g. 8080:3001), ' +
+				'each 1..65535.',
+		);
+	};
+	const parts = token.split(':');
+	if (parts.length > 2) bad('too many colons');
+	const toPort = (s: string): number => {
+		if (!/^[0-9]+$/.test(s)) bad(`${JSON.stringify(s)} is not a port number`);
+		const n = Number(s);
+		if (n < 1 || n > 65535) bad(`${s} is out of range (1..65535)`);
+		return n;
+	};
+	if (parts.length === 1) {
+		const p = toPort(parts[0]);
+		return {hostPort: p, jailPort: p, raw: String(p)};
+	}
+	const hostPort = toPort(parts[0]);
+	const jailPort = toPort(parts[1]);
+	const raw =
+		hostPort === jailPort ? String(jailPort) : `${hostPort}:${jailPort}`;
+	return {hostPort, jailPort, raw};
+}
+
+/** A parsed `anon-pi forward` command (pure; the CLI does the netcage I/O). */
+export interface ForwardCommand {
+	project?: string;
+	machine: string;
+	machineExplicit: boolean;
+	/** The parsed port, or undefined to prompt from the container's listeners. */
+	port?: ForwardPort;
+	/** `--bind <addr>` passed through to netcage verbatim (undefined => netcage default). */
+	bind?: string;
+}
+
+/**
+ * PURE: parse `anon-pi forward [<project>] [--port <[hostPort:]jailPort>]
+ * [--bind <addr>] [-m <machine>]`. The bare positional is ALWAYS the project (so
+ * a numeric name like `3001` is a project, never a port); the port is the
+ * `--port`/`-p` flag, removing the number-vs-project ambiguity. `--bind` is
+ * passed through to netcage (which validates 127.0.0.1 / 0.0.0.0). Throws
+ * AnonPiError on an unknown flag, a missing flag argument, a second positional,
+ * or a bad port.
+ */
+export function parseForwardArgs(args: readonly string[]): ForwardCommand {
+	const fail = (msg: string): never => {
+		throw new AnonPiError(`anon-pi: ${msg}\nRun \`anon-pi forward --help\`.`);
+	};
+	let project: string | undefined;
+	let machine = DEFAULT_MACHINE;
+	let machineExplicit = false;
+	let port: ForwardPort | undefined;
+	let bind: string | undefined;
+	for (let i = 0; i < args.length; i++) {
+		const a = args[i];
+		if (a === '-m' || a === '--machine') {
+			const v = args[++i];
+			if (v === undefined) fail(`${a} needs a machine name`);
+			machine = validateName(v as string, 'machine');
+			machineExplicit = true;
+		} else if (a === '-p' || a === '--port') {
+			const v = args[++i];
+			if (v === undefined) fail(`${a} needs a port ([hostPort:]jailPort)`);
+			port = parsePortArg(v as string);
+		} else if (a === '--bind') {
+			const v = args[++i];
+			if (v === undefined)
+				fail('--bind needs an address (127.0.0.1 or 0.0.0.0)');
+			bind = v as string;
+		} else if (a.startsWith('-')) {
+			fail(`unknown option: ${a}`);
+		} else if (project === undefined) {
+			project = validateName(a, 'project');
+		} else {
+			fail(`unexpected argument: ${a} (forward takes at most one project)`);
+		}
+	}
+	return {project, machine, machineExplicit, port, bind};
+}
+
+/** A parsed `anon-pi ports` command (pure). */
+export interface PortsCommand {
+	project?: string;
+	machine: string;
+	machineExplicit: boolean;
+}
+
+/**
+ * PURE: parse `anon-pi ports [<project>] [-m <machine>]`. Like forward but with
+ * no port/bind: it lists a container's open in-jail listeners. The bare
+ * positional is the project filter.
+ */
+export function parsePortsArgs(args: readonly string[]): PortsCommand {
+	const fail = (msg: string): never => {
+		throw new AnonPiError(`anon-pi: ${msg}\nRun \`anon-pi ports --help\`.`);
+	};
+	let project: string | undefined;
+	let machine = DEFAULT_MACHINE;
+	let machineExplicit = false;
+	for (let i = 0; i < args.length; i++) {
+		const a = args[i];
+		if (a === '-m' || a === '--machine') {
+			const v = args[++i];
+			if (v === undefined) fail(`${a} needs a machine name`);
+			machine = validateName(v as string, 'machine');
+			machineExplicit = true;
+		} else if (a.startsWith('-')) {
+			fail(`unknown option: ${a}`);
+		} else if (project === undefined) {
+			project = validateName(a, 'project');
+		} else {
+			fail(`unexpected argument: ${a} (ports takes at most one project)`);
+		}
+	}
+	return {project, machine, machineExplicit};
+}
+
+/**
+ * A jail TCP LISTEN socket, as netcage's `ports --json` reports it: the bind
+ * `address`, the `port`, and `loopbackOnly` (bound 127.0.0.0/8 or ::1). The
+ * contract is netcage's (ADR-0015); anon-pi only consumes it.
+ */
+export interface NetcageListener {
+	address: string;
+	port: number;
+	loopbackOnly: boolean;
+}
+
+/**
+ * PURE: parse `netcage ports --json` output into listeners (best-effort). Keeps
+ * only well-formed `{address:string, port:int, loopbackOnly:bool}` entries;
+ * anything else (a netcage version drift, a non-array) yields []. The caller
+ * treats [] as "no hint", never an error.
+ */
+export function parseNetcagePortsJson(stdout: string): NetcageListener[] {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout);
+	} catch {
+		return [];
+	}
+	if (!Array.isArray(parsed)) return [];
+	const out: NetcageListener[] = [];
+	for (const e of parsed) {
+		if (!e || typeof e !== 'object') continue;
+		const r = e as Record<string, unknown>;
+		if (
+			typeof r.address === 'string' &&
+			typeof r.port === 'number' &&
+			typeof r.loopbackOnly === 'boolean'
+		) {
+			out.push({
+				address: r.address,
+				port: r.port,
+				loopbackOnly: r.loopbackOnly,
+			});
+		}
+	}
+	return out;
+}
+
+/** netcage's in-jail DNS forwarder always listens here; anon-pi hides it from the port hint. */
+export const NETCAGE_DNS_PORT = 53;
+
+/**
+ * PURE: the in-jail ports worth offering as forward targets: the listeners with
+ * netcage's own `127.0.0.1:53` DNS forwarder dropped (it is never something a
+ * user forwards), de-duplicated by port, sorted ascending. A server bound on
+ * both IPv4 and IPv6 (two listeners, same port) collapses to one entry.
+ */
+export function forwardablePorts(
+	listeners: readonly NetcageListener[],
+): number[] {
+	const ports = new Set<number>();
+	for (const l of listeners) {
+		if (l.port === NETCAGE_DNS_PORT && l.loopbackOnly) continue;
+		ports.add(l.port);
+	}
+	return [...ports].sort((a, b) => a - b);
+}
+
+/**
+ * PURE: a compact one-line hint of a container's forwardable in-jail ports for
+ * the picker / the pre-forward confirmation, e.g. `open: 3001, 5173` or
+ * `open: (none detected)`. Never includes the DNS forwarder (forwardablePorts).
+ */
+export function formatPortsHint(listeners: readonly NetcageListener[]): string {
+	const ports = forwardablePorts(listeners);
+	return ports.length === 0
+		? 'open: (none detected)'
+		: `open: ${ports.join(', ')}`;
+}
+
 // --- The bare-launch menu: choice-list + per-machine project-usage record ----
 //
 // anon-pi's bare launch shows a HOST-side arrow-key menu of a machine's
@@ -2704,6 +3016,8 @@ USAGE
   anon-pi pi <pi-args…>          run pi with ANY args and no project (the passthrough)
   anon-pi --version              print anon-pi's version (also -V)
   anon-pi --shell [<project>]    a jailed bash (at ~, or cd'd into <project>) - the project-hopper
+  anon-pi forward [<p>] [--port …]  open a host port onto a running container's in-jail server
+  anon-pi ports [<project>]      list a running container's open in-jail TCP listeners
   anon-pi -m <machine> [<p>]     the same, on <machine> (its own image + home + conversations)
   anon-pi --mount <parent> [<p>] root at a HOST parent folder instead of the projects root
   anon-pi init                   onboard: verify your proxy, capture your local model, pick an image

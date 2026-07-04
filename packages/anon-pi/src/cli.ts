@@ -55,6 +55,15 @@ import {
 	resolveDeleteProject,
 	parseConfigJson,
 	parseLaunchArgs,
+	parseForwardArgs,
+	parsePortsArgs,
+	parsePortArg,
+	parseKeptKey,
+	keyProject,
+	resolveManagedMatches,
+	parseNetcagePortsJson,
+	forwardablePorts,
+	formatPortsHint,
 	isHeadlessPiArgs,
 	resumeSessionId,
 	sessionHeaderCwd,
@@ -102,6 +111,8 @@ import {
 	type ModelCandidate,
 	type ModelSelection,
 	type KeptContainer,
+	type ManagedContainer,
+	type NetcageListener,
 	type LaunchIntent,
 	type Machine,
 	type MachineConfig,
@@ -132,7 +143,7 @@ function main(argv: string[]): number {
 	// and `anon-pi machine --help` show THEIR help, not the global one). Those
 	// subcommands route to runInit / runMachine, which print INIT_HELP /
 	// MACHINE_HELP respectively.
-	const OWN_HELP_SUBCOMMANDS = new Set(['init', 'machine']);
+	const OWN_HELP_SUBCOMMANDS = new Set(['init', 'machine', 'forward', 'ports']);
 	if (
 		(args.includes('--help') || args.includes('-h')) &&
 		!OWN_HELP_SUBCOMMANDS.has(args[0] ?? '')
@@ -164,6 +175,16 @@ function main(argv: string[]): number {
 	// default machine image, write config.json + the default machine. Re-runnable.
 	if (args[0] === 'init') {
 		return runInit(args.slice(1));
+	}
+
+	// Host-access verbs (netcage >= 0.9.0). `forward` opens a host->jail port; the
+	// `ports` sibling lists a jail's open listeners. Dispatched BEFORE the launch
+	// grammar so `forward`/`ports` are never parsed as a project name.
+	if (args[0] === 'forward') {
+		return runForward(args.slice(1));
+	}
+	if (args[0] === 'ports') {
+		return runPorts(args.slice(1));
 	}
 
 	let parsed: ParsedLaunch;
@@ -383,6 +404,13 @@ function executeLaunchPlan(
 		mkdirSync(intent.mountParent ?? intent.projectsRoot, {recursive: true});
 	}
 
+	// The anon-pi identity key, stamped on EVERY launch (not just --keep) as an
+	// additive netcage label. Under --keep it lets a re-entry find + `netcage
+	// start` the kept container; on a throwaway --rm run it lets `anon-pi forward`
+	// find the RUNNING container while it is up (the label goes away with the
+	// container on exit). It touches NO egress flag (the RunPlan owns those).
+	const keyed = withKeyLabel(plan.netcageArgs, keptContainerKey(intent));
+
 	// Run-vs-start: under --keep, ask netcage for its kept managed containers and
 	// resume a matching one via `netcage start`; else run the composed argv. A
 	// throwaway (`--rm`) launch is always a fresh run (the pure rule never
@@ -392,14 +420,11 @@ function executeLaunchPlan(
 		if (decision.action === 'start') {
 			return spawnNetcage(['start', '-a', '-i', decision.ref]);
 		}
-		// A fresh `--keep` run: stamp the identity key so a later re-entry can
-		// find this container. The RunPlan already omits --rm under --keep.
-		return spawnNetcage(
-			withKeyLabel(plan.netcageArgs, keptContainerKey(intent)),
-		);
+		// A fresh `--keep` run: the RunPlan already omits --rm so it is left kept.
+		return spawnNetcage(keyed);
 	}
 
-	return spawnNetcage(plan.netcageArgs);
+	return spawnNetcage(keyed);
 }
 
 // --- the interactive host-side menu (the ONLY untested I/O) -------------------
@@ -1981,6 +2006,36 @@ function promptLine(prompt: string): string | undefined {
 	return line === '' ? undefined : line;
 }
 
+/** The `forward` subcommand help. */
+const FORWARD_HELP = `anon-pi forward - open a host port onto a running anon-pi container's in-jail server
+
+USAGE
+  anon-pi forward [<project>] [--port <[hostPort:]jailPort>] [--bind <addr>] [-m <machine>]
+
+  <project>   filter to a running container for THIS project (a numeric name is a
+              project, never a port). Omitted => all running anon-pi containers.
+  --port,-p   the port to forward, host-first like docker/kubectl: 3001 (host
+              3001 -> jail 3001) or 8080:3001 (host 8080 -> jail 3001). Omit to be
+              shown the container's open ports and prompted (incl. a different
+              host port). An explicit port may be one not open yet.
+  --bind      passed through to netcage (127.0.0.1 default, or 0.0.0.0 for LAN).
+  -m          the machine the container runs on (else the default machine).
+
+Wraps \`netcage forward\` (netcage >= 0.9.0). If several containers match, you pick
+one (each row shows its open in-jail ports). The forward runs until Ctrl-C.
+`;
+
+/** The `ports` subcommand help. */
+const PORTS_HELP = `anon-pi ports - list a running anon-pi container's open in-jail TCP listeners
+
+USAGE
+  anon-pi ports [<project>] [-m <machine>]
+
+Wraps \`netcage ports --json\` (netcage >= 0.9.0), which reads the jail's
+/proc/net/tcp* image-independently (works even with no ss/netstat in the image).
+Use it to find which port to \`anon-pi forward\`.
+`;
+
 /** The `machine` subcommand help. */
 const MACHINE_HELP = `anon-pi machine - manage machines (an image + a persistent host home)
 
@@ -2066,6 +2121,259 @@ function queryKeptContainers(): KeptContainer[] {
 		if (ref !== '' && key !== undefined) out.push({key, ref});
 	}
 	return out;
+}
+
+// --- `forward` / `ports`: reach an in-jail server from the host --------------
+
+/**
+ * Query netcage for its RUNNING managed containers (no `-a`, so a stopped kept
+ * container is excluded: forward/ports can only reach a live jail), surfacing
+ * each one's stamped anon-pi key + a display name. Best-effort: [] on any
+ * failure, so the caller reports "nothing running" cleanly.
+ */
+function queryRunningContainers(): ManagedContainer[] {
+	const res = spawnSync(
+		'netcage',
+		[
+			'ps',
+			'--filter',
+			'label=netcage.managed',
+			'--format',
+			'{{.ID}}\t{{.Names}}\t{{.Labels}}',
+		],
+		{encoding: 'utf8'},
+	);
+	if (res.error || res.status !== 0 || !res.stdout) return [];
+	const out: ManagedContainer[] = [];
+	for (const line of res.stdout.split('\n')) {
+		const trimmed = line.trim();
+		if (trimmed === '') continue;
+		const cols = trimmed.split('\t');
+		if (cols.length < 3) continue;
+		const ref = cols[0].trim();
+		const name = cols[1].trim();
+		const key = extractKeyLabel(cols.slice(2).join('\t'));
+		if (ref !== '' && key !== undefined) {
+			out.push({key, ref, name: name || ref});
+		}
+	}
+	return out;
+}
+
+/**
+ * Best-effort: the in-jail TCP listeners of a container via `netcage ports
+ * <ref> --json` (netcage >= 0.9.0). [] on any failure (older netcage without
+ * the verb, a parse miss), so the port hint is purely additive and never blocks
+ * a forward.
+ */
+function queryNetcagePorts(ref: string): NetcageListener[] {
+	const res = spawnSync('netcage', ['ports', ref, '--json'], {
+		encoding: 'utf8',
+	});
+	if (res.error || res.status !== 0 || !res.stdout) return [];
+	return parseNetcagePortsJson(res.stdout);
+}
+
+/**
+ * Resolve the ONE running anon-pi container a forward/ports should act on:
+ * filter the running managed containers by machine (+ project if given), then
+ * 0 => error (nothing running), 1 => it, many => an arrow-key picker annotated
+ * with each container's open in-jail ports. Returns undefined on no-match or a
+ * cancelled pick (with the reason printed). TTY is required only for the picker.
+ */
+function resolveForwardTarget(
+	machine: string,
+	project: string | undefined,
+	verb: string,
+): ManagedContainer | undefined {
+	const running = queryRunningContainers();
+	const matches = resolveManagedMatches({
+		containers: running,
+		machine,
+		project,
+	});
+	if (matches.length === 0) {
+		const scope =
+			project !== undefined
+				? `project ${JSON.stringify(project)} on machine ${JSON.stringify(machine)}`
+				: `machine ${JSON.stringify(machine)}`;
+		process.stderr.write(
+			`anon-pi: no running anon-pi container for ${scope}. ` +
+				`Start one first (e.g. \`anon-pi ${project ?? '<project>'}\`) and run its ` +
+				`server, then \`anon-pi ${verb}\` again.\n`,
+		);
+		return undefined;
+	}
+	if (matches.length === 1) return matches[0];
+
+	// Many: pick one. Each row is annotated with the container's open ports (a
+	// best-effort hint), so the user can tell the sessions apart.
+	if (!process.stdin.isTTY) {
+		process.stderr.write(
+			`anon-pi: ${matches.length} running containers match; a terminal is needed to ` +
+				`pick one. Narrow with a project (\`anon-pi ${verb} <project>\`) or -m <machine>.\n`,
+		);
+		return undefined;
+	}
+	const entries: MenuEntry[] = matches.map((c) => {
+		const proj = keyProject(parseKeptKey(c.key));
+		const label = proj === '' ? '(shell)' : proj;
+		const hint = formatPortsHint(queryNetcagePorts(c.ref));
+		return {
+			kind: 'project',
+			project: c.ref,
+			label: `${label} [${c.name}] ${hint}`,
+		};
+	});
+	const picked = select(entries, {
+		header: `anon-pi: pick a container to ${verb} (\u2191/\u2193 move, Enter select, Ctrl-C quit)`,
+	});
+	if (picked === undefined) {
+		process.stderr.write('anon-pi: cancelled; nothing forwarded.\n');
+		return undefined;
+	}
+	return matches.find((c) => c.ref === picked.project);
+}
+
+/**
+ * `anon-pi forward [<project>] [--port <[hostPort:]jailPort>] [--bind <addr>]
+ * [-m <machine>]`: open a host->jail port on a running anon-pi container. Wraps
+ * `netcage forward`. When --port is omitted, it lists the container's open
+ * in-jail ports and prompts for the jail port + an optional different host port.
+ */
+function runForward(forwardArgs: string[]): number {
+	if (forwardArgs.includes('--help') || forwardArgs.includes('-h')) {
+		process.stdout.write(FORWARD_HELP);
+		return 0;
+	}
+	if (!hasNetcage()) return netcageMissing();
+
+	let cmd;
+	try {
+		cmd = parseForwardArgs(forwardArgs);
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+
+	const machine = resolveVerbMachine(cmd.machine, cmd.machineExplicit);
+	const target = resolveForwardTarget(machine, cmd.project, 'forward');
+	if (target === undefined) return 1;
+
+	// Resolve the port: --port wins; else prompt from the container's listeners.
+	let portRaw: string;
+	if (cmd.port !== undefined) {
+		portRaw = cmd.port.raw;
+	} else {
+		const prompted = promptForwardPort(target.ref);
+		if (prompted === undefined) return 1;
+		portRaw = prompted;
+	}
+
+	const argv = ['forward'];
+	if (cmd.bind !== undefined) argv.push('--bind', cmd.bind);
+	argv.push(target.ref, portRaw);
+	process.stderr.write(
+		`anon-pi: forwarding to ${target.name} (${portRaw}); Ctrl-C to stop\u2026\n`,
+	);
+	return spawnNetcage(argv);
+}
+
+/**
+ * Interactive port resolution when `--port` is omitted: show the container's
+ * open in-jail listeners, prompt for the jail port (defaulting to the sole
+ * obvious one), then ask whether to bind it on a DIFFERENT host port and let the
+ * user type it. Returns the netcage port token (`<jail>` or `<host>:<jail>`), or
+ * undefined on cancel / a bad entry (reported). Requires a TTY.
+ */
+function promptForwardPort(ref: string): string | undefined {
+	if (!process.stdin.isTTY) {
+		process.stderr.write(
+			'anon-pi: no TTY. Pass the port explicitly, e.g. `anon-pi forward --port 3001`.\n',
+		);
+		return undefined;
+	}
+	const listeners = queryNetcagePorts(ref);
+	const open = forwardablePorts(listeners);
+	process.stderr.write(`  in-jail listeners: ${formatPortsHint(listeners)}\n`);
+
+	const def = open.length === 1 ? String(open[0]) : undefined;
+	const jailAns = promptLine(
+		`  jail port to forward${def ? ` [${def}]` : ''}: `,
+	);
+	const jailStr =
+		jailAns === undefined || jailAns.trim() === '' ? def : jailAns.trim();
+	if (jailStr === undefined) {
+		process.stderr.write('anon-pi: no port given; nothing forwarded.\n');
+		return undefined;
+	}
+
+	const hostAns = promptLine(
+		`  host port (Enter for same as jail, or type a different one): `,
+	);
+	const hostStr = hostAns === undefined ? '' : hostAns.trim();
+	const token = hostStr === '' ? jailStr : `${hostStr}:${jailStr}`;
+	try {
+		return parsePortArg(token).raw; // validate 1..65535 + shape
+	} catch (e) {
+		reportAnonPiError(e);
+		return undefined;
+	}
+}
+
+/**
+ * `anon-pi ports [<project>] [-m <machine>]`: list a running anon-pi container's
+ * open in-jail TCP listeners (via `netcage ports --json`), image-independent.
+ * Disambiguates the same way as forward.
+ */
+function runPorts(portsArgs: string[]): number {
+	if (portsArgs.includes('--help') || portsArgs.includes('-h')) {
+		process.stdout.write(PORTS_HELP);
+		return 0;
+	}
+	if (!hasNetcage()) return netcageMissing();
+
+	let cmd;
+	try {
+		cmd = parsePortsArgs(portsArgs);
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+
+	const machine = resolveVerbMachine(cmd.machine, cmd.machineExplicit);
+	const target = resolveForwardTarget(machine, cmd.project, 'ports');
+	if (target === undefined) return 1;
+
+	const listeners = queryNetcagePorts(target.ref);
+	if (listeners.length === 0) {
+		process.stdout.write(
+			`${target.name}: no in-jail TCP listeners detected ` +
+				`(the server may not be up yet, or netcage < 0.9.0).\n`,
+		);
+		return 0;
+	}
+	process.stdout.write(`${target.name}: in-jail TCP listeners\n`);
+	for (const l of listeners) {
+		const scope = l.loopbackOnly ? 'loopback' : 'all-interfaces';
+		const note = l.port === 53 && l.loopbackOnly ? '  (netcage DNS)' : '';
+		process.stdout.write(`  ${l.address}:${l.port}\t${scope}${note}\n`);
+	}
+	return 0;
+}
+
+/** Resolve the machine a verb targets: explicit -m wins, else config.defaultMachine. */
+function resolveVerbMachine(machine: string, explicit: boolean): string {
+	if (explicit) return machine;
+	const config = readJsonConfig(envFromProcess(process.env));
+	return config.defaultMachine ?? DEFAULT_MACHINE;
+}
+
+/** The shared "netcage not on PATH" error (exit 1). */
+function netcageMissing(): number {
+	process.stderr.write(
+		'anon-pi: `netcage` not found on PATH. anon-pi is a launcher for netcage; install it first\n' +
+			'(https://github.com/wighawag/netcage). Linux only.\n',
+	);
+	return 1;
 }
 
 /**
