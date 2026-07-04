@@ -39,11 +39,14 @@ anon-pi               # bare: pick a project (or a shell, or a new project) from
 anon-pi recon         # or launch straight into a project
 ```
 
+The **first time** you launch anon-pi with no config yet, it welcomes you and runs `init` automatically before launching (so you never hit a bare "set `ANON_PI_PROXY`" wall on day one). You can also run `anon-pi init` yourself any time to reconfigure. (If you drive config purely by env — you export `ANON_PI_PROXY` yourself — the auto-onboarding is skipped.)
+
 `init` is interactive and re-runnable. It:
 
 1. **Proxy** — probes common SOCKS ports, confirms SOCKS5 with a real handshake, shows the findings (evidence only, it never labels the exit provider), then runs `netcage verify` and shows the real EXIT IP as proof it is not your host IP. You confirm on that evidence.
 2. **Local model** — captures the `host:port` of your model, probes reachability, and generates the machine's `models.json`.
 3. **Image** — pick a shipped `Dockerfile` (built via `podman build`), an existing image ref, or skip.
+4. **Projects root** — the host folder mounted at `/projects` (where bare `anon-pi` looks for projects). Defaults to `~/.anon-pi/projects/`; point it at your own dev folder if you want to jail pi into files you edit with host tools (`--mount <parent>` still overrides it per-launch).
 
 It then writes `~/.anon-pi/config.json` + the `default` machine. It **never destroys** an existing home; it pre-fills your current values and only adds/updates config + the default machine.
 

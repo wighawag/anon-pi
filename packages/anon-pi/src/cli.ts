@@ -21,7 +21,7 @@ import {
 } from 'node:fs';
 import {readSync} from 'node:fs';
 import {spawnSync, execFileSync} from 'node:child_process';
-import {join, dirname} from 'node:path';
+import {join, dirname, resolve} from 'node:path';
 import {
 	AnonPiError,
 	HELP,
@@ -31,6 +31,7 @@ import {
 	envFromProcess,
 	buildMenuChoiceList,
 	buildMenuEntries,
+	builtinProjectsRoot,
 	deriveProjectUsage,
 	machineDir,
 	machineHomeDir,
@@ -136,7 +137,55 @@ function main(argv: string[]): number {
 		return reportAnonPiError(e);
 	}
 
+	// FIRST RUN: no config.json yet. Rather than fail deep in the launch with the
+	// bare "set ANON_PI_PROXY" wall (which reads like a doc dump the first time),
+	// welcome the user and run `init` automatically, then continue into the
+	// launch they asked for. Needs a TTY (init is interactive); without one we
+	// fall through to the launch path, whose fail-closed proxy error is the right
+	// signal for a script. An explicit ANON_PI_PROXY/ANON_PI_LLM env pair also
+	// skips this (the user is driving config via env, not the file).
+	if (isFirstRun()) {
+		const code = runFirstRunInit();
+		if (code !== 0) return code; // init aborted / failed: do not launch.
+	}
+
 	return runLaunch(parsed);
+}
+
+/**
+ * First run = no config.json in the anon-pi home AND the user has not supplied
+ * the forced-egress inputs via env (ANON_PI_PROXY is what the launch fails
+ * closed on; if it is set the user is configuring via env and we do not
+ * onboard). We only auto-onboard on an interactive terminal.
+ */
+function isFirstRun(): boolean {
+	const env = envFromProcess(process.env);
+	if (nonEmptyEnv(env.proxy)) return false; // env-driven config; no onboarding.
+	if (!process.stdin.isTTY) return false; // scripts get the fail-closed error.
+	const configPath = join(resolveAnonPiHome(env), 'config.json');
+	return !existsSync(configPath);
+}
+
+/** Show a first-time welcome, then run `init`. Returns init's exit code. */
+function runFirstRunInit(): number {
+	process.stdout.write(
+		'\n' +
+			"Welcome to anon-pi. It looks like this is your first run (there's no\n" +
+			'config yet), so let us set things up before launching.\n' +
+			'\n' +
+			'anon-pi runs pi on anonymized, jailed MACHINES: all of pi\u2019s web/DNS egress\n' +
+			'is forced through your socks5h proxy (fail-closed), with ONE direct hole to\n' +
+			'a local model. Your machines + conversations live in ~/.anon-pi/.\n' +
+			'\n' +
+			'Running `anon-pi init` now (re-runnable any time; nothing is destroyed).\n' +
+			'\n',
+	);
+	return runInit([]);
+}
+
+/** Whether an env value is present + non-blank. */
+function nonEmptyEnv(v: string | undefined): boolean {
+	return typeof v === 'string' && v.trim() !== '';
 }
 
 // --- the launch path --------------------------------------------------------
@@ -902,7 +951,11 @@ WHAT IT DOES
      \`netcage verify\` and shows the real EXIT IP as proof. You confirm.
   2. LOCAL MODEL: captures host:port, probes reachability, generates models.json.
   3. IMAGE: pick a shipped Dockerfile (built via podman), an existing ref, or skip.
+  4. PROJECTS ROOT: the host folder mounted at /projects (default ~/.anon-pi/
+     projects); point it at your own dev folder, or keep the default.
   Then writes ~/.anon-pi/config.json + the \`default\` machine. Never destroys homes.
+
+  Runs AUTOMATICALLY the first time you launch anon-pi with no config yet.
 `;
 
 function runInit(args: string[]): number {
@@ -949,7 +1002,11 @@ function runInit(args: string[]): number {
 	const image = initImageStep();
 	if (image === ABORT) return 1;
 
-	// 4) WRITE config.json + the `default` machine (never destroying an existing
+	// 4) PROJECTS ROOT: the host dir mounted at /projects (default ~/.anon-pi/
+	//    projects). Overridable per-launch with `--mount`; this sets the default.
+	const projects = initProjectsStep(env, current.projects);
+
+	// 5) WRITE config.json + the `default` machine (never destroying an existing
 	//    home). The proxy is always present (we only reach here on a chosen proxy).
 	const anonHome = resolveAnonPiHome(env);
 	mkdirSync(anonHome, {recursive: true});
@@ -958,7 +1015,7 @@ function runInit(args: string[]): number {
 		proxy: proxyUrl,
 		llm: llm ?? current.llm,
 		defaultMachine: current.defaultMachine ?? DEFAULT_MACHINE,
-		projects: current.projects,
+		projects: projects ?? current.projects,
 	};
 	writeFileSync(configPath, serializeConfigJson(nextConfig));
 	process.stdout.write(`\nanon-pi: wrote ${configPath}.\n`);
@@ -1003,7 +1060,7 @@ const ABORT = Symbol('abort');
  */
 function initProxyStep(currentProxy: string | undefined): string | undefined {
 	process.stdout.write(
-		'Step 1/3 - proxy (the socks5h endpoint that anonymizes egress)\n',
+		'Step 1/4 - proxy (the socks5h endpoint that anonymizes egress)\n',
 	);
 	if (currentProxy) {
 		process.stdout.write(`  current: ${currentProxy}\n`);
@@ -1130,7 +1187,7 @@ function initProxyStep(currentProxy: string | undefined): string | undefined {
  */
 function initLlmStep(currentLlm: string | undefined): string | undefined {
 	process.stdout.write(
-		'\nStep 2/3 - local model endpoint (the ONE direct hole)\n',
+		'\nStep 2/4 - local model endpoint (the ONE direct hole)\n',
 	);
 	if (currentLlm) process.stdout.write(`  current: ${currentLlm}\n`);
 	const prefill = currentLlm
@@ -1168,7 +1225,7 @@ function initLlmStep(currentLlm: string | undefined): string | undefined {
  */
 function initImageStep(): string | undefined | typeof ABORT {
 	process.stdout.write(
-		'\nStep 3/3 - default machine image (an image with `pi` on PATH)\n',
+		'\nStep 3/4 - default machine image (an image with `pi` on PATH)\n',
 	);
 	const menu = initImageMenu();
 	menu.forEach((e, i) => {
@@ -1218,6 +1275,44 @@ function initImageStep(): string | undefined | typeof ABORT {
 		}
 		return tag;
 	}
+}
+
+/**
+ * The PROJECTS-ROOT step: the host directory mounted into the jail at /projects
+ * (pi's cwd; a project is /projects/<name>). It defaults to the built-in
+ * `~/.anon-pi/projects/`; the user may point it at their own dev folder so bare
+ * `anon-pi` works there without passing `--mount` every time. `--mount <parent>`
+ * still overrides it per-launch. Returns the chosen root, or undefined to keep
+ * the current/default (so an omitted `projects` in config.json means the
+ * built-in default). Enter accepts the shown default.
+ */
+function initProjectsStep(
+	env: AnonPiEnv,
+	currentProjects: string | undefined,
+): string | undefined {
+	process.stdout.write(
+		'\nStep 4/4 - projects root (the host folder mounted at /projects)\n',
+	);
+	const builtin = builtinProjectsRoot(env);
+	const shown = currentProjects ?? builtin;
+	if (currentProjects) {
+		process.stdout.write(`  current: ${currentProjects}\n`);
+	}
+	process.stdout.write(
+		'  This is where bare `anon-pi` looks for projects. Point it at your own\n' +
+			'  dev folder to jail pi into files you edit with host tools; `--mount\n' +
+			'  <parent>` still overrides it per-launch. Leave it at the default if\n' +
+			"  you're unsure.\n",
+	);
+	const ans = promptLine(`  Projects root (Enter to keep ${shown}): `);
+	if (ans === undefined) return currentProjects;
+	const trimmed = ans.trim();
+	if (trimmed === '') return currentProjects;
+	// Store the built-in as "unset" (undefined) so config.json stays clean when
+	// the user just accepts the default path explicitly.
+	const chosen = resolve(trimmed);
+	if (chosen === builtin) return undefined;
+	return chosen;
 }
 
 /**

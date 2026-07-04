@@ -51,6 +51,46 @@ describe('anon-pi init --help', () => {
 		// the help must not claim a provider label.
 		expect(r.stdout.toLowerCase()).not.toContain('mullvad');
 	});
+
+	it('documents the projects-root step and the auto-run-on-first-launch', () => {
+		const home = tempHome();
+		const r = run(['init', '--help'], {home});
+		expect(r.stdout.toLowerCase()).toContain('projects root');
+		expect(r.stdout).toContain('/projects');
+		expect(r.stdout.toLowerCase()).toContain('automatically');
+	});
+});
+
+describe('first-run auto-init (no config.json yet)', () => {
+	// A launch with NO config + NO TTY must NOT auto-onboard (a script gets the
+	// fail-closed proxy error, not an interactive welcome it cannot answer).
+	it('a no-TTY first launch does NOT show the welcome; it fails closed', () => {
+		const home = tempHome();
+		// spawnSync => no TTY. A bare launch would need a TTY anyway; use a
+		// project so the only wall is the missing proxy.
+		const r = run(['recon'], {home});
+		expect(r.stdout.toLowerCase()).not.toContain('welcome to anon-pi');
+		expect(r.stderr).toContain('ANON_PI_PROXY');
+		// nothing was written (no auto-init).
+		expect(existsSync(join(home, 'config.json'))).toBe(false);
+	});
+
+	it('an env-configured launch does NOT auto-onboard (env drives config)', () => {
+		const home = tempHome();
+		const r = spawnSync(process.execPath, [cli, 'recon'], {
+			encoding: 'utf8',
+			env: {
+				...process.env,
+				ANON_PI_HOME: home,
+				ANON_PI_PROXY: 'socks5h://127.0.0.1:9050',
+			},
+		});
+		// proxy came from env, so we skip onboarding and reach the launch (which
+		// then asks for the llm, NOT the welcome).
+		expect(r.stdout.toLowerCase()).not.toContain('welcome to anon-pi');
+		expect(r.stderr).toContain('ANON_PI_LLM');
+		expect(existsSync(join(home, 'config.json'))).toBe(false);
+	});
 });
 
 describe('anon-pi init (no TTY)', () => {
