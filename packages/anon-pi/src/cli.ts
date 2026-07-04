@@ -29,9 +29,14 @@ import {
 	SEED_MARKER,
 	DEFAULT_MACHINE,
 	envFromProcess,
+	buildMenuChoiceList,
+	buildMenuEntries,
+	deriveProjectUsage,
 	machineDir,
 	machineHomeDir,
 	machineJsonPath,
+	machineSessionsDir,
+	validateName,
 	resolveDeleteHome,
 	resolveDeleteProject,
 	parseConfigJson,
@@ -61,6 +66,8 @@ import {
 	hostPortKey,
 	shippedDockerfilePath,
 	shippedWebveilDockerfilePath,
+	type MenuEntry,
+	type SessionDirListing,
 	type ProxyFinding,
 	type SocksHandshake,
 	type InitImageChoice,
@@ -231,11 +238,26 @@ function runLaunch(parsed: ParsedLaunch): number {
 		return reportAnonPiError(e);
 	}
 
-	// Bare launch: hand off to the interactive menu (the next task fills it in).
+	// Bare launch: hand off to the interactive host-side menu, which re-resolves
+	// the user's pick into a concrete launch and executes it.
 	if (plan.kind === 'menu') {
 		return runMenu(intent, plan.machine);
 	}
 
+	return executeLaunchPlan(intent, plan);
+}
+
+/**
+ * Execute a RESOLVED non-menu LaunchPlan: create the host dirs the mounts need,
+ * then run netcage (or `netcage start` a matching kept container under --keep).
+ * Shared by the direct launch path (runLaunch) and the menu dispatch (runMenu),
+ * so a menu-picked project/here/shell launches BYTE-FOR-BYTE identically to the
+ * same command typed directly.
+ */
+function executeLaunchPlan(
+	intent: LaunchIntent,
+	plan: Extract<ReturnType<typeof resolveRunPlan>, {kind: 'launch'}>,
+): number {
 	// Create the host dirs the mounts need BEFORE spawn: the machine home and,
 	// for a named project (not the root token `.` / a bare shell), its folder
 	// under the active root (the --mount parent or the projects root).
@@ -272,16 +294,223 @@ function runLaunch(parsed: ParsedLaunch): number {
 	return spawnNetcage(plan.netcageArgs);
 }
 
-// --- the interactive menu hook (filled by cli-bare-launch-menu-tui) ----------
-// Bare launch dispatches here. Until the TUI lands, tell the user how to launch
-// directly so `<project>`/`--shell`/`-m`/`--mount` all work end-to-end now.
-function runMenu(_intent: LaunchIntent, machine: Machine): number {
-	process.stderr.write(
-		`anon-pi: the interactive project menu for machine "${machine.name}" is not available yet.\n` +
-			'Launch a project directly for now, e.g. `anon-pi <project>` (pi) or\n' +
-			'`anon-pi --shell [<project>]` (a jailed shell). Run `anon-pi --help`.\n',
-	);
-	return 1;
+// --- the interactive host-side menu (the ONLY untested I/O) -------------------
+//
+// Bare `anon-pi` (and bare `-m <machine>` / `--mount <parent>` with no project)
+// dispatches here. The menu is a PURE host-side read: it lists the active root's
+// projects (readdir) + each machine's pi session dirs (readdir) and feeds them
+// to the pure buildMenuChoiceList / deriveProjectUsage / buildMenuEntries, which
+// own ALL the logic (the entry order + the used-on / new-here annotation). This
+// function does ONLY the I/O the pure seam cannot: the real dir reads, the raw-
+// mode arrow-key render/select (select()), the new-project name prompt, and the
+// dispatch of the pick back through resolveRunPlan + executeLaunchPlan (so a
+// menu pick launches identically to the same command typed directly). No jail
+// runs until the user chooses; the no-TTY case is handled BEFORE we reach here
+// (runLaunch's discipline), so a TTY is guaranteed.
+function runMenu(intent: LaunchIntent, machine: Machine): number {
+	const env = envFromProcess(process.env);
+
+	// The active root the menu lists projects from: a --mount parent re-roots, else
+	// the resolved projects root. (Named projects live under it; `.` is the root.)
+	const root = intent.mountParent ?? intent.projectsRoot;
+	const rawProjects = readDirNames(root);
+	const choiceList = buildMenuChoiceList({projects: rawProjects});
+
+	// Per-machine usage: the session-slug set present in each machine home's pi
+	// sessions dir, machine-invariant, so a shared project is credited on each.
+	const sessions: SessionDirListing = {};
+	for (const name of listMachineNames(env)) {
+		sessions[name] = readDirNames(machineSessionsDir(env, name));
+	}
+	// The current machine may be brand-new (no sessions dir yet); an absent entry
+	// reads as "new for it" in deriveProjectUsage.
+	if (sessions[machine.name] === undefined) sessions[machine.name] = [];
+	const usage = deriveProjectUsage({
+		projects: choiceList.projects,
+		currentMachine: machine.name,
+		sessions,
+	});
+
+	const entries = buildMenuEntries({choiceList, usage});
+
+	const picked = select(entries, {
+		header: `anon-pi: machine "${machine.name}" (\u2191/\u2193 move, Enter select, Ctrl-C quit)`,
+	});
+	if (picked === undefined) {
+		// Ctrl-C / EOF: a clean quit, nothing launched (the terminal is restored).
+		process.stderr.write('anon-pi: cancelled; nothing launched.\n');
+		return 130; // 128 + SIGINT, the conventional Ctrl-C exit code.
+	}
+
+	// Turn the pick into a concrete launch intent, then re-resolve + execute it
+	// EXACTLY as the equivalent direct command would (same resolveRunPlan path).
+	let launchIntent: LaunchIntent;
+	switch (picked.kind) {
+		case 'project':
+		case 'here':
+			launchIntent = {...intent, mode: 'pi', project: picked.project};
+			break;
+		case 'shell':
+			launchIntent = {...intent, mode: 'shell', project: undefined};
+			break;
+		case 'new': {
+			const name = promptNewProject();
+			if (name === undefined) return 1;
+			launchIntent = {...intent, mode: 'pi', project: name};
+			break;
+		}
+	}
+
+	let plan;
+	try {
+		plan = resolveRunPlan(launchIntent, homeFresh);
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+	// A menu pick is always a concrete launch (never the menu marker again).
+	if (plan.kind !== 'launch') {
+		process.stderr.write('anon-pi: internal error resolving the menu pick.\n');
+		return 1;
+	}
+	return executeLaunchPlan(launchIntent, plan);
+}
+
+/**
+ * Prompt for a NEW project name and validate it (validateName, the same guard a
+ * direct `anon-pi <name>` uses), so a menu-created project is a safe single
+ * folder segment. Returns the validated name, or undefined on an empty entry /
+ * EOF / a rejected name (with the error printed). TTY is guaranteed here.
+ */
+function promptNewProject(): string | undefined {
+	const ans = promptLine('New project name (a single folder segment): ');
+	if (ans === undefined || ans.trim() === '') {
+		process.stderr.write('anon-pi: no name given; nothing launched.\n');
+		return undefined;
+	}
+	try {
+		return validateName(ans.trim(), 'project');
+	} catch (e) {
+		reportAnonPiError(e);
+		return undefined;
+	}
+}
+
+/**
+ * Read the entry NAMES of a directory (best-effort): the plain names of its
+ * direct children, or [] if the dir is absent / unreadable. Used for both the
+ * projects-root listing (pure buildMenuChoiceList filters it to folder-safe
+ * project names) and each machine's sessions dir (the session slugs present).
+ */
+function readDirNames(dir: string): string[] {
+	if (!existsSync(dir)) return [];
+	try {
+		return readdirSync(dir, {withFileTypes: true}).map((d) => d.name);
+	} catch {
+		return [];
+	}
+}
+
+// --- the hand-rolled, zero-dependency raw-mode selector ----------------------
+//
+// A small supply-chain surface is on-brand for a security tool and the project
+// list is short, so instead of a prompt library we drive stdin in raw mode
+// ourselves: up/down (arrows or k/j) move a `>` cursor, Enter selects, Ctrl-C /
+// q / Esc cancels. The active row is highlighted (reverse video). The terminal
+// is ALWAYS restored (raw mode off, cursor shown) on every exit path, including
+// Ctrl-C. Isolated here behind a tiny signature so a well-regarded prompt lib
+// could swap in later as a localized change. This is the ONLY untested I/O in
+// the menu; all logic (entries + labels) is the pure buildMenuEntries.
+
+const ESC = '\u001b';
+
+/**
+ * Present `entries` as an arrow-key list and return the chosen one, or undefined
+ * on cancel (Ctrl-C / q / Esc / EOF). Blocks on raw stdin; restores the terminal
+ * on every path. An empty entry list returns undefined immediately (nothing to
+ * pick), though the menu always offers at least the `.` here entry.
+ */
+function select(
+	entries: readonly MenuEntry[],
+	opts: {header?: string} = {},
+): MenuEntry | undefined {
+	if (entries.length === 0) return undefined;
+	const out = process.stdout;
+	const stdin = process.stdin;
+	let active = 0;
+
+	const render = (first: boolean): void => {
+		if (!first) {
+			// move cursor up over the previously drawn rows to redraw in place.
+			out.write(`${ESC}[${entries.length}A`);
+		}
+		for (let i = 0; i < entries.length; i++) {
+			const selected = i === active;
+			const cursor = selected ? '>' : ' ';
+			const text = `${cursor} ${entries[i].label}`;
+			// clear the line, then draw; reverse-video the active row.
+			out.write(`${ESC}[2K`);
+			out.write(selected ? `${ESC}[7m${text}${ESC}[0m` : text);
+			out.write('\n');
+		}
+	};
+
+	const wasRaw = stdin.isRaw ?? false;
+	const restore = (): void => {
+		try {
+			if (stdin.setRawMode) stdin.setRawMode(wasRaw);
+		} catch {
+			/* best-effort */
+		}
+		out.write(`${ESC}[?25h`); // show the cursor again
+	};
+
+	if (opts.header) out.write(opts.header + '\n');
+	out.write(`${ESC}[?25l`); // hide the cursor while navigating
+	try {
+		if (stdin.setRawMode) stdin.setRawMode(true);
+	} catch {
+		/* if raw mode is unavailable we still render + read line-ish below */
+	}
+	render(true);
+
+	const buf = Buffer.alloc(3);
+	for (;;) {
+		let n: number;
+		try {
+			n = readSync(0, buf, 0, 3, null);
+		} catch (e) {
+			if ((e as NodeJS.ErrnoException).code === 'EAGAIN') continue;
+			restore();
+			return undefined;
+		}
+		if (n === 0) {
+			restore();
+			return undefined; // EOF
+		}
+		const s = buf.toString('utf8', 0, n);
+		// Ctrl-C (ETX \x03), q, or a bare Esc: cancel.
+		if (s === '\u0003' || s === 'q' || s === ESC) {
+			restore();
+			return undefined;
+		}
+		// Enter (CR or LF): select the active row.
+		if (s === '\r' || s === '\n') {
+			restore();
+			return entries[active];
+		}
+		// Up: arrow `Esc [ A` / `Esc O A`, or k. Down: `Esc [ B` / `Esc O B`, or j.
+		if (s === `${ESC}[A` || s === `${ESC}OA` || s === 'k') {
+			active = (active - 1 + entries.length) % entries.length;
+			render(false);
+			continue;
+		}
+		if (s === `${ESC}[B` || s === `${ESC}OB` || s === 'j') {
+			active = (active + 1) % entries.length;
+			render(false);
+			continue;
+		}
+		// any other key: ignore, keep waiting.
+	}
 }
 
 // --- the `machine` verbs (thin dispatch over the pure parts) -----------------
