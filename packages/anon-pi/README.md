@@ -55,7 +55,9 @@ It then writes `~/.anon-pi/config.json` + the `default` machine. It **never dest
 ```
 anon-pi                        MENU: pick a project (pi), a shell, or a new project
 anon-pi <project>              pi in the project (/projects/<project>); exit pi -> host
-anon-pi <project> <pi-args…>   forward args to pi (headless/one-shot; no TTY needed)
+anon-pi <project> <pi-args…>   forward args to pi (e.g. -p for a headless one-shot)
+anon-pi --session <id>         resume a pi session by id (forwarded to pi; no project needed)
+anon-pi --continue             continue your most recent pi session (also -r/--resume, --fork)
 anon-pi --shell [<project>]    a jailed bash (at ~, or cd'd into <project>) - the project-hopper
 anon-pi -m <machine> [<p>]     the same, on <machine> (its own image + home + conversations)
 anon-pi --mount <parent> [<p>] root at a HOST parent folder instead of the projects root
@@ -77,6 +79,7 @@ Every subcommand carries its own help: `anon-pi --help` (the launch surface), `a
 | Just pick something to work on | `anon-pi` (the menu) |
 | Work in a project | `anon-pi <project>` |
 | Resume a project's conversation | `anon-pi <project>` (same machine + project ⇒ same session) |
+| Resume a specific session by id | `anon-pi --session <id>` (or `anon-pi --continue` for the latest) |
 | Run a one-shot prompt (scriptable) | `anon-pi <project> -p "…"` |
 | Hop between projects / poke the box | `anon-pi --shell` then `cd /projects/<p> && pi` |
 | A scratch pi not tied to a subfolder | `anon-pi .` |
@@ -118,11 +121,23 @@ From inside the shell you can `cd` between `/projects/*` and run `pi` yourself i
 
 ### Headless / one-shot
 
-Any tokens after the project are forwarded to pi verbatim, and this path does **not** need a TTY (so it fits scripts and pipes):
+Any tokens after the project are forwarded to pi verbatim. A run is headless (no TTY needed, so it fits scripts and pipes) only when you forward pi's `-p`/`--print`; other forwarded flags (like `--session`) stay interactive.
 
 ```sh
 anon-pi recon -p "summarize the findings in ./notes"
 ```
+
+### Resuming a session
+
+`anon-pi <project>` already resumes that project's conversation (the session is keyed by its `/projects/<name>` cwd, so same machine + same project reopens it). To resume a **specific** session, forward pi's session flags — with no project needed, because pi finds the session by id and switches to its own project:
+
+```sh
+anon-pi --session <id>     # resume that exact session
+anon-pi --continue         # continue your most recent session (also -r/--resume, --fork <id>)
+anon-pi -m webveil --session <id>   # on a specific machine
+```
+
+So when pi prints `To resume this session: pi --session <id>` on exit, just prefix it: `anon-pi --session <id>`.
 
 ### `--mount`: root at a host parent (the caveat)
 

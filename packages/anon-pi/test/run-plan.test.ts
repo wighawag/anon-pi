@@ -130,6 +130,27 @@ describe('resolveRunPlan — modes', () => {
 		expect(p.netcageArgs).toContain('--proxy');
 		expect(p.netcageArgs).toContain('--allow-direct');
 	});
+
+	it('a pi session-resume launch (no project) cwds at the projects ROOT, INTERACTIVE', () => {
+		// `anon-pi --session <id>`: pi mode, no project, --session forwarded. pi
+		// switches to the session's own cwd, so anon-pi starts at /projects (not
+		// /root, which is the shell-at-home case) and keeps -it (interactive).
+		const p = launch({
+			project: undefined,
+			piArgs: ['--session', '019f2bde-fd47'],
+		});
+		expect(p.cwd).toBe(CONTAINER_PROJECTS_ROOT); // /projects, the root
+		expect(p.cwd).not.toBe(CONTAINER_HOME_ROOT); // NOT /root
+		expect(p.netcageArgs).toContain('-it'); // interactive
+		// the session flag is forwarded to pi
+		const tail = p.netcageArgs.slice(p.netcageArgs.indexOf('pi'));
+		expect(tail).toEqual(['pi', '--session', '019f2bde-fd47']);
+	});
+
+	it('a shell with no project still sits at the machine home (/root)', () => {
+		const p = launch({mode: 'shell', project: undefined});
+		expect(p.cwd).toBe(CONTAINER_HOME_ROOT);
+	});
 });
 
 describe('resolveRunPlan — the two invariant mounts (always)', () => {

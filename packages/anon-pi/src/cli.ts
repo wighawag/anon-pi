@@ -51,6 +51,7 @@ import {
 	resolveDeleteProject,
 	parseConfigJson,
 	parseLaunchArgs,
+	isHeadlessPiArgs,
 	parseMachineArgs,
 	parseMachineJson,
 	projectHostDir,
@@ -278,10 +279,10 @@ function runLaunch(parsed: ParsedLaunch): number {
 	}
 
 	// No-TTY discipline: the bare MENU and every INTERACTIVE launch (interactive
-	// pi, or a shell) need a TTY; a HEADLESS pi run (`<project> <pi-args…>`) does
-	// NOT. Check BEFORE we mutate anything or spawn.
-	const headless =
-		parsed.mode === 'pi' && !!parsed.piArgs && parsed.piArgs.length > 0;
+	// pi, or a shell) need a TTY; only a HEADLESS pi run (forwarded `-p`/`--print`)
+	// does NOT. Forwarded args that stay interactive (e.g. `--session <id>`,
+	// `--model x`) still require a TTY. Check BEFORE we mutate anything or spawn.
+	const headless = parsed.mode === 'pi' && isHeadlessPiArgs(parsed.piArgs);
 	if (!headless && !process.stdin.isTTY) {
 		if (parsed.mode === 'menu') {
 			process.stderr.write(

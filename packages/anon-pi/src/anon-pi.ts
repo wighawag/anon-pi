@@ -523,6 +523,24 @@ export function resolveCwd(kind: RootKind, token: string): string {
 	return `${rootCwd(kind)}/${validateName(token, 'project')}`;
 }
 
+/**
+ * PURE: the launch cwd for a resolved (mode, rootKind, project). With a project
+ * token it resolves under the active root (resolveCwd). With NO project: a
+ * `shell` sits at the machine home (`/root`) — the "sit on the machine" mode —
+ * while `pi` (a `--session`/`--resume` launch that pi cwd-switches itself) starts
+ * at the projects root (`rootCwd`), a real pi launch position. `menu` never
+ * reaches here (it is argv-less). Shared by resolveRunPlan + keptContainerKey so
+ * the run cwd and the container-identity key always agree.
+ */
+export function launchCwd(
+	mode: LaunchMode,
+	kind: RootKind,
+	project: string | undefined,
+): string {
+	if (project !== undefined) return resolveCwd(kind, project);
+	return mode === 'shell' ? CONTAINER_HOME_ROOT : rootCwd(kind);
+}
+
 /** Parsed shape of config.json. All fields optional (a hand-edited file may omit any). */
 export interface AnonPiConfig {
 	/** socks5h proxy URL. */
@@ -783,13 +801,87 @@ export interface ParsedLaunch {
 }
 
 /**
+ * pi flags that SELECT/RESUME a session by id (not by cwd), so they work with NO
+ * anon-pi project: pi finds the session file (in the always-mounted machine
+ * home) and switches to its own project cwd. `anon-pi <flag> ...` forwards these
+ * verbatim to pi at the projects root. Mirrors pi's own resume-hint grammar
+ * (`pi --session <id>`), so pasting `anon-pi --session <id>` just works.
+ */
+const PI_SESSION_FLAGS: ReadonlySet<string> = new Set([
+	'--session',
+	'--session-id',
+	'--resume',
+	'-r',
+	'--continue',
+	'-c',
+	'--fork',
+]);
+
+/** True iff `a` is a pi session-resume flag (see PI_SESSION_FLAGS). */
+function isPiSessionFlag(a: string): boolean {
+	return PI_SESSION_FLAGS.has(a);
+}
+
+/**
+ * PURE: whether forwarded pi args request pi's NON-INTERACTIVE (print) mode,
+ * i.e. contain `-p`/`--print`. This is the ONLY headless shape (it needs no
+ * TTY): other forwarded args (`--session <id>`, `--model x`, ...) are still
+ * INTERACTIVE and need a TTY + `-it`. Shared by the CLI's no-TTY discipline and
+ * the RunPlan's `-it` decision so they agree.
+ */
+export function isHeadlessPiArgs(
+	piArgs: readonly string[] | undefined,
+): boolean {
+	return !!piArgs && piArgs.some((a) => a === '-p' || a === '--print');
+}
+
+/**
+ * Finish parsing a session-resume launch (`anon-pi --session <id> ...`): pi mode,
+ * NO project (pi resolves the session + its cwd itself), the flag + rest
+ * forwarded. `--shell` is incompatible (a shell has no session to resume).
+ */
+function finishPiSessionLaunch(args: {
+	machine: string;
+	machineExplicit: boolean;
+	mountParent?: string;
+	keep: boolean;
+	rm: boolean;
+	shell: boolean;
+	piArgs: string[];
+	fail: (msg: string) => never;
+}): ParsedLaunch {
+	if (args.keep && args.rm) {
+		args.fail(
+			'--keep and --rm are contradictory (pick one; --rm is the default)',
+		);
+	}
+	if (args.shell) {
+		args.fail(
+			'--shell cannot resume a pi session (a shell has no session). Drop --shell.',
+		);
+	}
+	return {
+		mode: 'pi',
+		machine: args.machine,
+		machineExplicit: args.machineExplicit,
+		project: undefined,
+		mountParent: args.mountParent,
+		keep: args.keep,
+		piArgs: args.piArgs,
+	};
+}
+
+/**
  * PURE: parse grammar A into a ParsedLaunch. Consumes the anon-pi flags
  * (`-m <machine>`, `--shell`, `--mount <parent>`, `--keep`/`--rm`) LEFT of the
  * project positional; the FIRST bare positional is the project (`.` allowed as
  * the root token). In pi mode every token AFTER the project is forwarded to pi
  * verbatim (so `anon-pi recon -p '...'` works) — anon-pi flags must come before
- * the project. In shell/menu mode a stray extra positional is an error (bash has
- * no forwarded-args grammar; the menu takes no project).
+ * the project. A pi session-resume flag (`--session <id>`, `--continue`,
+ * `--resume`, `--fork <id>`) in the project position starts a NO-project pi
+ * launch that forwards to pi (pi resolves the session + cwd itself). In
+ * shell/menu mode a stray extra positional is an error (bash has no
+ * forwarded-args grammar; the menu takes no project).
  *
  * Validates the project name and the `-m` machine name via validateName (the
  * reserved-name guard); `--mount <parent>` is a HOST path in its own namespace,
@@ -844,6 +936,28 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 			project = ROOT_TOKEN;
 			i++;
 			break;
+		}
+		if (isPiSessionFlag(a)) {
+			// A pi session-resume flag (`--session <id>`, `--continue`, `--resume`,
+			// `--fork <id>`, ...) with NO anon-pi project. pi resolves the session by
+			// id and switches to ITS project cwd itself (session files live in the
+			// machine home, always mounted), so anon-pi launches pi at the projects
+			// root and forwards this flag + everything after it verbatim. This makes
+			// pi's own "To resume: pi --session <id>" hint usable as
+			// `anon-pi --session <id>`.
+			piArgs = args.slice(i);
+			project = undefined;
+			i = args.length;
+			return finishPiSessionLaunch({
+				machine,
+				machineExplicit: machineSet,
+				mountParent,
+				keep: keepSeen,
+				rm: rmSeen,
+				shell,
+				piArgs,
+				fail,
+			});
 		}
 		if (a.startsWith('-')) {
 			fail(`unknown option: ${a}`);
@@ -959,10 +1073,7 @@ export function resolveRunPlan(
 	// Which root the cwd resolves under: /work when --mount, else /projects.
 	const rootKind: RootKind = mounted ? 'mount' : 'projects';
 
-	// cwd: shell with no project sits at the machine home (/root); otherwise the
-	// project token (a name or `.`) resolves under the active root uniformly.
-	const cwd =
-		project === undefined ? CONTAINER_HOME_ROOT : resolveCwd(rootKind, project);
+	const cwd = launchCwd(mode, rootKind, project);
 
 	const fresh = homeFresh(machine.home);
 	const seedVersion = intent.seedVersion ?? SEED_VERSION;
@@ -974,7 +1085,7 @@ export function resolveRunPlan(
 	// (podman fails to allocate a TTY on a non-tty stdin). The CLI's broader
 	// no-TTY discipline (erroring when an interactive mode has no TTY) is a later
 	// task; here the argv simply omits -it for the one headless shape.
-	const headless = mode === 'pi' && !!intent.piArgs && intent.piArgs.length > 0;
+	const headless = mode === 'pi' && isHeadlessPiArgs(intent.piArgs);
 
 	const netcageArgs: string[] = ['run'];
 	// --rm by DEFAULT (throwaway); --keep leaves the container kept.
@@ -1134,13 +1245,12 @@ export type RunVsStart = {action: 'run'} | {action: 'start'; ref: string};
  * its internal shape is not a contract (compare only keys this function makes).
  */
 export function keptContainerKey(intent: LaunchIntent): string {
-	const {machine, projectsRoot, project, mountParent} = intent;
+	const {machine, mode, projectsRoot, project, mountParent} = intent;
 	const mounted = nonEmpty(mountParent) !== undefined;
 	const rootKind: RootKind = mounted ? 'mount' : 'projects';
 	// The same cwd resolution resolveRunPlan uses, so the key names the exact
 	// container a matching launch would run in (its conversation key).
-	const cwd =
-		project === undefined ? CONTAINER_HOME_ROOT : resolveCwd(rootKind, project);
+	const cwd = launchCwd(mode, rootKind, project);
 	return [
 		`machine=${machine.name}`,
 		`projectsRoot=${projectsRoot}`,
@@ -2281,7 +2391,9 @@ export const HELP = `anon-pi - run pi on anonymized, jailed machines (netcage: f
 USAGE
   anon-pi                        MENU: pick a project (pi), a shell, or a new project
   anon-pi <project>              pi in the project (${CONTAINER_PROJECTS_ROOT}/<project>); exit pi -> host
-  anon-pi <project> <pi-args…>   forward args to pi (headless/one-shot; no TTY needed)
+  anon-pi <project> <pi-args…>   forward args to pi (e.g. -p for a headless one-shot)
+  anon-pi --session <id>         resume a pi session by id (forwarded to pi; no project needed)
+  anon-pi --continue             continue your most recent pi session (also -r/--resume, --fork)
   anon-pi --shell [<project>]    a jailed bash (at ~, or cd'd into <project>) - the project-hopper
   anon-pi -m <machine> [<p>]     the same, on <machine> (its own image + home + conversations)
   anon-pi --mount <parent> [<p>] root at a HOST parent folder instead of the projects root

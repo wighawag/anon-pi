@@ -10,6 +10,7 @@ import {describe, it, expect} from 'vitest';
 import {
 	AnonPiError,
 	DEFAULT_MACHINE,
+	isHeadlessPiArgs,
 	parseLaunchArgs,
 	ROOT_TOKEN,
 } from '../src/index.js';
@@ -176,5 +177,72 @@ describe('parseLaunchArgs — reserved-name guard + validation', () => {
 
 	it('errors when -m has no machine argument', () => {
 		expect(() => parseLaunchArgs(['-m'])).toThrow(AnonPiError);
+	});
+});
+
+describe('parseLaunchArgs — pi session resume (no project)', () => {
+	// `anon-pi --session <id>` (and --resume/--continue/--fork) forward to pi with
+	// NO anon-pi project: pi resolves the session by id + switches to its cwd. So
+	// pi's own hint `pi --session <id>` is usable as `anon-pi --session <id>`.
+	for (const flags of [
+		['--session', '019f2bde-fd47'],
+		['--session-id', 'abc'],
+		['--resume'],
+		['-r'],
+		['--continue'],
+		['-c'],
+		['--fork', 'abc123'],
+	]) {
+		it(`\`${flags.join(' ')}\` is a no-project pi launch that forwards to pi`, () => {
+			const p = parseLaunchArgs(flags);
+			expect(p.mode).toBe('pi');
+			expect(p.project).toBeUndefined();
+			expect(p.piArgs).toEqual(flags);
+		});
+	}
+
+	it('honours -m before a session flag (picks the machine)', () => {
+		const p = parseLaunchArgs(['-m', 'webveil', '--session', 'xyz']);
+		expect(p.machine).toBe('webveil');
+		expect(p.machineExplicit).toBe(true);
+		expect(p.mode).toBe('pi');
+		expect(p.project).toBeUndefined();
+		expect(p.piArgs).toEqual(['--session', 'xyz']);
+	});
+
+	it('forwards everything AFTER the session flag verbatim', () => {
+		const p = parseLaunchArgs(['--session', 'xyz', '--model', 'foo']);
+		expect(p.piArgs).toEqual(['--session', 'xyz', '--model', 'foo']);
+	});
+
+	it('a session flag AFTER a project is just forwarded (existing behaviour)', () => {
+		const p = parseLaunchArgs(['recon', '--session', 'xyz']);
+		expect(p.project).toBe('recon');
+		expect(p.piArgs).toEqual(['--session', 'xyz']);
+	});
+
+	it('--shell + a session flag is an error (a shell has no session)', () => {
+		expect(() => parseLaunchArgs(['--shell', '--session', 'x'])).toThrow(
+			AnonPiError,
+		);
+	});
+
+	it('--keep --rm with a session flag is still contradictory', () => {
+		expect(() => parseLaunchArgs(['--keep', '--rm', '--session', 'x'])).toThrow(
+			AnonPiError,
+		);
+	});
+});
+
+describe('isHeadlessPiArgs (only -p/--print is headless)', () => {
+	it('is true for -p / --print', () => {
+		expect(isHeadlessPiArgs(['-p', 'prompt'])).toBe(true);
+		expect(isHeadlessPiArgs(['--print', 'x'])).toBe(true);
+	});
+	it('is FALSE for interactive forwarded args (session/model)', () => {
+		expect(isHeadlessPiArgs(['--session', 'xyz'])).toBe(false);
+		expect(isHeadlessPiArgs(['--model', 'foo'])).toBe(false);
+		expect(isHeadlessPiArgs(undefined)).toBe(false);
+		expect(isHeadlessPiArgs([])).toBe(false);
 	});
 });
