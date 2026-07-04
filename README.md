@@ -129,7 +129,7 @@ From inside the shell you can `cd` between `/projects/*` and run `pi` yourself i
 
 ### Reaching an in-jail server from the host (`forward` / `ports`)
 
-A jailed tool sometimes runs a server you want to open on the host: a dev/preview server on `:3001`, a local API. The jail deliberately publishes no ports (that would open an inbound path around the forced egress), so host access is a separate, explicit verb, the way `kubectl port-forward` / `ssh -L` work. anon-pi wraps netcage's `forward` so you never handle the raw container name (needs **netcage >= 0.9.0**):
+A jailed tool sometimes runs a server you want to open on the host: a dev/preview server on `:3001`, a local API. The jail deliberately publishes no ports (that would open an inbound path around the forced egress), so host access is a separate, explicit verb, the way `kubectl port-forward` / `ssh -L` work. anon-pi wraps netcage's `forward` so you never handle the raw container name (needs **netcage >= 0.10.0**: anon-pi reads managed containers back via `netcage ps --format json`):
 
 ```sh
 # terminal 1: a running session with a server inside (e.g. pi started `pnpm dev` on :3001)
