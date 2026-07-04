@@ -20,8 +20,8 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import {readSync} from 'node:fs';
-import {spawnSync} from 'node:child_process';
-import {join} from 'node:path';
+import {spawnSync, execFileSync} from 'node:child_process';
+import {join, dirname} from 'node:path';
 import {
 	AnonPiError,
 	HELP,
@@ -46,8 +46,24 @@ import {
 	resolveRunPlan,
 	resolveRunVsStart,
 	serializeMachineJson,
+	serializeConfigJson,
 	setImageWarning,
 	keptContainerKey,
+	DEFAULT_SOCKS_PROBE_PORTS,
+	SOCKS5_METHOD_SELECTOR,
+	formatProxyFindings,
+	interpretSocks5Handshake,
+	initImageMenu,
+	generateModelsJson,
+	parseVerifyExitIp,
+	processHint,
+	socks5hUrl,
+	hostPortKey,
+	shippedDockerfilePath,
+	shippedWebveilDockerfilePath,
+	type ProxyFinding,
+	type SocksHandshake,
+	type InitImageChoice,
 	type AnonPiConfig,
 	type AnonPiEnv,
 	type KeptContainer,
@@ -67,7 +83,12 @@ const ANON_PI_KEY_LABEL = 'anon-pi.key';
 function main(argv: string[]): number {
 	const args = argv.slice(2);
 
-	if (args.includes('--help') || args.includes('-h')) {
+	// The global `--help`/`-h` prints the top-level HELP, EXCEPT when the first
+	// token is a subcommand that owns its own `--help` (so `anon-pi init --help`
+	// shows init's help, not the global one). `machine` keeps its historical global
+	// help (its own MACHINE_HELP is reached only via a bare `machine --help` path
+	// there); `init` routes to runInit for its own INIT_HELP.
+	if ((args.includes('--help') || args.includes('-h')) && args[0] !== 'init') {
 		process.stdout.write(HELP);
 		return 0;
 	}
@@ -89,6 +110,12 @@ function main(argv: string[]): number {
 	}
 	if (args[0] === '--delete-project') {
 		return runDeleteProject(args.slice(1));
+	}
+
+	// `init` onboards: verify the proxy, capture the llm endpoint, pick/build the
+	// default machine image, write config.json + the default machine. Re-runnable.
+	if (args[0] === 'init') {
+		return runInit(args.slice(1));
 	}
 
 	let parsed: ParsedLaunch;
@@ -617,6 +644,512 @@ function runDeleteProject(args: string[]): number {
 			`(files + ${sessionCount} per-machine session dir(s)). The machine homes are kept.\n`,
 	);
 	return 0;
+}
+
+// --- `anon-pi init` onboarding (thin I/O over the pure detect/verify decisions) --
+//
+// init is the HONEST, re-runnable onboarding. It captures the socks5h PROXY (by
+// evidence: open ports + a real SOCKS5 handshake + a real `netcage verify` exit
+// IP, NEVER a provider label), the local-model ENDPOINT (generating models.json
+// from it), and the default machine IMAGE (menu from shipped Dockerfiles / an
+// existing ref / skip, building via `podman build`), then writes config.json +
+// the `default` machine. It REPLACES the old `import`. All the DECISIONS are
+// pure (anon-pi.ts); this does only the socket probes, the netcage/podman
+// spawns, and the prompts. It NEVER destroys machines/homes: it pre-fills
+// current values and only ADDS/updates config + a fresh default machine.
+
+const INIT_HELP = `anon-pi init - onboard: verify your proxy, capture your local model, pick an image
+
+USAGE
+  anon-pi init                    interactive onboarding (re-runnable reconfigure)
+
+WHAT IT DOES
+  1. PROXY: probes common SOCKS ports, confirms SOCKS5 via a real handshake,
+     shows the findings (EVIDENCE only, never a provider label), then runs
+     \`netcage verify\` and shows the real EXIT IP as proof. You confirm.
+  2. LOCAL MODEL: captures host:port, probes reachability, generates models.json.
+  3. IMAGE: pick a shipped Dockerfile (built via podman), an existing ref, or skip.
+  Then writes ~/.anon-pi/config.json + the \`default\` machine. Never destroys homes.
+`;
+
+function runInit(args: string[]): number {
+	if (args.includes('--help') || args.includes('-h')) {
+		process.stdout.write(INIT_HELP);
+		return 0;
+	}
+	if (args.length > 0) {
+		process.stderr.write(
+			`anon-pi: init takes no arguments, got: ${args.join(' ')}. Run \`anon-pi init --help\`.\n`,
+		);
+		return 1;
+	}
+
+	if (!process.stdin.isTTY) {
+		process.stderr.write(
+			'anon-pi: init is interactive and needs a TTY. Run it in a terminal. To set\n' +
+				'values non-interactively, write ~/.anon-pi/config.json + a machine.json by hand,\n' +
+				'or export ANON_PI_PROXY / ANON_PI_LLM (they override config.json).\n',
+		);
+		return 1;
+	}
+
+	const env = envFromProcess(process.env);
+	// Pre-fill from the CURRENT config (re-runnable: init doubles as reconfigure).
+	const current = readJsonConfig(env);
+
+	process.stdout.write(
+		'anon-pi init: honest, evidence-based onboarding. Nothing is destroyed; your\n' +
+			'current values are pre-filled. Press Ctrl-C to abort at any prompt.\n\n',
+	);
+
+	// 1) PROXY: probe + handshake + findings + netcage verify + confirm.
+	const proxyHostPort = initProxyStep(current.proxy);
+	if (proxyHostPort === undefined) return 1;
+	const proxyUrl = socks5hUrl(proxyHostPort);
+
+	// 2) LOCAL MODEL endpoint: capture + probe + generate models.json.
+	const llm = initLlmStep(current.llm);
+	// llm may be undefined if the user skipped it (the launch path still errors
+	// without one, but init lets you set it later; we do not force it here).
+
+	// 3) DEFAULT MACHINE IMAGE: menu (shipped Dockerfiles / existing ref / skip).
+	const image = initImageStep();
+	if (image === ABORT) return 1;
+
+	// 4) WRITE config.json + the `default` machine (never destroying an existing
+	//    home). The proxy is always present (we only reach here on a chosen proxy).
+	const anonHome = resolveAnonPiHome(env);
+	mkdirSync(anonHome, {recursive: true});
+	const configPath = join(anonHome, 'config.json');
+	const nextConfig: AnonPiConfig = {
+		proxy: proxyUrl,
+		llm: llm ?? current.llm,
+		defaultMachine: current.defaultMachine ?? DEFAULT_MACHINE,
+		projects: current.projects,
+	};
+	writeFileSync(configPath, serializeConfigJson(nextConfig));
+	process.stdout.write(`\nanon-pi: wrote ${configPath}.\n`);
+
+	// The `default` machine: create it if absent (NEVER wipe an existing home),
+	// pin/re-pin its image when one was chosen. Its home seeds on first launch.
+	initWriteDefaultMachine(env, image);
+
+	// The per-machine models.json seed for the default machine, generated from the
+	// captured endpoint (this is the `import` replacement). Only when we have an
+	// endpoint; written next to the machine so the first-launch seed mounts it.
+	if ((llm ?? current.llm) !== undefined) {
+		const mdir = machineDir(env, DEFAULT_MACHINE);
+		mkdirSync(mdir, {recursive: true});
+		const models = generateModelsJson((llm ?? current.llm) as string);
+		writeFileSync(
+			join(mdir, MODELS_FILE),
+			JSON.stringify(models, null, '\t') + '\n',
+		);
+		process.stdout.write(
+			`anon-pi: wrote the local-model models.json for machine "${DEFAULT_MACHINE}".\n`,
+		);
+	}
+
+	process.stdout.write(
+		'\nanon-pi: onboarding complete. Launch with `anon-pi <project>` or ' +
+			'`anon-pi --shell`.\n',
+	);
+	return 0;
+}
+
+/** A sentinel a step returns when the user aborted (distinct from "skipped"). */
+const ABORT = Symbol('abort');
+
+/**
+ * The PROXY step: probe the default SOCKS ports, confirm SOCKS5 via a real
+ * handshake, show the EVIDENCE (never a provider label), let the user CHOOSE a
+ * SOCKS5-confirmed port or enter host:port, then run `netcage verify` and show
+ * the real EXIT IP before confirming. Returns the chosen host:port, or undefined
+ * on abort. The socket probes + the netcage spawn are the only I/O; the display
+ * + the handshake verdict come from the pure module.
+ */
+function initProxyStep(currentProxy: string | undefined): string | undefined {
+	process.stdout.write(
+		'Step 1/3 - proxy (the socks5h endpoint that anonymizes egress)\n',
+	);
+	if (currentProxy) {
+		process.stdout.write(`  current: ${currentProxy}\n`);
+	}
+	process.stdout.write('  Probing common SOCKS ports (evidence only)...\n');
+
+	// Probe each default port: TCP-open + a real SOCKS5 handshake, plus the weak
+	// process hints (a running `tor`/`wireproxy` LOCAL process, never the exit
+	// provider). The findings display is the PURE formatter's job.
+	const runningProcesses = observeRunningProcesses();
+	const findings: ProxyFinding[] = DEFAULT_SOCKS_PROBE_PORTS.map(
+		({port, hint}) => {
+			const {open, handshake} = probeSocks5('127.0.0.1', port);
+			const ph = matchProcessHint(runningProcesses);
+			return {
+				host: '127.0.0.1',
+				port,
+				open,
+				handshake,
+				portHint: hint,
+				processHint: ph,
+			};
+		},
+	);
+	process.stdout.write('\n' + formatProxyFindings(findings) + '\n\n');
+
+	// Offer the SOCKS5-confirmed candidates as quick picks; always allow a manual
+	// host:port entry (and pre-fill the current one).
+	const confirmed = findings.filter((f) => f.open && f.handshake?.socks5);
+	for (;;) {
+		if (confirmed.length > 0) {
+			process.stdout.write('SOCKS5-confirmed ports:\n');
+			confirmed.forEach((f, i) => {
+				process.stdout.write(`  [${i + 1}] ${f.host}:${f.port}\n`);
+			});
+		}
+		const prefill = currentProxy
+			? ` (or Enter to keep ${hostPortKey(currentProxy)})`
+			: '';
+		const ans = promptLine(`Choose a number, or enter host:port${prefill}: `);
+		if (ans === undefined) {
+			process.stderr.write('anon-pi: aborted; nothing written.\n');
+			return undefined;
+		}
+		const trimmed = ans.trim();
+		let chosen: string | undefined;
+		if (trimmed === '' && currentProxy) {
+			chosen = hostPortKey(currentProxy);
+		} else if (/^\d+$/.test(trimmed) && confirmed.length > 0) {
+			const idx = Number(trimmed) - 1;
+			if (idx >= 0 && idx < confirmed.length) {
+				const f = confirmed[idx];
+				chosen = `${f.host}:${f.port}`;
+			}
+		} else if (trimmed !== '') {
+			chosen = hostPortKey(trimmed);
+		}
+		if (chosen === undefined || chosen === '') {
+			process.stdout.write(
+				'  Please pick a listed number or enter a host:port.\n',
+			);
+			continue;
+		}
+
+		// VERIFY: run `netcage verify --proxy socks5h://<chosen>` and show the real
+		// exit IP as evidence it is NOT the host IP. The user confirms ON that
+		// evidence. netcage never announces the provider, so neither do we.
+		const url = socks5hUrl(chosen);
+		process.stdout.write(
+			`\n  Verifying via netcage: netcage verify --proxy ${url}\n`,
+		);
+		if (!hasNetcage()) {
+			process.stderr.write(
+				'anon-pi: `netcage` not found on PATH, cannot verify the exit IP. Install\n' +
+					'it first (https://github.com/wighawag/netcage). Linux only.\n',
+			);
+			return undefined;
+		}
+		const verify = spawnSync('netcage', ['verify', '--proxy', url], {
+			encoding: 'utf8',
+		});
+		const output = `${verify.stdout ?? ''}${verify.stderr ?? ''}`;
+		if (verify.error || verify.status !== 0) {
+			process.stdout.write(output.trimEnd() + '\n');
+			process.stdout.write(
+				`  netcage verify FAILED for ${url} (exit ${verify.status ?? 'n/a'}). ` +
+					'Pick another port or fix the proxy.\n\n',
+			);
+			continue;
+		}
+		const exitIp = parseVerifyExitIp(output);
+		if (exitIp) {
+			process.stdout.write(
+				`  Exit IP (via the proxy, NOT your host): ${exitIp}\n`,
+			);
+		} else {
+			process.stdout.write(
+				'  netcage verify succeeded but no exit IP was parsed; raw output:\n' +
+					output.trimEnd() +
+					'\n',
+			);
+		}
+		const ok = promptLine(`  Use ${url} as your proxy? [Y/n] `);
+		if (ok === undefined) {
+			process.stderr.write('anon-pi: aborted; nothing written.\n');
+			return undefined;
+		}
+		if (/^n(o)?$/i.test(ok.trim())) {
+			process.stdout.write('  OK, pick another.\n\n');
+			continue;
+		}
+		return chosen;
+	}
+}
+
+/**
+ * The LOCAL MODEL step: capture host:port (pre-filled from config), probe TCP
+ * reachability (evidence, not a gate), and return the endpoint (undefined if the
+ * user skips it). models.json is generated from it by runInit. The one direct
+ * hole; all other egress stays proxied.
+ */
+function initLlmStep(currentLlm: string | undefined): string | undefined {
+	process.stdout.write(
+		'\nStep 2/3 - local model endpoint (the ONE direct hole)\n',
+	);
+	if (currentLlm) process.stdout.write(`  current: ${currentLlm}\n`);
+	const prefill = currentLlm
+		? ` (or Enter to keep ${currentLlm})`
+		: ' (or Enter to skip)';
+	const ans = promptLine(
+		`  Local model host:port, e.g. 192.168.1.150:8080${prefill}: `,
+	);
+	if (ans === undefined) return currentLlm;
+	const trimmed = ans.trim();
+	if (trimmed === '') return currentLlm;
+	const endpoint = trimmed;
+
+	// Probe reachability: evidence only. A closed port is not fatal (the model may
+	// start later); we just report it.
+	const key = hostPortKey(endpoint);
+	const colon = key.lastIndexOf(':');
+	const host = colon > 0 ? key.slice(0, colon) : key;
+	const port = colon > 0 ? Number(key.slice(colon + 1)) : 80;
+	if (Number.isFinite(port)) {
+		const reachable = probeTcp(host, port);
+		process.stdout.write(
+			reachable
+				? `  reachable: ${host}:${port} accepted a TCP connection.\n`
+				: `  note: ${host}:${port} did not accept a connection now (the model may not be up yet).\n`,
+		);
+	}
+	return endpoint;
+}
+
+/**
+ * The IMAGE step: the pure menu (shipped Dockerfiles / existing ref / skip), then
+ * the impure action for the pick (build via `podman build`, take a ref, or
+ * skip). Returns the resolved image ref, undefined for skip, or ABORT.
+ */
+function initImageStep(): string | undefined | typeof ABORT {
+	process.stdout.write(
+		'\nStep 3/3 - default machine image (an image with `pi` on PATH)\n',
+	);
+	const menu = initImageMenu();
+	menu.forEach((e, i) => {
+		process.stdout.write(`  [${i + 1}] ${e.label}\n`);
+	});
+	for (;;) {
+		const ans = promptLine('  Choose [1-4]: ');
+		if (ans === undefined) return ABORT;
+		const idx = Number(ans.trim()) - 1;
+		if (!Number.isInteger(idx) || idx < 0 || idx >= menu.length) {
+			process.stdout.write('  Please pick a number 1-4.\n');
+			continue;
+		}
+		const choice: InitImageChoice = menu[idx].choice;
+		if (choice === 'skip') {
+			process.stdout.write(
+				'  Skipping the image; pin it later with `anon-pi machine set-image`.\n',
+			);
+			return undefined;
+		}
+		if (choice === 'existing') {
+			const ref = promptLine('  Image ref (a container with `pi` on PATH): ');
+			if (ref === undefined || ref.trim() === '') {
+				process.stdout.write('  No ref given; pick again.\n');
+				continue;
+			}
+			return ref.trim();
+		}
+		// basic | webveil: build the shipped Dockerfile via `podman build`.
+		const dockerfile =
+			choice === 'basic'
+				? shippedDockerfilePath()
+				: shippedWebveilDockerfilePath();
+		if (dockerfile === undefined || !existsSync(dockerfile)) {
+			process.stderr.write(
+				`  anon-pi: could not locate the shipped ${choice === 'basic' ? 'Dockerfile.pi' : 'examples/Dockerfile.pi-webveil'}. ` +
+					'Pick an existing ref instead.\n',
+			);
+			continue;
+		}
+		const tag =
+			choice === 'basic' ? 'anon-pi/pi:latest' : 'anon-pi/pi-webveil:latest';
+		const built = buildImage(dockerfile, tag);
+		if (!built) {
+			process.stdout.write('  Build failed; pick another option.\n');
+			continue;
+		}
+		return tag;
+	}
+}
+
+/**
+ * Create or update the `default` machine: create it (dir + machine.json) if
+ * absent, pinning the chosen image; if it already exists, re-pin the image only
+ * when one was chosen (preserving any per-machine projects override), and NEVER
+ * touch its home (init is non-destructive). A skipped image leaves an existing
+ * machine's image as-is, or creates an imageless machine.
+ */
+function initWriteDefaultMachine(
+	env: AnonPiEnv,
+	image: string | undefined,
+): void {
+	const name = DEFAULT_MACHINE;
+	const dir = machineDir(env, name);
+	const existed = existsSync(dir);
+	mkdirSync(machineHomeDir(env, name), {recursive: true});
+	if (!existed) {
+		writeFileSync(machineJsonPath(env, name), serializeMachineJson({image}));
+		process.stdout.write(
+			`anon-pi: created machine "${name}"${image ? ` (image ${image})` : ' (imageless; pin it later)'} at ${dir}.\n`,
+		);
+		return;
+	}
+	// Existing machine: re-pin only if a new image was chosen; keep its projects
+	// override and its home untouched.
+	const prev = readMachineJson(env, name);
+	if (image !== undefined) {
+		writeFileSync(
+			machineJsonPath(env, name),
+			serializeMachineJson({image, projects: prev.projects}),
+		);
+		process.stdout.write(
+			`anon-pi: re-pinned machine "${name}" image to ${image} (home kept intact).\n`,
+		);
+	} else {
+		process.stdout.write(
+			`anon-pi: machine "${name}" already exists; kept its image + home.\n`,
+		);
+	}
+}
+
+// --- init's thin I/O primitives (socket probes, process observe, podman build) --
+
+/**
+ * Probe a TCP port for openness AND a SOCKS5 handshake: connect, send the
+ * no-auth method-selection greeting, read the reply, and interpret it with the
+ * PURE interpretSocks5Handshake. Fully synchronous + best-effort with a short
+ * timeout so init stays a simple linear prompt flow. On any connect failure the
+ * port is `open: false` with no handshake.
+ */
+function probeSocks5(
+	host: string,
+	port: number,
+): {open: boolean; handshake?: SocksHandshake} {
+	// A synchronous SOCKS5 probe: node's net is async, so we drive a tiny state
+	// machine over a blocking loop using a short deadline. To keep it simple and
+	// dependency-free we use a child `bash`+`/dev/tcp`-style probe is unavailable
+	// portably, so instead we do a promise-free spin with a hard cap via a
+	// separate helper that returns synchronously.
+	const reply = socks5Handshake(host, port, SOCKS5_METHOD_SELECTOR, 600);
+	if (reply === undefined) return {open: false};
+	return {open: true, handshake: interpretSocks5Handshake(reply)};
+}
+
+/**
+ * Best-effort synchronous SOCKS5 handshake: open a TCP connection, write the
+ * greeting, and collect the reply bytes, blocking up to `timeoutMs`. Returns the
+ * reply bytes when the connection opened (possibly empty if the server sent
+ * nothing), or undefined when the connection could not be opened at all (port
+ * closed / refused). Implemented with a nested event loop drained via a shared
+ * flag, so the caller stays a simple linear script.
+ */
+function socks5Handshake(
+	host: string,
+	port: number,
+	greeting: readonly number[],
+	timeoutMs: number,
+): number[] | undefined {
+	// node has no synchronous socket API; run a tiny worker via execFileSync on
+	// the same node binary so the probe is fully synchronous and portable. The
+	// worker connects, sends the greeting, reads up to 2 bytes, and prints them as
+	// JSON (or prints "null" when the connection was refused).
+	const script =
+		`const net=require('net');` +
+		`const s=net.connect({host:${JSON.stringify(host)},port:${port}});` +
+		`let done=false;const bytes=[];` +
+		`const fin=(v)=>{if(done)return;done=true;try{s.destroy()}catch(e){}` +
+		`process.stdout.write(JSON.stringify(v));process.exit(0)};` +
+		`s.setTimeout(${timeoutMs});` +
+		`s.on('connect',()=>{s.write(Buffer.from(${JSON.stringify([...greeting])}))});` +
+		`s.on('data',(d)=>{for(const b of d)bytes.push(b);if(bytes.length>=2)fin(bytes)});` +
+		`s.on('timeout',()=>fin(bytes));` +
+		`s.on('error',()=>fin(null));` +
+		`s.on('close',()=>fin(bytes));`;
+	try {
+		const out = execFileSync(process.execPath, ['-e', script], {
+			encoding: 'utf8',
+			timeout: timeoutMs + 1500,
+		});
+		const parsed = JSON.parse(out) as number[] | null;
+		return parsed === null ? undefined : parsed;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Best-effort synchronous TCP reachability probe (open a connection, succeed or
+ * not) for the local-model endpoint. Reuses the socks5Handshake worker with an
+ * empty greeting: a non-undefined return means the connection opened.
+ */
+function probeTcp(host: string, port: number): boolean {
+	return socks5Handshake(host, port, [], 500) !== undefined;
+}
+
+/**
+ * Observe LOCAL process names (best-effort) so init can offer WEAK hints (a
+ * running `tor` -> likely Tor). Returns the lowercased process names seen, or []
+ * on any failure. This is a LOCAL observation only; it never claims the exit
+ * provider.
+ */
+function observeRunningProcesses(): string[] {
+	const res = spawnSync('ps', ['-eo', 'comm='], {encoding: 'utf8'});
+	if (res.error || res.status !== 0 || !res.stdout) return [];
+	return res.stdout
+		.split('\n')
+		.map((l) => l.trim().split('/').pop() ?? '')
+		.filter((n) => n !== '')
+		.map((n) => n.toLowerCase());
+}
+
+/**
+ * The weak process-hint text for the observed processes, if any maps (via the
+ * PURE processHint). Returns the FIRST matching hint (tor before wireproxy), or
+ * undefined. Never names the exit provider.
+ */
+function matchProcessHint(processes: readonly string[]): string | undefined {
+	for (const p of processes) {
+		const h = processHint(p);
+		if (h) return h.hint;
+	}
+	return undefined;
+}
+
+/**
+ * Build a shipped Dockerfile into `tag` via `podman build`. Streams podman's
+ * output (inherited stdio) so the user sees the build. Returns true on success.
+ * The build CONTEXT is the Dockerfile's own directory (the shipped examples/
+ * dir or the package root), which is where its COPY sources live.
+ */
+function buildImage(dockerfile: string, tag: string): boolean {
+	const context = dirname(dockerfile);
+	process.stdout.write(
+		`  Building ${tag} from ${dockerfile} (podman build)...\n`,
+	);
+	const res = spawnSync(
+		'podman',
+		['build', '-t', tag, '-f', dockerfile, context],
+		{stdio: 'inherit'},
+	);
+	if (res.error) {
+		process.stderr.write(
+			`  anon-pi: failed to run podman: ${res.error.message}. Is podman installed?\n`,
+		);
+		return false;
+	}
+	return res.status === 0;
 }
 
 /** List machine names (readdir of machines/), or [] if the dir is absent. */

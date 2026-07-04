@@ -1293,6 +1293,307 @@ export interface PiModelsFile {
 	[k: string]: unknown;
 }
 
+// --- `anon-pi init` onboarding: the PURE proxy detect/verify DECISIONS --------
+//
+// `anon-pi init` onboards HONESTLY (this is an anonymity tool): its proxy step
+// presents EVIDENCE only (open ports, a real SOCKS5 handshake, a real `netcage
+// verify` exit IP) plus WEAK process hints. It MUST NEVER claim/label the exit
+// provider: a SOCKS proxy does not announce Mullvad/Proton/NordVPN/etc, so a
+// provider label would be a DANGEROUS LIE. This module owns the pure decisions
+// (handshake interpretation, the findings-without-labels formatter, the weak
+// hint wording, the verify exit-IP parse); the socket probes, the `netcage
+// verify` / `podman build` spawns, and the prompts are cli.ts's thin I/O.
+
+/**
+ * The default SOCKS ports `init` probes, each with a WEAK, structural hint (the
+ * conventional tool that DEFAULTS to that port). The hint names a local tool a
+ * port is CONVENTIONALLY used by, NOT the exit provider: `9050`/`9150` are Tor's
+ * own listeners (Tor IS the tool, so naming it is honest), `1080` is the generic
+ * SOCKS default (wireproxy / `ssh -D` / other), which is why its hint stays
+ * provider-agnostic ("wireproxy / ssh -D / generic"): behind a `1080` wireproxy
+ * could be ANY WireGuard VPN, and we never guess which. See the ADR / Decisions.
+ */
+export const DEFAULT_SOCKS_PROBE_PORTS: readonly {
+	port: number;
+	hint: string;
+}[] = [
+	{port: 9050, hint: 'Tor default (system tor)'},
+	{port: 9150, hint: 'Tor Browser default'},
+	{port: 1080, hint: 'generic SOCKS (wireproxy / ssh -D)'},
+];
+
+/**
+ * The SOCKS5 method-selection greeting `init` sends to CONFIRM a port really
+ * speaks SOCKS5 (RFC 1928 §3): version 5, one method offered, `0x00`
+ * (no-authentication). A real SOCKS5 server replies with two bytes
+ * `[0x05, <method>]`; anything else is not SOCKS5. Exposed as a constant so the
+ * probe I/O and the handshake test send byte-identical bytes.
+ */
+export const SOCKS5_METHOD_SELECTOR: readonly number[] = [0x05, 0x01, 0x00];
+
+/** How a SOCKS5 handshake probe against a port came out (the pure verdict). */
+export type SocksHandshake =
+	| {
+			/** The server replied with a well-formed SOCKS5 method-selection reply. */
+			socks5: true;
+			/** The selected method byte the server chose (informational). */
+			method: number;
+	  }
+	| {
+			/** The reply was absent, too short, or not a SOCKS5 version-5 reply. */
+			socks5: false;
+			/** A terse, provider-agnostic reason (for the findings line). */
+			reason: string;
+	  };
+
+/**
+ * PURE: interpret a SOCKS5 method-selection REPLY (the bytes read back after
+ * sending SOCKS5_METHOD_SELECTOR). A valid reply is EXACTLY the two bytes
+ * `[0x05, <method>]` where `<method> != 0xff` (0xff = "no acceptable methods",
+ * i.e. the server IS SOCKS5 but rejected no-auth; that is still a SOCKS5 server,
+ * but for a bare no-auth probe we treat it as a soft failure so the finding does
+ * not imply the port is usable no-auth). Any non-5 first byte, a short reply, or
+ * an empty reply is NOT SOCKS5.
+ *
+ * Reply in -> verdict out; the socket read is cli.ts's job. The reason strings
+ * are deliberately structural ("no reply", "not SOCKS5") and NEVER name a
+ * provider.
+ */
+export function interpretSocks5Handshake(
+	reply: readonly number[] | Uint8Array | Buffer,
+): SocksHandshake {
+	const bytes = Array.from(reply as ArrayLike<number>);
+	if (bytes.length === 0) return {socks5: false, reason: 'no reply'};
+	if (bytes.length < 2) return {socks5: false, reason: 'short reply'};
+	if (bytes[0] !== 0x05) return {socks5: false, reason: 'not SOCKS5'};
+	const method = bytes[1];
+	if (method === 0xff) {
+		return {socks5: false, reason: 'SOCKS5 but no acceptable auth method'};
+	}
+	return {socks5: true, method};
+}
+
+/**
+ * A weak process hint: a LOCAL tool whose presence SUGGESTS what a port is
+ * (e.g. a `tor` process -> likely Tor). It is a hint about the LOCAL software
+ * only, never a claim about the EXIT provider. cli.ts supplies the observed
+ * process name (e.g. from `ps`/`/proc`); the pure mapping stays testable.
+ */
+export interface ProcessHint {
+	/** The observed local process name (as cli.ts read it). */
+	process: string;
+	/** The weak, hedged hint text ("a `tor` process is running -> likely Tor"). */
+	hint: string;
+}
+
+/**
+ * PURE: map an observed local process name to a WEAK, hedged hint, or undefined
+ * when we have nothing honest to say. The ONLY confident mapping is `tor` ->
+ * "likely Tor", because Tor is a LOCAL tool that runs its OWN SOCKS listener (so
+ * seeing `tor` is real evidence the port is Tor). We do NOT map anything to an
+ * EXIT provider (Mullvad/Proton/...): a `wireproxy` process only tells us the
+ * SOCKS front-end, never which VPN sits behind it, so its hint stays
+ * provider-agnostic. Every returned hint is HEDGED ("likely", "-> a SOCKS
+ * front-end") and never states the exit provider.
+ */
+export function processHint(processName: string): ProcessHint | undefined {
+	const name = processName.trim().toLowerCase();
+	if (name === '') return undefined;
+	if (name === 'tor') {
+		return {
+			process: processName,
+			hint: 'a `tor` process is running -> likely Tor',
+		};
+	}
+	if (name === 'wireproxy') {
+		return {
+			process: processName,
+			// A SOCKS front-end for SOME WireGuard VPN; we NEVER guess which one.
+			hint:
+				'a `wireproxy` process is running -> a SOCKS front-end for a ' +
+				'WireGuard VPN (which one is not observable here)',
+		};
+	}
+	return undefined;
+}
+
+/**
+ * One probed SOCKS candidate, as `init` gathers it for the findings display. All
+ * fields are EVIDENCE the probe actually observed; there is DELIBERATELY no
+ * "provider" field, so the type itself cannot carry a provider label.
+ */
+export interface ProxyFinding {
+	/** The host that was probed (usually 127.0.0.1). */
+	host: string;
+	/** The port that was probed. */
+	port: number;
+	/** Whether the TCP port was open (a connection succeeded). */
+	open: boolean;
+	/** The SOCKS5 handshake verdict (only meaningful when `open`). */
+	handshake?: SocksHandshake;
+	/** The port's structural hint (DEFAULT_SOCKS_PROBE_PORTS), if any. */
+	portHint?: string;
+	/** Any weak LOCAL process hint (processHint), if one was observed. */
+	processHint?: string;
+}
+
+/**
+ * The set of substrings a findings line must NEVER contain: known exit-provider
+ * / VPN brand names. This is the machine-checkable half of the never-label rule
+ * (a test asserts formatProxyFindings' output contains NONE of these for any
+ * input). It is not exhaustive of every brand, but it pins the obvious ones so a
+ * regression that starts labelling providers is caught. `tor` is NOT here: Tor
+ * is the LOCAL tool we legitimately hint at, not an opaque exit provider.
+ */
+export const FORBIDDEN_PROVIDER_LABELS: readonly string[] = [
+	'mullvad',
+	'proton',
+	'nordvpn',
+	'nord vpn',
+	'expressvpn',
+	'express vpn',
+	'surfshark',
+	'ivpn',
+	'pia',
+	'private internet access',
+	'cyberghost',
+	'windscribe',
+];
+
+/**
+ * PURE: format the probe findings into the human-readable block `init` shows
+ * before asking the user to CHOOSE a proxy. It renders EVIDENCE ONLY: for each
+ * candidate, the `host:port`, whether it is open, the SOCKS5 handshake verdict,
+ * the structural port hint, and any WEAK local process hint. It NEVER emits an
+ * exit-provider label (a SOCKS proxy does not announce its provider; a false
+ * label is a dangerous lie). The `## Decisions` note + a test assert the output
+ * never contains a FORBIDDEN_PROVIDER_LABELS substring for any input.
+ *
+ * Findings in -> display string out; the socket probes are cli.ts's job.
+ */
+export function formatProxyFindings(findings: readonly ProxyFinding[]): string {
+	if (findings.length === 0) {
+		return 'No SOCKS ports responded on the probed set. Enter your proxy as host:port.';
+	}
+	const lines: string[] = [];
+	for (const f of findings) {
+		const where = `${f.host}:${f.port}`;
+		let status: string;
+		if (!f.open) {
+			status = 'closed (no TCP connection)';
+		} else if (f.handshake && f.handshake.socks5) {
+			status = 'open, SOCKS5 handshake OK';
+		} else if (f.handshake && !f.handshake.socks5) {
+			status = `open, but NOT SOCKS5 (${f.handshake.reason})`;
+		} else {
+			status = 'open';
+		}
+		const hints: string[] = [];
+		if (f.portHint) hints.push(f.portHint);
+		if (f.processHint) hints.push(f.processHint);
+		const hintStr = hints.length > 0 ? ` [${hints.join('; ')}]` : '';
+		lines.push(`${where}: ${status}${hintStr}`);
+	}
+	lines.push(
+		'These are EVIDENCE only (open ports + a real SOCKS5 handshake). A SOCKS ' +
+			'proxy does not announce its exit provider, so none is claimed here; the ' +
+			'`netcage verify` step below shows the real exit IP as proof.',
+	);
+	return lines.join('\n');
+}
+
+/**
+ * PURE: the `socks5h://<host:port>` URL `init` hands to `netcage verify` and
+ * writes into config.json. Only socks5h:// is accepted downstream (plain
+ * socks5:// resolves DNS locally and leaks), so `init` always emits socks5h.
+ * A value that already carries a scheme is normalised to its host:port first
+ * (via hostPortKey) so `socks5h://socks5h://...` can never be produced.
+ */
+export function socks5hUrl(hostPort: string): string {
+	return `socks5h://${hostPortKey(hostPort)}`;
+}
+
+/**
+ * PURE: extract the exit IP `netcage verify` reported from its combined output.
+ * `netcage verify` prints the jail's forced-egress exit IP (an IPv4/IPv6 line)
+ * as PROOF the egress leaves via the proxy (not the host IP). We scan the output
+ * for the first plausible IP literal and return it; undefined if none is found
+ * (the caller then shows the raw output and lets the user judge). This is a
+ * best-effort PARSE of another tool's text, kept pure + tested so a format tweak
+ * is caught by a unit test, not only in the field.
+ */
+export function parseVerifyExitIp(output: string): string | undefined {
+	// IPv4 first (the common case: ipify returns an IPv4 for most exits).
+	const v4 = output.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+	if (v4) {
+		const ip = v4[0];
+		if (ip.split('.').every((o) => Number(o) <= 255)) return ip;
+	}
+	// IPv6 (a loose match: at least two groups and a colon-run), best-effort.
+	const v6 = output.match(/\b(?:[0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F]{0,4}\b/);
+	if (v6 && v6[0].includes('::')) return v6[0];
+	if (v6 && v6[0].split(':').filter(Boolean).length >= 3) return v6[0];
+	return undefined;
+}
+
+/**
+ * The image-menu choices `init` offers for the default machine's image. `[1]`
+ * and `[2]` build a SHIPPED Dockerfile via `podman build`; `[3]` takes an
+ * existing image ref verbatim; `[4]` skips (the machine is created imageless and
+ * pinned later). The pure list keeps the menu wording testable; cli.ts renders
+ * it, runs `podman build`, and writes the machine.
+ */
+export type InitImageChoice = 'basic' | 'webveil' | 'existing' | 'skip';
+
+/** One rendered image-menu entry: its choice tag + the human label. */
+export interface InitImageMenuEntry {
+	choice: InitImageChoice;
+	label: string;
+}
+
+/**
+ * PURE: the ordered image-menu entries `init` shows. `[1]` basic pi
+ * (Dockerfile.pi), `[2]` pi + webveil/SearXNG (examples/Dockerfile.pi-webveil),
+ * `[3]` an existing image ref, `[4]` skip. A single source so the prompt and its
+ * test agree on the order + wording.
+ */
+export function initImageMenu(): InitImageMenuEntry[] {
+	return [
+		{choice: 'basic', label: 'basic pi (build the shipped Dockerfile.pi)'},
+		{
+			choice: 'webveil',
+			label:
+				'pi + webveil/SearXNG (build the shipped examples/Dockerfile.pi-webveil)',
+		},
+		{choice: 'existing', label: 'an existing image ref (I already have one)'},
+		{
+			choice: 'skip',
+			label: 'skip (create the machine imageless; pin it later)',
+		},
+	];
+}
+
+/**
+ * PURE: build the `config.json` body `init` writes, keeping only the non-empty
+ * fields (a skipped image / llm is simply omitted, never written as ""). Emits
+ * pretty-printed JSON (tab indent, trailing newline) matching
+ * serializeMachineJson, so a browsed ~/.anon-pi/config.json reads cleanly. The
+ * proxy is REQUIRED (init only reaches here after a verified proxy), so it is
+ * always present; llm / defaultMachine / projects are included when set.
+ */
+export function serializeConfigJson(config: AnonPiConfig): string {
+	const out: AnonPiConfig = {};
+	const proxy = nonEmpty(config.proxy);
+	if (proxy !== undefined) out.proxy = proxy;
+	const llm = nonEmpty(config.llm);
+	if (llm !== undefined) out.llm = llm;
+	const defaultMachine = nonEmpty(config.defaultMachine);
+	if (defaultMachine !== undefined) out.defaultMachine = defaultMachine;
+	const projects = nonEmpty(config.projects);
+	if (projects !== undefined) out.projects = projects;
+	return JSON.stringify(out, null, '\t') + '\n';
+}
+
 /**
  * Absolute path to the Dockerfile.pi that ships with anon-pi, resolved from this
  * module's location (package root, one level up from dist/anon-pi.js), or
