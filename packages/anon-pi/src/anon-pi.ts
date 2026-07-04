@@ -1215,6 +1215,167 @@ function shippedFile(rel: string): string | undefined {
 	return undefined;
 }
 
+// --- The `machine {create,list,set-image,rm}` verbs (pure parts) -------------
+//
+// Machines are first-class: an image + a persistent host home
+// (machines/<M>/{machine.json,home/}). These verbs manage them. The pure module
+// owns the argv parse (a testable `machine <verb> …` grammar), the machine.json
+// serialisation, and the set-image compatibility WARNING wording; the CLI does
+// the fs (mkdir/write/rm), the list read, and the rm confirm/`--yes`/non-TTY
+// discipline. Dispatch stays thin; every decision that CAN be pure IS.
+
+/**
+ * A parsed `machine <verb> …` command. A discriminated union so the CLI
+ * dispatches on `verb` with the already-validated fields:
+ *   - `create <name> [--image <ref>]`: name validated; image optional here (the
+ *     CLI prompts for it when absent, on a TTY).
+ *   - `list`: no args.
+ *   - `set-image <name> <ref>`: name validated; the new image ref (non-empty).
+ *   - `rm <name> [--yes]`: name validated; `yes` skips the confirm (the CLI
+ *     still enforces the non-TTY abort when `yes` is false).
+ */
+export type MachineCommand =
+	| {verb: 'create'; name: string; image?: string}
+	| {verb: 'list'}
+	| {verb: 'set-image'; name: string; image: string}
+	| {verb: 'rm'; name: string; yes: boolean};
+
+/**
+ * PURE: parse the tokens AFTER `machine` into a MachineCommand. Validates the
+ * machine name via validateName (the reserved-name / traversal guard) so the CLI
+ * only ever joins a safe segment under the machines dir. Throws AnonPiError
+ * (printed verbatim, exit 1) for an unknown/missing verb, a missing or extra
+ * positional, an unknown flag, or a bad name.
+ *
+ * The grammar is deliberately small and flag-light (mirrors the launch grammar's
+ * `--yes` / `--image` shape): `--image <ref>` on create, `--yes` on rm; no other
+ * flags. This keeps `machine` a thin, predictable dispatch surface.
+ */
+export function parseMachineArgs(args: readonly string[]): MachineCommand {
+	const fail = (msg: string): never => {
+		throw new AnonPiError(
+			`anon-pi: ${msg}\nRun \`anon-pi machine --help\` or \`anon-pi --help\`.`,
+		);
+	};
+
+	const verb = args[0];
+	if (verb === undefined) {
+		fail('`machine` needs a subcommand: create | list | set-image | rm');
+	}
+
+	const rest = args.slice(1);
+
+	if (verb === 'list') {
+		if (rest.length > 0)
+			fail(`machine list takes no arguments, got: ${rest.join(' ')}`);
+		return {verb: 'list'};
+	}
+
+	if (verb === 'create') {
+		let name: string | undefined;
+		let image: string | undefined;
+		for (let i = 0; i < rest.length; i++) {
+			const a = rest[i];
+			if (a === '--image') {
+				const v = rest[++i];
+				if (v === undefined) fail('--image needs an image ref');
+				image = v as string;
+				continue;
+			}
+			if (a.startsWith('-')) fail(`unknown option: ${a}`);
+			if (name !== undefined)
+				fail(`machine create takes one name, got extra: ${a}`);
+			name = validateName(a, 'machine');
+		}
+		if (name === undefined) fail('machine create needs a <name>');
+		return {verb: 'create', name: name as string, image: nonEmpty(image)};
+	}
+
+	if (verb === 'set-image') {
+		let name: string | undefined;
+		let image: string | undefined;
+		for (const a of rest) {
+			if (a.startsWith('-')) fail(`unknown option: ${a}`);
+			if (name === undefined) {
+				name = validateName(a, 'machine');
+			} else if (image === undefined) {
+				image = a;
+			} else {
+				fail(`machine set-image takes <name> <ref>, got extra: ${a}`);
+			}
+		}
+		if (name === undefined)
+			fail('machine set-image needs a <name> and an <image-ref>');
+		if (nonEmpty(image) === undefined)
+			fail('machine set-image needs an <image-ref>');
+		return {
+			verb: 'set-image',
+			name: name as string,
+			image: (image as string).trim(),
+		};
+	}
+
+	if (verb === 'rm') {
+		let name: string | undefined;
+		let yes = false;
+		for (const a of rest) {
+			if (a === '--yes' || a === '-y') {
+				yes = true;
+				continue;
+			}
+			if (a.startsWith('-')) fail(`unknown option: ${a}`);
+			if (name !== undefined)
+				fail(`machine rm takes one name, got extra: ${a}`);
+			name = validateName(a, 'machine');
+		}
+		if (name === undefined) fail('machine rm needs a <name>');
+		return {verb: 'rm', name: name as string, yes};
+	}
+
+	return fail(
+		`unknown machine subcommand: ${verb} (create | list | set-image | rm)`,
+	);
+}
+
+/**
+ * PURE: the JSON body a machine.json carries, given the pinned image (and an
+ * optional per-machine projects override, preserved on a re-pin). A single
+ * source so create + set-image write byte-identical, pretty-printed JSON (tab
+ * indent, trailing newline) that reads cleanly when the user browses
+ * ~/.anon-pi/machines/<M>/machine.json.
+ */
+export function serializeMachineJson(config: MachineConfig): string {
+	const out: MachineConfig = {};
+	if (nonEmpty(config.image) !== undefined)
+		out.image = (config.image as string).trim();
+	if (nonEmpty(config.projects) !== undefined)
+		out.projects = (config.projects as string).trim();
+	return JSON.stringify(out, null, '\t') + '\n';
+}
+
+/**
+ * PURE: the compatibility WARNING `machine set-image` prints after re-pinning
+ * the image. Re-pinning does NOT reseed or touch the home: the home's pi
+ * extensions / downloaded bin were built against the OLD image, so a mismatched
+ * new image may misbehave. The message tells the user the two remedies (re-run
+ * `pi install` inside the machine, or delete the home to reseed) WITHOUT doing
+ * either automatically. See the ## Decisions note (set-image warning wording).
+ */
+export function setImageWarning(
+	name: string,
+	oldImage: string | undefined,
+	newImage: string,
+): string {
+	const from = oldImage === undefined ? '(none)' : oldImage;
+	return (
+		`anon-pi: re-pinned machine ${JSON.stringify(name)} image ${from} -> ${newImage}.\n` +
+		'WARNING: the home was NOT reseeded. Its pi extensions and downloaded tools\n' +
+		'were built for the old image; if they misbehave on the new one, re-run\n' +
+		'`pi install` inside the machine, or delete + reseed the home with\n' +
+		`\`anon-pi --delete-home ${name}\` (then relaunch to seed fresh).`
+	);
+}
+
 /** Read the AnonPiEnv from a process env map (kept separate so tests inject one). */
 export function envFromProcess(
 	penv: Record<string, string | undefined>,
