@@ -61,6 +61,7 @@ import {
 	parseKeptKey,
 	keyProject,
 	resolveManagedMatches,
+	parseNetcagePsJson,
 	parseNetcagePortsJson,
 	forwardablePorts,
 	formatPortsHint,
@@ -177,7 +178,7 @@ function main(argv: string[]): number {
 		return runInit(args.slice(1));
 	}
 
-	// Host-access verbs (netcage >= 0.9.0). `forward` opens a host->jail port; the
+	// Host-access verbs (netcage >= 0.10.0). `forward` opens a host->jail port; the
 	// `ports` sibling lists a jail's open listeners. Dispatched BEFORE the launch
 	// grammar so `forward`/`ports` are never parsed as a project name.
 	if (args[0] === 'forward') {
@@ -418,13 +419,15 @@ function executeLaunchPlan(
 	if (intent.keep) {
 		const decision = resolveRunVsStart(intent, queryKeptContainers());
 		if (decision.action === 'start') {
-			return spawnNetcage(['start', '-a', '-i', decision.ref]);
+			return spawnNetcage(['start', '-a', '-i', decision.ref], {
+				enteringJail: true,
+			});
 		}
 		// A fresh `--keep` run: the RunPlan already omits --rm so it is left kept.
-		return spawnNetcage(keyed);
+		return spawnNetcage(keyed, {enteringJail: true});
 	}
 
-	return spawnNetcage(keyed);
+	return spawnNetcage(keyed, {enteringJail: true});
 }
 
 // --- the interactive host-side menu (the ONLY untested I/O) -------------------
@@ -2021,7 +2024,7 @@ USAGE
   --bind      passed through to netcage (127.0.0.1 default, or 0.0.0.0 for LAN).
   -m          the machine the container runs on (else the default machine).
 
-Wraps \`netcage forward\` (netcage >= 0.9.0). If several containers match, you pick
+Wraps \`netcage forward\` (netcage >= 0.10.0). If several containers match, you pick
 one (each row shows its open in-jail ports). The forward runs until Ctrl-C.
 `;
 
@@ -2031,7 +2034,7 @@ const PORTS_HELP = `anon-pi ports - list a running anon-pi container's open in-j
 USAGE
   anon-pi ports [<project>] [-m <machine>]
 
-Wraps \`netcage ports --json\` (netcage >= 0.9.0), which reads the jail's
+Wraps \`netcage ports --json\` (netcage >= 0.10.0), which reads the jail's
 /proc/net/tcp* image-independently (works even with no ss/netstat in the image).
 Use it to find which port to \`anon-pi forward\`.
 `;
@@ -2092,33 +2095,44 @@ function homeFresh(machineHome: string): boolean {
  * fresh `run` (safe: it never wrongly resumes, it just creates a new container).
  */
 function queryKeptContainers(): KeptContainer[] {
-	// Ask netcage for its managed containers as JSON, reading back the anon-pi
-	// key label. netcage is a podman drop-in, so `ps` accepts the same
-	// label-filter + Go-template/JSON format flags.
-	const res = spawnSync(
-		'netcage',
-		[
-			'ps',
-			'-a',
-			'--filter',
-			'label=netcage.managed',
-			'--format',
-			'{{.ID}}\t{{.Labels}}',
-		],
-		{encoding: 'utf8'},
-	);
-	if (res.error || res.status !== 0 || !res.stdout) return [];
+	// Ask netcage for ALL its managed containers as JSON (netcage >= 0.10.0
+	// forwards podman's --format json over its managed scope), then keep the ones
+	// carrying an anon-pi.key label (a sidecar has none) and decode it. -a so a
+	// STOPPED kept container is included (run-vs-start resumes it).
+	return queryManagedContainers({all: true}).map(({key, ref}) => ({key, ref}));
+}
 
-	const out: KeptContainer[] = [];
-	for (const line of res.stdout.split('\n')) {
-		const trimmed = line.trim();
-		if (trimmed === '') continue;
-		const tab = trimmed.indexOf('\t');
-		if (tab < 0) continue;
-		const ref = trimmed.slice(0, tab).trim();
-		const labels = trimmed.slice(tab + 1);
-		const key = extractKeyLabel(labels);
-		if (ref !== '' && key !== undefined) out.push({key, ref});
+/**
+ * Decode a base64 anon-pi.key label back to its identity key (the reverse of
+ * withKeyLabel's encode; keptContainerKey embeds newlines, so it is base64'd to
+ * stay a single safe label value). undefined on a decode error.
+ */
+function decodeKeyLabel(raw: string): string | undefined {
+	try {
+		return Buffer.from(raw, 'base64').toString('utf8');
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The shared `netcage ps --format json` query: parse the JSON to anon-pi's
+ * containers (pure parseNetcagePsJson keeps only anon-pi.key-labelled entries,
+ * optionally running-only), then base64-DECODE each key. Best-effort: [] on any
+ * failure. `all` => `-a` (include stopped); else running only.
+ */
+function queryManagedContainers(opts: {
+	all?: boolean;
+}): {key: string; ref: string; name: string}[] {
+	const args = ['ps'];
+	if (opts.all) args.push('-a');
+	args.push('--filter', 'label=netcage.managed', '--format', 'json');
+	const res = spawnSync('netcage', args, {encoding: 'utf8'});
+	if (res.error || res.status !== 0 || !res.stdout) return [];
+	const out: {key: string; ref: string; name: string}[] = [];
+	for (const e of parseNetcagePsJson(res.stdout, {runningOnly: !opts.all})) {
+		const key = decodeKeyLabel(e.key);
+		if (key !== undefined) out.push({key, ref: e.ref, name: e.name});
 	}
 	return out;
 }
@@ -2132,32 +2146,7 @@ function queryKeptContainers(): KeptContainer[] {
  * failure, so the caller reports "nothing running" cleanly.
  */
 function queryRunningContainers(): ManagedContainer[] {
-	const res = spawnSync(
-		'netcage',
-		[
-			'ps',
-			'--filter',
-			'label=netcage.managed',
-			'--format',
-			'{{.ID}}\t{{.Names}}\t{{.Labels}}',
-		],
-		{encoding: 'utf8'},
-	);
-	if (res.error || res.status !== 0 || !res.stdout) return [];
-	const out: ManagedContainer[] = [];
-	for (const line of res.stdout.split('\n')) {
-		const trimmed = line.trim();
-		if (trimmed === '') continue;
-		const cols = trimmed.split('\t');
-		if (cols.length < 3) continue;
-		const ref = cols[0].trim();
-		const name = cols[1].trim();
-		const key = extractKeyLabel(cols.slice(2).join('\t'));
-		if (ref !== '' && key !== undefined) {
-			out.push({key, ref, name: name || ref});
-		}
-	}
-	return out;
+	return queryManagedContainers({all: false});
 }
 
 /**
@@ -2377,28 +2366,6 @@ function netcageMissing(): number {
 }
 
 /**
- * Pull the anon-pi key out of a podman `{{.Labels}}` rendering (a
- * comma-separated `k=v` list). The key is stamped as `anon-pi.key=<opaque>`;
- * because keptContainerKey embeds newlines, the CLI base64-encodes it when
- * stamping (withKeyLabel) and decodes it here, so a `\n` never breaks the label.
- */
-function extractKeyLabel(labels: string): string | undefined {
-	for (const pair of labels.split(',')) {
-		const eq = pair.indexOf('=');
-		if (eq < 0) continue;
-		const k = pair.slice(0, eq).trim();
-		if (k !== ANON_PI_KEY_LABEL) continue;
-		const v = pair.slice(eq + 1).trim();
-		try {
-			return Buffer.from(v, 'base64').toString('utf8');
-		} catch {
-			return undefined;
-		}
-	}
-	return undefined;
-}
-
-/**
  * Insert the anon-pi identity label into a `netcage run` argv (right after
  * `run`), so a kept container can be found on re-entry. The key is base64'd
  * (keptContainerKey embeds newlines) to keep it a single safe label value. This
@@ -2463,14 +2430,20 @@ function firstLine(path: string): string | undefined {
 }
 
 /** Spawn netcage with inherited stdio; propagate its exit code. */
-function spawnNetcage(netcageArgs: string[]): number {
-	// Explain the pause: netcage sets up the jail (netns, firewall, DNS, container
-	// start) BEFORE pi paints, so without this line the user sees only a blinking
-	// cursor. Goes to stderr so it never pollutes any piped stdout, and is
-	// transient (pi typically clears the screen when its TUI comes up).
-	process.stderr.write(
-		'anon-pi: entering the netcage jail (setting up forced-egress)\u2026\n',
-	);
+function spawnNetcage(
+	netcageArgs: string[],
+	opts: {enteringJail?: boolean} = {},
+): number {
+	// Explain the pause on a LAUNCH: netcage sets up the jail (netns, firewall,
+	// DNS, container start) BEFORE pi paints, so without this line the user sees
+	// only a blinking cursor. Goes to stderr (never pollutes piped stdout), and is
+	// transient (pi clears the screen when its TUI comes up). NOT printed for
+	// `forward` (it attaches to an existing jail, and prints its own line).
+	if (opts.enteringJail) {
+		process.stderr.write(
+			'anon-pi: entering the netcage jail (setting up forced-egress)\u2026\n',
+		);
+	}
 	const res = spawnSync('netcage', netcageArgs, {stdio: 'inherit'});
 	if (res.error) {
 		process.stderr.write(

@@ -10,6 +10,7 @@ import {
 	parseKeptKey,
 	keyProject,
 	resolveManagedMatches,
+	parseNetcagePsJson,
 	parseNetcagePortsJson,
 	forwardablePorts,
 	formatPortsHint,
@@ -166,6 +167,57 @@ describe('resolveManagedMatches (filter running containers by machine + project)
 	it('no match => empty', () => {
 		expect(
 			resolveManagedMatches({containers, machine: 'default', project: 'nope'}),
+		).toEqual([]);
+	});
+});
+
+describe('parseNetcagePsJson (netcage ps --format json => anon-pi containers)', () => {
+	// The real netcage >= 0.10.0 shape: podman's JSON forwarded verbatim. Only
+	// entries with an anon-pi.key label are anon-pi's (a sidecar has none).
+	const tool = {
+		Id: 'abc123',
+		Names: ['netcage-run-1-tool'],
+		State: 'running',
+		Labels: {
+			'anon-pi.key': 'a2V5', // base64('key') - RAW, decode is the CLI's job
+			'netcage.managed': 'true',
+			'netcage.role': 'tool',
+		},
+	};
+	const sidecar = {
+		Id: 'def456',
+		Names: ['netcage-run-1-sidecar'],
+		State: 'running',
+		Labels: {'netcage.managed': 'true', 'netcage.role': 'sidecar'},
+	};
+	const stoppedTool = {...tool, Id: 'ghi789', State: 'exited'};
+
+	it('keeps only anon-pi.key-labelled entries (drops the sidecar), RAW key', () => {
+		const r = parseNetcagePsJson(JSON.stringify([tool, sidecar]));
+		expect(r).toEqual([
+			{key: 'a2V5', ref: 'abc123', name: 'netcage-run-1-tool'},
+		]);
+	});
+
+	it('runningOnly drops a stopped container', () => {
+		const all = parseNetcagePsJson(JSON.stringify([tool, stoppedTool]));
+		expect(all.map((c) => c.ref)).toEqual(['abc123', 'ghi789']);
+		const running = parseNetcagePsJson(JSON.stringify([tool, stoppedTool]), {
+			runningOnly: true,
+		});
+		expect(running.map((c) => c.ref)).toEqual(['abc123']);
+	});
+
+	it('falls back to the Id as the display name when Names is absent', () => {
+		const noName = {...tool, Names: undefined};
+		expect(parseNetcagePsJson(JSON.stringify([noName]))[0].name).toBe('abc123');
+	});
+
+	it('returns [] on bad JSON, a non-array, or an entry with no Id', () => {
+		expect(parseNetcagePsJson('not json')).toEqual([]);
+		expect(parseNetcagePsJson('{}')).toEqual([]);
+		expect(
+			parseNetcagePsJson(JSON.stringify([{...tool, Id: undefined}])),
 		).toEqual([]);
 	});
 });

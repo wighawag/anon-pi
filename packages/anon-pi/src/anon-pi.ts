@@ -1788,6 +1788,64 @@ export function parseNetcagePortsJson(stdout: string): NetcageListener[] {
 	return out;
 }
 
+/**
+ * The netcage label anon-pi stamps its identity key onto (withKeyLabel). Kept
+ * here so the pure ps-JSON parser and the CLI's stamp/read agree on one name.
+ */
+export const ANON_PI_KEY_LABEL = 'anon-pi.key';
+
+/**
+ * A raw `netcage ps --format json` entry, as anon-pi consumes it: the fields the
+ * container-resolution needs. netcage forwards podman's JSON verbatim (>= 0.10.0),
+ * so `Id`/`Names`/`Labels`/`State` are podman's own shape.
+ */
+export interface NetcagePsEntry {
+	Id?: string;
+	Names?: string[];
+	Labels?: Record<string, string>;
+	State?: string;
+}
+
+/**
+ * PURE: parse `netcage ps --format json` into the anon-pi-owned containers:
+ * exactly the entries that carry an `anon-pi.key` label (so a netcage sidecar,
+ * which has no such label, is dropped), each as {key: <RAW base64 label value>,
+ * ref: <Id>, name: <first Names entry or Id>}. When `runningOnly`, entries whose
+ * State is not "running" are dropped (forward/ports can only reach a live jail).
+ * The base64 DECODE of `key` is the CLI's job (Buffer), so this stays pure; the
+ * caller decodes before matching against a keptContainerKey. [] on bad JSON.
+ */
+export function parseNetcagePsJson(
+	stdout: string,
+	opts: {runningOnly?: boolean} = {},
+): {key: string; ref: string; name: string}[] {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout);
+	} catch {
+		return [];
+	}
+	if (!Array.isArray(parsed)) return [];
+	const out: {key: string; ref: string; name: string}[] = [];
+	for (const e of parsed) {
+		if (!e || typeof e !== 'object') continue;
+		const entry = e as NetcagePsEntry;
+		const labels = entry.Labels;
+		if (!labels || typeof labels !== 'object') continue;
+		const rawKey = labels[ANON_PI_KEY_LABEL];
+		if (typeof rawKey !== 'string' || rawKey === '') continue; // not anon-pi's (e.g. a sidecar)
+		if (opts.runningOnly && entry.State !== 'running') continue;
+		const ref = typeof entry.Id === 'string' ? entry.Id : '';
+		if (ref === '') continue;
+		const name =
+			Array.isArray(entry.Names) && typeof entry.Names[0] === 'string'
+				? entry.Names[0]
+				: ref;
+		out.push({key: rawKey, ref, name});
+	}
+	return out;
+}
+
 /** netcage's in-jail DNS forwarder always listens here; anon-pi hides it from the port hint. */
 export const NETCAGE_DNS_PORT = 53;
 
