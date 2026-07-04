@@ -1,5 +1,41 @@
 # anon-pi
 
+## 0.8.0
+
+### Minor Changes
+
+- e2115e6: Forward pi's session-resume flags, so `anon-pi --session <id>` works.
+
+  pi prints `To resume this session: pi --session <id>` on exit. That command is
+  now usable by just prefixing `anon-pi`:
+
+  - `anon-pi --session <id>` / `--session-id <id>` / `--resume` (`-r`) /
+    `--continue` (`-c`) / `--fork <id>` launch pi with NO anon-pi project and
+    forward the flag(s) verbatim. pi resolves the session by id (session files live
+    in the always-mounted machine home) and switches to its own project cwd, so no
+    project is needed. `-m <machine>` before the flag still picks the machine.
+  - Fixed the no-TTY discipline: a forwarded run is treated as HEADLESS (no TTY
+    required) ONLY when it forwards pi's `-p`/`--print`. Other forwarded flags
+    (e.g. `--session`, `--model`) stay INTERACTIVE and keep the TTY + `-it`
+    (previously any forwarded arg was wrongly treated as headless).
+  - `--shell` + a session flag is a clear error (a shell has no session to resume).
+
+- 206a980: Add `--version`, `--list-models`, and the `anon-pi pi <args…>` passthrough.
+
+  - **`anon-pi --version` / `-V`** prints anon-pi's own version (it previously
+    errored). For pi's version inside the jail, use `anon-pi pi --version`.
+  - **`anon-pi --list-models` / `--models`** lists the models pi sees, with no
+    project needed (a pi query that prints and exits).
+  - **`anon-pi pi <args…>`** is a general passthrough: run pi inside the jail with
+    ANY args and no project (`anon-pi pi --model x`, `anon-pi pi --export out.html
+--session <id>`), so anon-pi never has to special-case each pi flag. `pi` is
+    reserved as a project name so the token cannot be shadowed.
+
+  These slot into the same no-project pi-launch mechanism as `--session` (cwd at
+  the projects root, interactive unless `-p`/`--print` is forwarded, forced-egress
+  jail intact). Combined pi flags already work everywhere:
+  `anon-pi --session <id> --model qwen`, `anon-pi recon --model x --thinking high`.
+
 ## 0.7.0
 
 ### Minor Changes
