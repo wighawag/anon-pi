@@ -1203,6 +1203,94 @@ export function deriveProjectUsage(args: {
 }
 
 /**
+ * What ONE selectable menu row launches, so the CLI can dispatch a chosen entry
+ * without re-deriving anything:
+ *   - `project` -> pi in `/projects/<project>` (the `anon-pi <project>` launch);
+ *   - `here`    -> a scratch pi at the root itself (the `.` root token launch);
+ *   - `new`     -> prompt+validate a new project name, then launch it as pi;
+ *   - `shell`   -> the `--shell` jailed-bash launch.
+ */
+export type MenuEntryKind = 'project' | 'here' | 'new' | 'shell';
+
+/** One rendered, selectable menu row: what it launches + its human label. */
+export interface MenuEntry {
+	/** Which launch this row dispatches to (project | here | new | shell). */
+	kind: MenuEntryKind;
+	/**
+	 * The project token this row launches: a validated project name (`project`),
+	 * the root token `.` (`here`), or undefined (`new` prompts for it, `shell`
+	 * takes none). This is exactly the `project` field a launch dispatch feeds
+	 * back into the grammar, so no re-parsing is needed.
+	 */
+	project?: string;
+	/**
+	 * The rendered row text the selector prints: the project name plus its
+	 * used-on / new-here annotation (project rows), or the fixed affordance label
+	 * (here / new / shell). The annotation is the ONLY place the usage record
+	 * surfaces to the user, so the wording lives here (pure) not in the TUI.
+	 */
+	label: string;
+}
+
+/** The fixed labels for the non-project affordances (one source, so the TUI + its test agree). */
+export const MENU_HERE_LABEL = '. (here: a scratch pi at the root)';
+export const MENU_NEW_LABEL = '+ new project\u2026';
+export const MENU_SHELL_LABEL = 'shell (a jailed bash on this machine)';
+
+/**
+ * PURE: render ONE project row's annotation from its usage record. Files are
+ * global but conversations are per-machine, so the row tells the user where a
+ * conversation for this project already lives (`used on: <machines>`) and
+ * whether the CURRENT machine has none yet (`new here`). An unused project on a
+ * fresh machine is just `new here` (no machine list). This is the whole
+ * user-visible surface of the derived usage record, kept pure + testable.
+ */
+export function formatProjectAnnotation(usage: ProjectUsage): string {
+	const parts: string[] = [];
+	if (usage.machines.length > 0) {
+		parts.push(`used on: ${usage.machines.join(', ')}`);
+	}
+	if (usage.currentMachineIsNew) parts.push('new here');
+	return parts.length > 0 ? `  (${parts.join('; ')})` : '';
+}
+
+/**
+ * PURE: assemble the ordered, labelled, selectable menu rows from the choice-
+ * list + the per-project usage record. The order is: the projects (in the
+ * choice-list's stable sorted order), then the `.` "here" scratch entry, then
+ * `+ new project\u2026` (when `canNew`), then `shell` (when `canShell`). Each
+ * project row's label carries its used-on / new-here annotation
+ * (formatProjectAnnotation). This holds ALL the menu's logic (order + wording)
+ * so the raw-mode selector only renders these rows and dispatches the picked
+ * one by its `kind`/`project`.
+ *
+ * The `usage` list is expected to be keyed to `choiceList.projects` (same order,
+ * as deriveProjectUsage produces from the choice-list's projects); a project
+ * with no matching usage entry gets a bare, unannotated row rather than erroring.
+ */
+export function buildMenuEntries(args: {
+	choiceList: MenuChoiceList;
+	usage: readonly ProjectUsage[];
+}): MenuEntry[] {
+	const {choiceList, usage} = args;
+	const byProject = new Map(usage.map((u) => [u.project, u]));
+	const entries: MenuEntry[] = choiceList.projects.map((project) => {
+		const u = byProject.get(project);
+		const annotation = u ? formatProjectAnnotation(u) : '';
+		return {kind: 'project', project, label: `${project}${annotation}`};
+	});
+	entries.push({
+		kind: 'here',
+		project: choiceList.here,
+		label: MENU_HERE_LABEL,
+	});
+	if (choiceList.canNew) entries.push({kind: 'new', label: MENU_NEW_LABEL});
+	if (choiceList.canShell)
+		entries.push({kind: 'shell', label: MENU_SHELL_LABEL});
+	return entries;
+}
+
+/**
  * Encode an absolute path into a directory name using pi's OWN convention (see
  * pi coding-agent session-manager: `--${cwd without leading slash, / \ : -> -}--`),
  * so an anon-pi state dir is readable and matches pi's mental model (no opaque
