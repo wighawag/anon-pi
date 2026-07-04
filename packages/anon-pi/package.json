@@ -55,9 +55,11 @@
 		"vitest": "^4.0.18"
 	},
 	"scripts": {
-		"build": "tsc",
+		"copy-readme": "node -e \"require('fs').copyFileSync(require('path').join('..','..','README.md'),'README.md')\"",
+		"prepack": "pnpm copy-readme",
+		"build": "pnpm copy-readme && tsc",
 		"dev": "as-soon -w src pnpm build",
-		"test": "vitest run",
+		"test": "pnpm copy-readme && vitest run",
 		"test:watch": "vitest"
 	}
 }

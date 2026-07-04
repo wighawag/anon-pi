@@ -43,7 +43,7 @@ The **first time** you launch anon-pi with no config yet, it welcomes you and ru
 
 `init` is interactive and re-runnable. It:
 
-1. **Proxy** — probes common SOCKS ports, confirms SOCKS5 with a real handshake, shows the findings (evidence only, it never labels the exit provider), then runs `netcage verify` and shows the real EXIT IP as proof it is not your host IP. You confirm on that evidence.
+1. **Proxy** — probes common SOCKS ports, confirms SOCKS5 with a real handshake, shows the findings (evidence only, it never labels the exit provider), then runs `netcage verify` and shows the real EXIT IP as proof it is not your host IP. You confirm on that evidence. (When your netcage has `detect-proxy`, init reuses netcage's own scanner for this; otherwise it probes locally.)
 2. **Local model** — captures the `host:port` of your model, probes it, then **imports models**. It merges two sources, both scoped to that endpoint: the provider in your own `~/.pi/agent/models.json` whose URL matches it (marked `[configured]` — your hand-tuned entries, with their `contextWindow`/`maxTokens`/etc.), and the endpoint's live `/v1/models` (marked `[server]`). You pick which to import (Enter/`c` = all configured, `a` = all, numbers, or `s` = skip) and which is the **default**. Because only the provider served by this endpoint (the one `--allow-direct` hole) is read, no other provider — and no other key — can ever enter the seed. It writes a **global** `models.json` + settings seed (shared by every machine, since the `llm` endpoint is global) and updates any already-seeded machine homes in place (conversations untouched). If the matching provider carries a real-looking apiKey, init **refuses** (it would put a host credential into the anon home) unless you pass `--force-allow-local-llm-api-key`.
 3. **Image** — pick a shipped `Dockerfile` (built via `podman build`), an existing image ref, or skip.
 4. **Projects root** — the host folder mounted at `/projects` (where bare `anon-pi` looks for projects). Defaults to `~/.anon-pi/projects/`; point it at your own dev folder if you want to jail pi into files you edit with host tools (`--mount <parent>` still overrides it per-launch).
@@ -241,17 +241,19 @@ The home is the durable, inspectable store. On a FRESH machine home, the image's
 
 anon-pi does not ship or default an image: a machine points at an image that has the `pi` CLI on its `PATH`. pi's maintainers do not publish an official prebuilt image, so the reputable path is to **build a small one from the upstream-documented recipe** (which installs the official [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) npm package, no third-party image to trust).
 
-`anon-pi init` can build it for you: pick the shipped `Dockerfile.pi` and it runs `podman build` and pins the result. You can also build it yourself:
+`anon-pi init` can build it for you: pick the shipped `Dockerfile.pi` and it builds the image and pins the result (fully-qualified as `localhost/anon-pi/pi:latest`).
+
+**A note on where the image must live.** Since netcage v0.7.0, `netcage run` uses its own private podman store (a username-free graphroot under `/var/tmp/netcage-storage`), not your default rootless store. So an image must be in *netcage's* store for a launch to find it — otherwise podman tries to pull the `localhost/…` ref and fails. `anon-pi init` handles this: it prefers `netcage build` when your netcage exposes it, and otherwise builds with `podman` and loads the result into netcage's store for you. If you build by hand, do the same:
 
 ```sh
 # from wherever this package's Dockerfile.pi is (e.g. node_modules/anon-pi)
-podman build -t localhost/anon-pi-pi:latest -f Dockerfile.pi .
-export ANON_PI_IMAGE=localhost/anon-pi-pi:latest
-# or pin it to a machine:
-anon-pi machine set-image default localhost/anon-pi-pi:latest
+podman build -t localhost/anon-pi/pi:latest -f Dockerfile.pi .
+# make netcage's store see it (until netcage ships a build/load verb):
+podman save localhost/anon-pi/pi:latest | podman --root /var/tmp/netcage-storage load
+anon-pi machine set-image default localhost/anon-pi/pi:latest
 ```
 
-The image only needs `pi` reachable on `PATH`. anon-pi bind-mounts the machine home over the container's `/root` and seeds a fresh home from the image's staging dir, so the image needs **no `ENTRYPOINT` and no config volume**.
+`netcage images` lists what is in netcage's store. The image only needs `pi` reachable on `PATH`. anon-pi bind-mounts the machine home over the container's `/root` and seeds a fresh home from the image's staging dir, so the image needs **no `ENTRYPOINT` and no config volume**.
 
 A community image also exists ([`gni/pi-coding-agent-container`](https://github.com/gni/pi-coding-agent-container)); it is third-party and unvetted, so review it yourself before trusting it with your (anonymized) credentials.
 
@@ -311,6 +313,7 @@ Start fresh with `anon-pi init`, then `anon-pi` (the menu) or `anon-pi <project>
 - **`netcage not found on PATH`** — anon-pi is a launcher for [netcage](https://github.com/wighawag/netcage); install netcage first (Linux only).
 - **`set ANON_PI_PROXY …` (fail-closed)** — no proxy is configured. Run `anon-pi init` to detect + verify one, or export `ANON_PI_PROXY=socks5h://<host:port>`. There is deliberately no default: the proxy is what anonymizes, so it is never guessed.
 - **A launch says the machine has no image** — pin one: `anon-pi machine set-image default <ref>`, or export `ANON_PI_IMAGE=<ref>`, or re-run `anon-pi init` and pick/build a `Dockerfile`. See [Providing a pi image](#providing-a-pi-image).
+- **A launch hangs on "Trying to pull `localhost/…`" (then a connection-refused pull error)** — the image is in your default podman store but not in netcage's private store (`/var/tmp/netcage-storage`), so podman treats the `localhost/…` name as a registry and tries to pull it. Load it into netcage's store: `podman save <ref> | podman --root /var/tmp/netcage-storage load` (check with `netcage images`). Re-running `anon-pi init` and rebuilding the image does this for you.
 - **`no TTY` on a bare `anon-pi`** — the menu and interactive pi need a terminal. In a script, name the project and forward args: `anon-pi <project> <pi-args…>` (that path needs no TTY).
 - **The exit IP looks like your home IP** — the proxy is not actually anonymizing. Re-run `anon-pi init`; its `netcage verify` step prints the real exit IP as proof. anon-pi never claims a provider, only shows you the exit.
 - **A destructive verb won't run in a script** — `machine rm` / `--delete-home` / `--delete-project` confirm on a TTY and abort non-interactively; pass `--yes` to proceed unattended.

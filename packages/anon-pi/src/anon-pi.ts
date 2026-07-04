@@ -607,13 +607,53 @@ function nonEmpty(v: string | undefined): string | undefined {
 }
 
 /**
+ * PURE: expand a leading `~` / `~/` in a user-supplied HOST path to the given
+ * home (`node:path.resolve` does NOT do this — it would produce a literal `~`
+ * directory). Only a LEADING `~` (bare or before a separator) is expanded; a `~`
+ * elsewhere is left alone. Used everywhere anon-pi takes a host path from a
+ * human (the projects root, `--mount`), so `~/dev/x` means `$HOME/dev/x`.
+ */
+export function expandTilde(p: string, home: string): string {
+	if (p === '~') return home;
+	if (p.startsWith('~/') || p.startsWith('~\\')) {
+		return join(home, p.slice(2));
+	}
+	return p;
+}
+
+/**
+ * netcage's default podman graphroot (podman's global `--root`). Since netcage
+ * v0.7.0 (host-identity hardening, ADR-0013) EVERY netcage podman call runs
+ * against a private, username-free store at this path, NOT the operator's
+ * default rootless store. So an image anon-pi builds with a plain `podman build`
+ * lands in the WRONG store and `netcage run` cannot see it (it tries to pull the
+ * `localhost/…` ref and fails). anon-pi must place a built image into THIS store.
+ * Overridable via NETCAGE_GRAPHROOT (netcage's own test-seam env), so a caller
+ * that points netcage elsewhere stays in sync.
+ */
+export const NETCAGE_DEFAULT_GRAPHROOT = '/var/tmp/netcage-storage';
+
+/**
+ * PURE: resolve netcage's podman graphroot the same way netcage does: the
+ * NETCAGE_GRAPHROOT env override when set, else the fixed default. anon-pi builds
+ * images into this store so `netcage run` finds them. This is a temporary
+ * coupling to a netcage-internal path; it goes away once netcage exposes a
+ * `build`/`load` verb (then anon-pi delegates to netcage instead).
+ */
+export function resolveNetcageGraphroot(
+	penv: Record<string, string | undefined>,
+): string {
+	const p = penv.NETCAGE_GRAPHROOT;
+	return p && p.trim() !== '' ? p.trim() : NETCAGE_DEFAULT_GRAPHROOT;
+}
+
+/**
  * PURE: resolve the projects root (the host dir mounted at /projects) with the
  * decided precedence, highest first:
  *   --mount (CLI) > env ANON_PI_PROJECTS > machine.json.projects >
  *   config.json.projects > built-in <home>/projects
- * This task delivers the config/env/machine layers; `mountParent` is the
- * documented top slot the later --mount CLI task threads in (pass the resolved
- * host parent). A relative override is resolved to an absolute path.
+ * A leading `~` in any override is expanded to $HOME; a relative override is
+ * resolved to an absolute path.
  */
 export function resolveProjectsRoot(args: {
 	env: AnonPiEnv;
@@ -628,7 +668,7 @@ export function resolveProjectsRoot(args: {
 		nonEmpty(env.projects) ??
 		nonEmpty(machine?.projects) ??
 		nonEmpty(config?.projects);
-	if (pick !== undefined) return resolve(pick);
+	if (pick !== undefined) return resolve(expandTilde(pick, env.home));
 	return builtinProjectsRoot(env);
 }
 
@@ -2032,6 +2072,73 @@ export interface ProxyFinding {
 	portHint?: string;
 	/** Any weak LOCAL process hint (processHint), if one was observed. */
 	processHint?: string;
+}
+
+/** What `netcage detect-proxy --json` reports (the fields anon-pi consumes). */
+export interface NetcageDetectProxy {
+	schemaVersion?: number;
+	candidates?: Array<{
+		port?: number;
+		open?: boolean;
+		socks5?: boolean;
+		processHint?: string;
+	}>;
+	exitIP?: string;
+}
+
+/**
+ * PURE: map a parsed `netcage detect-proxy --json` result into anon-pi's
+ * ProxyFinding[] (so init can REUSE netcage's SOCKS scanner instead of its own
+ * probe, and both render through the same formatProxyFindings). The host is
+ * 127.0.0.1 (detect-proxy probes loopback); the socks5 boolean becomes a
+ * SocksHandshake verdict; the structural port hint is attached from
+ * DEFAULT_SOCKS_PROBE_PORTS by port. Tolerates missing/garbage (returns []).
+ * The per-candidate processHint is NOT copied onto each finding (it is host-wide;
+ * the CLI passes it once as formatProxyFindings' note).
+ */
+export function findingsFromNetcageDetect(
+	raw: NetcageDetectProxy | undefined,
+): ProxyFinding[] {
+	const rows = raw?.candidates;
+	if (!Array.isArray(rows)) return [];
+	const hintByPort = new Map(
+		DEFAULT_SOCKS_PROBE_PORTS.map((p) => [p.port, p.hint]),
+	);
+	const out: ProxyFinding[] = [];
+	for (const c of rows) {
+		if (!c || typeof c.port !== 'number') continue;
+		const open = c.open === true;
+		const handshake: SocksHandshake | undefined = !open
+			? undefined
+			: c.socks5 === true
+				? {socks5: true, method: 0}
+				: {socks5: false, reason: 'not SOCKS5'};
+		out.push({
+			host: '127.0.0.1',
+			port: c.port,
+			open,
+			handshake,
+			portHint: hintByPort.get(c.port),
+		});
+	}
+	return out;
+}
+
+/**
+ * PURE: the host-wide process note from a `netcage detect-proxy --json` result:
+ * the FIRST candidate that carries a `processHint` (they are all the same
+ * host-wide hint). Returns undefined when none. Rendered ONCE by the CLI (not
+ * per port), same as the local-probe path.
+ */
+export function processNoteFromNetcageDetect(
+	raw: NetcageDetectProxy | undefined,
+): string | undefined {
+	for (const c of raw?.candidates ?? []) {
+		if (c && typeof c.processHint === 'string' && c.processHint.trim() !== '') {
+			return c.processHint.trim();
+		}
+	}
+	return undefined;
 }
 
 /**

@@ -1,2 +1,4 @@
 dist/
 node_modules/
+# README is generated from the repo-root README.md at build/publish time.
+README.md

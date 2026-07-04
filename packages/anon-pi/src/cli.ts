@@ -35,6 +35,10 @@ import {
 	buildMenuEntries,
 	builtinProjectsRoot,
 	deriveProjectUsage,
+	expandTilde,
+	findingsFromNetcageDetect,
+	processNoteFromNetcageDetect,
+	resolveNetcageGraphroot,
 	globalModelsSeedPath,
 	globalSettingsSeedPath,
 	machineAgentDir,
@@ -87,6 +91,7 @@ import {
 	type MenuEntry,
 	type SessionDirListing,
 	type ProxyFinding,
+	type NetcageDetectProxy,
 	type SocksHandshake,
 	type InitImageChoice,
 	type AnonPiConfig,
@@ -252,7 +257,13 @@ function runLaunch(parsed: ParsedLaunch): number {
 		const image = machineConf.image ?? env.image ?? '';
 
 		// --mount re-roots at a HOST parent; otherwise the resolved projects root.
-		const mountParent = parsed.mountParent;
+		// Expand a leading `~` + absolutize the mount path so it is a real host dir
+		// everywhere it is used (the mount, the mkdir, the intent). path.resolve
+		// alone would leave `~/x` as a literal `~` dir.
+		const mountParent =
+			parsed.mountParent !== undefined
+				? resolve(expandTilde(parsed.mountParent, env.home))
+				: undefined;
 		const projectsRoot = resolveProjectsRoot({
 			env,
 			config,
@@ -1207,25 +1218,28 @@ function initProxyStep(currentProxy: string | undefined): string | undefined {
 	}
 	process.stdout.write('  Probing common SOCKS ports (evidence only)...\n');
 
-	// Probe each default port: TCP-open + a real SOCKS5 handshake. The weak
-	// process hint (a running `tor`/`wireproxy` LOCAL process, never the exit
-	// provider) is HOST-WIDE, so gather it ONCE and pass it as the formatter's
-	// single general note rather than gluing it onto every port line. The display
-	// is the PURE formatter's job.
-	const runningProcesses = observeRunningProcesses();
-	const processNote = matchProcessHint(runningProcesses);
-	const findings: ProxyFinding[] = DEFAULT_SOCKS_PROBE_PORTS.map(
-		({port, hint}) => {
+	// REUSE netcage's SOCKS scanner when available: `netcage detect-proxy --json`
+	// probes the same ports + does the SOCKS5 handshake + the weak process hint,
+	// and is the same evidence engine that backs `netcage setup-default`. Falling
+	// back to anon-pi's own probe keeps init working on an older netcage (or if
+	// the verb errors). Either way the findings render through the same PURE
+	// formatter, so the honesty invariant (never label the provider) is identical.
+	const detected = detectProxyViaNetcage();
+	let findings: ProxyFinding[] = detected
+		? findingsFromNetcageDetect(detected)
+		: [];
+	let processNote: string | undefined = detected
+		? processNoteFromNetcageDetect(detected)
+		: undefined;
+	if (findings.length === 0) {
+		// Local probe fallback: TCP-open + a real SOCKS5 handshake per default
+		// port. The weak process hint is HOST-WIDE, gathered once as the note.
+		processNote = matchProcessHint(observeRunningProcesses());
+		findings = DEFAULT_SOCKS_PROBE_PORTS.map(({port, hint}) => {
 			const {open, handshake} = probeSocks5('127.0.0.1', port);
-			return {
-				host: '127.0.0.1',
-				port,
-				open,
-				handshake,
-				portHint: hint,
-			};
-		},
-	);
+			return {host: '127.0.0.1', port, open, handshake, portHint: hint};
+		});
+	}
 	process.stdout.write(
 		'\n' + formatProxyFindings(findings, processNote) + '\n\n',
 	);
@@ -1566,8 +1580,14 @@ function initImageStep(): string | undefined | typeof ABORT {
 			);
 			continue;
 		}
+		// Fully-qualified `localhost/` tag: podman refuses an UNQUALIFIED short name
+		// at run time ("did not resolve to an alias and no unqualified-search
+		// registries defined"), so a locally-built image MUST carry the localhost/
+		// prefix to be runnable by name.
 		const tag =
-			choice === 'basic' ? 'anon-pi/pi:latest' : 'anon-pi/pi-webveil:latest';
+			choice === 'basic'
+				? 'localhost/anon-pi/pi:latest'
+				: 'localhost/anon-pi/pi-webveil:latest';
 		const built = buildImage(dockerfile, tag);
 		if (!built) {
 			process.stdout.write('  Build failed; pick another option.\n');
@@ -1608,9 +1628,10 @@ function initProjectsStep(
 	if (ans === undefined) return currentProjects;
 	const trimmed = ans.trim();
 	if (trimmed === '') return currentProjects;
-	// Store the built-in as "unset" (undefined) so config.json stays clean when
-	// the user just accepts the default path explicitly.
-	const chosen = resolve(trimmed);
+	// Expand a leading `~` (path.resolve does NOT — it would make a literal `~`
+	// dir), then absolutize. Store the built-in as "unset" (undefined) so
+	// config.json stays clean when the user just accepts the default path.
+	const chosen = resolve(expandTilde(trimmed, env.home));
 	if (chosen === builtin) return undefined;
 	return chosen;
 }
@@ -1789,29 +1810,128 @@ function matchProcessHint(processes: readonly string[]): string | undefined {
 	return undefined;
 }
 
+/** Whether `netcage <verb>` exists (probe its help; false on any spawn error). */
+function hasNetcageVerb(verb: string): boolean {
+	const res = spawnSync('netcage', [verb, '--help'], {stdio: 'ignore'});
+	if (res.error) return false;
+	// netcage prints an "unknown subcommand" error (non-zero) for a missing verb,
+	// and help (exit 0) for a real one. Treat exit 0 as "exists".
+	return res.status === 0;
+}
+
 /**
- * Build a shipped Dockerfile into `tag` via `podman build`. Streams podman's
- * output (inherited stdio) so the user sees the build. Returns true on success.
- * The build CONTEXT is the Dockerfile's own directory (the shipped examples/
- * dir or the package root), which is where its COPY sources live.
+ * Run `netcage detect-proxy --json` and parse it, to REUSE netcage's SOCKS
+ * scanner (probe + handshake + process hint + exit-IP verify) in `init`. Returns
+ * the parsed result, or undefined when netcage lacks the verb / errors / emits
+ * non-JSON — in which case init falls back to its own local probe. Best-effort;
+ * never throws.
+ */
+function detectProxyViaNetcage(): NetcageDetectProxy | undefined {
+	const res = spawnSync('netcage', ['detect-proxy', '--json'], {
+		encoding: 'utf8',
+		timeout: 20000,
+	});
+	if (res.error || res.status !== 0 || !res.stdout) return undefined;
+	try {
+		const parsed = JSON.parse(res.stdout) as NetcageDetectProxy;
+		return parsed && typeof parsed === 'object' ? parsed : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Build a shipped Dockerfile into `tag`, landing it in the SAME store
+ * `netcage run` reads.
+ *
+ * Since netcage v0.7.0 that store is netcage's private podman graphroot
+ * (`--root <graphroot>`), NOT the operator's default rootless store, so a plain
+ * `podman build` would put the image where `netcage run` cannot see it (it would
+ * try to pull the `localhost/…` ref and fail). We therefore:
+ *   1. PREFER `netcage build` when netcage exposes it (future-proof: netcage owns
+ *      its store + graphroot, no path hardcoded here); else
+ *   2. `podman build` into the default store, then `podman save | podman --root
+ *      <graphroot> load` to copy it into netcage's store (the interim workaround
+ *      until netcage ships a build/load verb).
+ * Streams output (inherited stdio) so the user sees the build. Returns true on
+ * success. The build CONTEXT is the Dockerfile's own directory.
  */
 function buildImage(dockerfile: string, tag: string): boolean {
 	const context = dirname(dockerfile);
+
+	// 1) Prefer a native `netcage build` (it targets netcage's own store).
+	if (hasNetcageVerb('build')) {
+		process.stdout.write(`  Building ${tag} via \`netcage build\`...\n`);
+		const res = spawnSync(
+			'netcage',
+			['build', '-t', tag, '-f', dockerfile, context],
+			{stdio: 'inherit'},
+		);
+		if (res.error) {
+			process.stderr.write(
+				`  anon-pi: failed to run netcage build: ${res.error.message}\n`,
+			);
+			return false;
+		}
+		return res.status === 0;
+	}
+
+	// 2) Interim: podman build into the default store, then load into netcage's
+	//    graphroot so `netcage run` can find it.
 	process.stdout.write(
 		`  Building ${tag} from ${dockerfile} (podman build)...\n`,
 	);
-	const res = spawnSync(
+	const build = spawnSync(
 		'podman',
 		['build', '-t', tag, '-f', dockerfile, context],
 		{stdio: 'inherit'},
 	);
-	if (res.error) {
+	if (build.error) {
 		process.stderr.write(
-			`  anon-pi: failed to run podman: ${res.error.message}. Is podman installed?\n`,
+			`  anon-pi: failed to run podman: ${build.error.message}. Is podman installed?\n`,
 		);
 		return false;
 	}
-	return res.status === 0;
+	if (build.status !== 0) return false;
+
+	return loadImageIntoNetcageStore(tag);
+}
+
+/**
+ * Copy a locally-built image (in the default podman store) INTO netcage's
+ * private graphroot store, so `netcage run <tag>` finds it without a pull. Uses
+ * `podman save <tag> | podman --root <graphroot> load`. Best-effort: on failure
+ * it warns (the image still exists in the default store; a future `netcage
+ * build`/`load` verb removes this dance). Returns true on success.
+ */
+function loadImageIntoNetcageStore(tag: string): boolean {
+	const graphroot = resolveNetcageGraphroot(process.env);
+	process.stdout.write(
+		`  Loading ${tag} into netcage's store (${graphroot}) so \`netcage run\` sees it...\n`,
+	);
+	// `podman save <tag> | podman --root <graphroot> load`, via a shell so the
+	// pipe is a single spawn (both ends inherit stderr for progress).
+	const cmd =
+		`podman save ${shQuote(tag)} | ` +
+		`podman --root ${shQuote(graphroot)} load`;
+	const res = spawnSync('sh', ['-c', cmd], {
+		stdio: ['ignore', 'inherit', 'inherit'],
+	});
+	if (res.error || res.status !== 0) {
+		process.stderr.write(
+			`  anon-pi: could not load ${tag} into netcage's store (${graphroot}).\n` +
+				`  The image is built in your default podman store, but \`netcage run\` reads\n` +
+				`  ${graphroot}. Load it by hand:\n` +
+				`    podman save ${tag} | podman --root ${graphroot} load\n`,
+		);
+		return false;
+	}
+	return true;
+}
+
+/** Minimal POSIX single-quote shell-quoting for a token embedded in `sh -c`. */
+function shQuote(s: string): string {
+	return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 /** List machine names (readdir of machines/), or [] if the dir is absent. */

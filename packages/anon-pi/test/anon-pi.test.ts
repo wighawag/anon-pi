@@ -14,6 +14,11 @@ import {
 	parseModelsListing,
 	pickLocalProviderModels,
 	anonPiVersion,
+	expandTilde,
+	findingsFromNetcageDetect,
+	processNoteFromNetcageDetect,
+	resolveNetcageGraphroot,
+	NETCAGE_DEFAULT_GRAPHROOT,
 	resolveHostModelsPath,
 	resolveModelsSeedPath,
 	resolveSettingsSeedPath,
@@ -512,6 +517,94 @@ describe('anonPiVersion', () => {
 		const v = anonPiVersion();
 		expect(typeof v).toBe('string');
 		expect(v).toMatch(/^\d+\.\d+\.\d+/);
+	});
+});
+
+describe('expandTilde', () => {
+	it('expands a leading ~ / ~/ to $HOME', () => {
+		expect(expandTilde('~', '/home/u')).toBe('/home/u');
+		expect(expandTilde('~/dev/anon', '/home/u')).toBe('/home/u/dev/anon');
+	});
+	it('leaves absolute + relative + mid-string ~ alone', () => {
+		expect(expandTilde('/abs/x', '/home/u')).toBe('/abs/x');
+		expect(expandTilde('rel/x', '/home/u')).toBe('rel/x');
+		expect(expandTilde('a/~/b', '/home/u')).toBe('a/~/b'); // mid ~ not touched
+		expect(expandTilde('~user/x', '/home/u')).toBe('~user/x'); // ~user not expanded
+	});
+});
+
+describe('resolveNetcageGraphroot', () => {
+	it('defaults to the netcage /var/tmp store', () => {
+		expect(resolveNetcageGraphroot({})).toBe(NETCAGE_DEFAULT_GRAPHROOT);
+		expect(NETCAGE_DEFAULT_GRAPHROOT).toBe('/var/tmp/netcage-storage');
+	});
+	it('honours the NETCAGE_GRAPHROOT override', () => {
+		expect(resolveNetcageGraphroot({NETCAGE_GRAPHROOT: '/scratch/s'})).toBe(
+			'/scratch/s',
+		);
+		// blank is ignored (falls back to default)
+		expect(resolveNetcageGraphroot({NETCAGE_GRAPHROOT: '   '})).toBe(
+			NETCAGE_DEFAULT_GRAPHROOT,
+		);
+	});
+});
+
+describe('netcage detect-proxy reuse (findings mapping)', () => {
+	const raw = {
+		schemaVersion: 1,
+		candidates: [
+			{
+				port: 9050,
+				open: true,
+				socks5: true,
+				processHint: 'a `tor` process is running',
+			},
+			{
+				port: 9150,
+				open: false,
+				socks5: false,
+				processHint: 'a `tor` process is running',
+			},
+			{port: 1080, open: true, socks5: false},
+		],
+		exitIP: '45.84.107.17',
+	};
+
+	it('maps candidates to ProxyFinding[] with handshake verdicts + port hints', () => {
+		const f = findingsFromNetcageDetect(raw);
+		expect(f.map((x) => x.port)).toEqual([9050, 9150, 1080]);
+		expect(f[0]).toMatchObject({
+			host: '127.0.0.1',
+			open: true,
+			handshake: {socks5: true},
+		});
+		// a closed port has no handshake; an open-but-not-socks5 port is flagged
+		expect(f[1].handshake).toBeUndefined();
+		expect(f[2].handshake).toMatchObject({socks5: false});
+		// structural port hints come from DEFAULT_SOCKS_PROBE_PORTS by port
+		expect(f[0].portHint).toBeTruthy();
+	});
+
+	it('does NOT copy the per-candidate processHint onto each finding', () => {
+		const f = findingsFromNetcageDetect(raw);
+		for (const x of f) expect(x.processHint).toBeUndefined();
+	});
+
+	it('surfaces the host-wide process note ONCE', () => {
+		expect(processNoteFromNetcageDetect(raw)).toBe(
+			'a `tor` process is running',
+		);
+		expect(
+			processNoteFromNetcageDetect({candidates: [{port: 1}]}),
+		).toBeUndefined();
+	});
+
+	it('tolerates missing/garbage input (returns [])', () => {
+		expect(findingsFromNetcageDetect(undefined)).toEqual([]);
+		expect(findingsFromNetcageDetect({})).toEqual([]);
+		expect(
+			findingsFromNetcageDetect({candidates: [{}, {port: 'x' as never}]}),
+		).toEqual([]);
 	});
 });
 
