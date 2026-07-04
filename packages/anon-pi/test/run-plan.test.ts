@@ -95,9 +95,12 @@ describe('resolveRunPlan — modes', () => {
 		expect(p.netcageArgs.length).toBe(i + 4);
 	});
 
-	it('--shell with no project runs bash at /root (the machine home)', () => {
+	it('--shell with no project runs bash at /projects (the projects root)', () => {
+		// A bare shell defaults to the projects root (the project-hopper landing),
+		// NOT the machine home /root; `--shell .` is the same cwd (a synonym).
 		const p = launch({mode: 'shell', project: undefined});
-		expect(p.cwd).toBe(CONTAINER_HOME_ROOT);
+		expect(p.cwd).toBe(CONTAINER_PROJECTS_ROOT);
+		expect(p.cwd).not.toBe(CONTAINER_HOME_ROOT);
 		const i = p.netcageArgs.indexOf(machine.image);
 		expect(p.netcageArgs.slice(i + 1, i + 3)).toEqual(['sh', '-c']);
 		expect(p.netcageArgs[i + 3]).toContain('exec bash');
@@ -111,9 +114,11 @@ describe('resolveRunPlan — modes', () => {
 		expect(p.netcageArgs[i + 3]).toContain('exec bash');
 	});
 
-	it('--shell . runs bash cwd /projects (the root token)', () => {
+	it('--shell . runs bash cwd /projects (the root token, same as bare --shell)', () => {
 		const p = launch({mode: 'shell', project: '.'});
 		expect(p.cwd).toBe(CONTAINER_PROJECTS_ROOT);
+		// bare --shell and `--shell .` land at the SAME cwd (synonyms).
+		expect(p.cwd).toBe(launch({mode: 'shell', project: undefined}).cwd);
 	});
 
 	it('interactive modes (pi / shell) allocate a TTY (-it)', () => {
@@ -147,9 +152,19 @@ describe('resolveRunPlan — modes', () => {
 		expect(tail).toEqual(['pi', '--session', '019f2bde-fd47']);
 	});
 
-	it('a shell with no project still sits at the machine home (/root)', () => {
+	it('a shell with no project sits at the projects root (NOT the machine home)', () => {
 		const p = launch({mode: 'shell', project: undefined});
-		expect(p.cwd).toBe(CONTAINER_HOME_ROOT);
+		expect(p.cwd).toBe(CONTAINER_PROJECTS_ROOT);
+		expect(p.cwd).not.toBe(CONTAINER_HOME_ROOT);
+	});
+
+	it('a --mount shell with no project sits at the /work root (not /projects, not /root)', () => {
+		const p = launch({
+			mode: 'shell',
+			mountParent: '/host/dev',
+			project: undefined,
+		});
+		expect(p.cwd).toBe(CONTAINER_MOUNT_ROOT);
 	});
 });
 

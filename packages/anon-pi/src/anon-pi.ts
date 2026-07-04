@@ -52,18 +52,19 @@ export const CONTAINER_MOUNT_ROOT = '/work';
 
 /**
  * The jail cwd root for a machine (its persistent home, bind-mounted at /root).
- * A machine root has no named subfolders: only the root token `.` (a scratch pi
- * / shell at `~`) is valid. Written as `~` so it reads as "the machine home".
+ * A machine root has no named subfolders: only the root token `.` (the machine
+ * home itself) is valid. Written as `~` so it reads as "the machine home".
  */
 export const CONTAINER_MACHINE_HOME = '~';
 
 /**
  * The REAL container path the machine home is bind-mounted at (the source is
- * the host `machineHomeDir`). This is what a shell-at-`~` launch actually cwds
- * into (`-w /root`), distinct from CONTAINER_MACHINE_HOME (`~`), which is the
- * human-readable menu token. It is the parent of CONTAINER_AGENT_DIR
- * (`/root/.pi/agent`); the seed-if-fresh promotes the image's `/root` defaults +
- * pi staging into the mounted home here.
+ * the host `machineHomeDir`), distinct from CONTAINER_MACHINE_HOME (`~`), which
+ * is the human-readable menu token. No launch cwds here by default (a bare shell
+ * lands at the projects root, not the home); it is reached via `cd ~` inside the
+ * jail. It is the parent of CONTAINER_AGENT_DIR (`/root/.pi/agent`); the
+ * seed-if-fresh promotes the image's `/root` defaults + pi staging into the
+ * mounted home here.
  */
 export const CONTAINER_HOME_ROOT = '/root';
 
@@ -527,20 +528,23 @@ export function resolveCwd(kind: RootKind, token: string): string {
 
 /**
  * PURE: the launch cwd for a resolved (mode, rootKind, project). With a project
- * token it resolves under the active root (resolveCwd). With NO project: a
- * `shell` sits at the machine home (`/root`) — the "sit on the machine" mode —
- * while `pi` (a `--session`/`--resume` launch that pi cwd-switches itself) starts
- * at the projects root (`rootCwd`), a real pi launch position. `menu` never
- * reaches here (it is argv-less). Shared by resolveRunPlan + keptContainerKey so
- * the run cwd and the container-identity key always agree.
+ * token it resolves under the active root (resolveCwd). With NO project BOTH a
+ * bare `shell` and a `--session`/`--resume` pi launch start at the active root
+ * (`rootCwd`): `/projects`, or `/work` under `--mount`. The shell defaults to
+ * the projects root (not the machine home) because the model is project-centric
+ * and files written under the home land in the machine's config home on the
+ * host; a shell is the project-hopper, so `/projects` is the natural landing.
+ * The machine home is one `cd ~` away for the rare case. `menu` never reaches
+ * here (it is argv-less). Shared by resolveRunPlan + keptContainerKey so the run
+ * cwd and the container-identity key always agree.
  */
 export function launchCwd(
-	mode: LaunchMode,
+	_mode: LaunchMode,
 	kind: RootKind,
 	project: string | undefined,
 ): string {
 	if (project !== undefined) return resolveCwd(kind, project);
-	return mode === 'shell' ? CONTAINER_HOME_ROOT : rootCwd(kind);
+	return rootCwd(kind);
 }
 
 /** Parsed shape of config.json. All fields optional (a hand-edited file may omit any). */
@@ -745,7 +749,8 @@ export interface LaunchIntent {
 	projectsRoot: string;
 	/**
 	 * The project token: a validated project name, the root token `.`, or
-	 * undefined (shell-at-home / menu). Resolves the cwd via resolveCwd.
+	 * undefined (bare shell / menu). Resolves the cwd via resolveCwd; a bare
+	 * shell lands at the projects root, same as the `.` token.
 	 */
 	project?: string;
 	/**
@@ -807,7 +812,7 @@ export type LaunchPlan =
 	| {
 			kind: 'launch';
 			machine: Machine;
-			/** The jail cwd (`-w`): /projects[/<p>], /work[/<p>] (--mount), or /root (shell ~). */
+			/** The jail cwd (`-w`): /projects[/<p>], or /work[/<p>] (--mount). A bare shell uses the root (/projects, or /work). */
 			cwd: string;
 			/** True when the machine home is fresh (informational; the seed is marker-guarded). */
 			fresh: boolean;
@@ -831,7 +836,7 @@ export const DEFAULT_MACHINE = 'default';
  * chosen (bare `anon-pi`, or `-m <machine>` / `--mount <parent>` with no
  * project): the CLI runs the host-side menu. `pi`/`shell` carry the chosen
  * target. `project` is a validated project name, the `.` root token, or
- * undefined (menu / shell-at-home). `mountParent` is the `--mount` HOST parent
+ * undefined (menu / bare shell, which lands at the active root). `mountParent` is the `--mount` HOST parent
  * (a path, NOT a name-namespaced token). `keep` is `--keep` (default false =>
  * throwaway `--rm`). `piArgs` are the trailing tokens forwarded to pi (pi mode
  * only; undefined otherwise).
@@ -1453,7 +1458,8 @@ export type RunVsStart = {action: 'run'} | {action: 'start'; ref: string};
  *     host parent at /work, so a `--mount` launch is a distinct identity from
  *     the projects-root launch of the same name.
  *   - the resolved container `cwd`: this already encodes the project token
- *     (`/projects/<p>`, `/work/<p>`, `.` -> a root, or /root for a bare shell)
+ *     (`/projects/<p>`, `/work/<p>`, or a root `/projects`/`/work`; legacy kept
+ *     containers may still carry /root from the pre-0.12 bare-shell-at-home)
  *     AND which root it sits under, so it is pi's conversation key too. Using
  *     the cwd keeps the container identity aligned with the conversation the
  *     kept container hosts.
@@ -1557,9 +1563,10 @@ export function parseKeptKey(key: string): KeptKeyFields {
 
 /**
  * PURE: the leaf name of a stamped key's cwd, i.e. the project a container hosts
- * (`/projects/recon` -> `recon`, `/projects` -> '.', `/work/x` -> `x`, `/root`
- * -> '' for a bare shell). Used to filter the picker by `<project>` and to label
- * each row. A root cwd (`/projects`, `/work`) maps to the `.` root token.
+ * (`/projects/recon` -> `recon`, `/projects` -> '.', `/work/x` -> `x`). Used to
+ * filter the picker by `<project>` and to label each row. A root cwd
+ * (`/projects`, `/work`) maps to the `.` root token; a legacy /root cwd (a
+ * pre-0.12 bare shell that sat at the machine home) maps to '' (no project).
  */
 export function keyProject(fields: KeptKeyFields): string {
 	const cwd = fields.cwd;
@@ -3073,7 +3080,7 @@ USAGE
   anon-pi --list-models          list the models pi sees (also --models; no project needed)
   anon-pi pi <pi-args…>          run pi with ANY args and no project (the passthrough)
   anon-pi --version              print anon-pi's version (also -V)
-  anon-pi --shell [<project>]    a jailed bash (at ~, or cd'd into <project>) - the project-hopper
+  anon-pi --shell [<project>]    a jailed bash (at /projects, or cd'd into <project>) - the project-hopper
   anon-pi forward [<p>] [--port …]  open a host port onto a running container's in-jail server
   anon-pi ports [<project>]      list a running container's open in-jail TCP listeners
   anon-pi -m <machine> [<p>]     the same, on <machine> (its own image + home + conversations)

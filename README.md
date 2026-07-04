@@ -121,11 +121,12 @@ The menu needs a TTY. Without one it refuses and tells you to name a project dir
 pi cannot `cd` into a different project mid-session (a conversation is keyed to its launch cwd). So when you want to move between projects, or poke around the machine, use a jailed shell:
 
 ```sh
-anon-pi --shell            # bash at ~ (the machine home), inside the jail
+anon-pi --shell            # bash at /projects (the projects root), inside the jail
+anon-pi --shell .          # same as bare --shell: bash at /projects (`.` is a synonym)
 anon-pi --shell recon      # bash cd'd into /projects/recon
 ```
 
-From inside the shell you can `cd` between `/projects/*` and run `pi` yourself in whichever one you want. The shell forwards no arguments (`anon-pi --shell recon extra` is an error); run pi from inside it instead. Same forced-egress jail as a pi launch.
+A bare `--shell` lands at the projects root (`/projects`, or `/work` under `--mount`), the project-hopper's natural home: the model is project-centric, and anything you write under the machine home (`~`) persists into that machine's config home on the host, which is for config, not work. From inside the shell you can `cd` between `/projects/*` and run `pi` yourself in whichever one you want; `cd ~` reaches the machine home for the rare case you want it. The shell forwards no arguments (`anon-pi --shell recon extra` is an error); run pi from inside it instead. Same forced-egress jail as a pi launch.
 
 ### Reaching an in-jail server from the host (`forward` / `ports`)
 
