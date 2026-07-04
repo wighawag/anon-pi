@@ -56,8 +56,8 @@ It then writes `~/.anon-pi/config.json` + the `default` machine. It **never dest
 anon-pi                        MENU: pick a project (pi), a shell, or a new project
 anon-pi <project>              pi in the project (/projects/<project>); exit pi -> host
 anon-pi <project> <pi-args…>   forward args to pi (e.g. -p for a headless one-shot)
-anon-pi --session <id>         resume a pi session by id (forwarded to pi; no project needed)
-anon-pi --continue             continue your most recent pi session (also -r/--resume, --fork)
+anon-pi --session <id>         resume a pi session by id, in its own project (also -r/--resume)
+anon-pi <project> --fork <id>  fork a session into <project> (`.`=root; --continue too; project required)
 anon-pi --list-models          list the models pi sees (also --models; no project needed)
 anon-pi pi <pi-args…>          run pi with ANY args and no project (the passthrough)
 anon-pi --version              print anon-pi's version (also -V)
@@ -82,7 +82,8 @@ Every subcommand carries its own help: `anon-pi --help` (the launch surface), `a
 | Just pick something to work on | `anon-pi` (the menu) |
 | Work in a project | `anon-pi <project>` |
 | Resume a project's conversation | `anon-pi <project>` (same machine + project ⇒ same session) |
-| Resume a specific session by id | `anon-pi --session <id>` (or `anon-pi --continue` for the latest) |
+| Resume a specific session by id | `anon-pi --session <id>` (resumes in its own project) |
+| Fork a session into a project | `anon-pi <project> --fork <id>` (`.` for the root; created on demand) |
 | Run a one-shot prompt (scriptable) | `anon-pi <project> -p "…"` |
 | Hop between projects / poke the box | `anon-pi --shell` then `cd /projects/<p> && pi` |
 | A scratch pi not tied to a subfolder | `anon-pi .` |
@@ -132,15 +133,25 @@ anon-pi recon -p "summarize the findings in ./notes"
 
 ### Resuming a session
 
-`anon-pi <project>` already resumes that project's conversation (the session is keyed by its `/projects/<name>` cwd, so same machine + same project reopens it). To resume a **specific** session, forward pi's session flags — with no project needed, because pi finds the session by id and switches to its own project:
+`anon-pi <project>` already resumes that project's conversation (the session is keyed by its `/projects/<name>` cwd, so same machine + same project reopens it). To resume a **specific** session by id, forward pi's `--session`/`--resume` flag with no project: anon-pi looks the session up in the machine's store, reads the project (cwd) it belongs to, and launches pi **there**, so it resumes in place instead of asking to fork:
 
 ```sh
-anon-pi --session <id>     # resume that exact session
-anon-pi --continue         # continue your most recent session (also -r/--resume, --fork <id>)
+anon-pi --session <id>     # resume that exact session, in its own project
+anon-pi --resume <id>      # same (also -r)
 anon-pi -m webveil --session <id>   # on a specific machine
 ```
 
 So when pi prints `To resume this session: pi --session <id>` on exit, just prefix it: `anon-pi --session <id>`.
+
+**Forking / continuing needs a project.** `--fork <id>` writes a *new* session and `--continue`/`-c` resumes the *newest* session for a cwd, so with no project they would land a conversation in the projects root by surprise. anon-pi refuses them without a project and asks you to name one (`.` for the root; the folder is created on demand):
+
+```sh
+anon-pi newproj --fork <id>   # fork <id> into a fresh /projects/newproj
+anon-pi . --fork <id>         # fork into the root itself
+anon-pi recon --continue      # continue recon's most recent session
+```
+
+If you name a project that differs from the session's own (e.g. `anon-pi other --session <id>`), anon-pi trusts you and cds into `other`; pi then asks whether to fork the session into it (its normal guard for a cwd mismatch).
 
 ### Running pi directly (`anon-pi pi …`)
 

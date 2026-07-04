@@ -153,6 +153,66 @@ describe('resolveRunPlan — modes', () => {
 	});
 });
 
+describe('resolveRunPlan — RESUME sessionCwd override (no-project cd)', () => {
+	// A RESUME-family launch with NO project: the CLI resolves the session's
+	// recorded cwd and passes it as intent.sessionCwd, which OVERRIDES the default
+	// no-project cwd (the projects root) so pi resumes in place (no fork prompt).
+	it('cds into the session cwd for a no-project --session launch', () => {
+		const p = launch({
+			mode: 'pi',
+			project: undefined,
+			piArgs: ['--session', '019f2cca'],
+			sessionCwd: `${CONTAINER_PROJECTS_ROOT}/test`,
+		});
+		expect(p.cwd).toBe(`${CONTAINER_PROJECTS_ROOT}/test`);
+		const i = p.netcageArgs.indexOf('-w');
+		expect(p.netcageArgs[i + 1]).toBe(`${CONTAINER_PROJECTS_ROOT}/test`);
+		// the session flag is still forwarded verbatim
+		const tail = p.netcageArgs.slice(p.netcageArgs.indexOf('pi'));
+		expect(tail).toEqual(['pi', '--session', '019f2cca']);
+	});
+
+	it('an EXPLICIT project WINS over sessionCwd (user trusted; pi guards)', () => {
+		const p = launch({
+			mode: 'pi',
+			project: 'someproj',
+			piArgs: ['--session', 'x'],
+			sessionCwd: `${CONTAINER_PROJECTS_ROOT}/test`,
+		});
+		expect(p.cwd).toBe(`${CONTAINER_PROJECTS_ROOT}/someproj`);
+	});
+
+	it('an unresolved session (no sessionCwd) stays at the projects root', () => {
+		const p = launch({
+			mode: 'pi',
+			project: undefined,
+			piArgs: ['--session', 'unknown'],
+		});
+		expect(p.cwd).toBe(CONTAINER_PROJECTS_ROOT);
+	});
+
+	it('an empty sessionCwd is ignored (falls back to the projects root)', () => {
+		const p = launch({
+			mode: 'pi',
+			project: undefined,
+			piArgs: ['--resume', 'id'],
+			sessionCwd: '',
+		});
+		expect(p.cwd).toBe(CONTAINER_PROJECTS_ROOT);
+	});
+
+	it('a --mount session cwd is honoured verbatim (/work/<p>)', () => {
+		const p = launch({
+			mode: 'pi',
+			project: undefined,
+			mountParent: '/host/parent',
+			piArgs: ['--session', 'x'],
+			sessionCwd: `${CONTAINER_MOUNT_ROOT}/sub`,
+		});
+		expect(p.cwd).toBe(`${CONTAINER_MOUNT_ROOT}/sub`);
+	});
+});
+
 describe('resolveRunPlan — the two invariant mounts (always)', () => {
 	function mountsOf(args: string[]): string[] {
 		const out: string[] = [];

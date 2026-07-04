@@ -56,6 +56,8 @@ import {
 	parseConfigJson,
 	parseLaunchArgs,
 	isHeadlessPiArgs,
+	resumeSessionId,
+	sessionHeaderCwd,
 	anonPiVersion,
 	parseMachineArgs,
 	parseMachineJson,
@@ -294,6 +296,15 @@ function runLaunch(parsed: ParsedLaunch): number {
 			modelsSeed,
 			settingsSeed,
 		};
+
+		// RESUME family with NO project: resolve the session's recorded cwd from the
+		// host store and cd there, so pi resumes in place (no fork prompt). A given
+		// project is trusted verbatim (pi guards a mismatch); an unresolvable id
+		// leaves the cwd at the projects root (pi decides), so this is pure upside.
+		if (parsed.mode === 'pi' && parsed.project === undefined) {
+			const sessionCwd = resolveSessionCwd(env, machineName, parsed.piArgs);
+			if (sessionCwd !== undefined) intent.sessionCwd = sessionCwd;
+		}
 	} catch (e) {
 		return reportAnonPiError(e);
 	}
@@ -2091,6 +2102,56 @@ function withKeyLabel(netcageArgs: string[], key: string): string[] {
 	// netcageArgs[0] is 'run'; splice the label right after it.
 	out.splice(1, 0, '--label', `${ANON_PI_KEY_LABEL}=${enc}`);
 	return out;
+}
+
+/**
+ * Best-effort: resolve a RESUME-family launch's session cwd from the host
+ * session store, so the CLI can cd there (intent.sessionCwd) and pi resumes in
+ * place instead of prompting to fork. Globs the machine's sessions dir for a
+ * file whose name carries `<id>` (pi names them `<ts>_<id>.jsonl`), reads the
+ * HEADER line, and returns its recorded cwd (pure sessionHeaderCwd). Returns
+ * undefined on any miss (no id, id not found, unreadable, no cwd): the caller
+ * then leaves the cwd at the projects root and lets pi decide, as before. NEVER
+ * throws (a resume must not fail on a store-read hiccup).
+ */
+function resolveSessionCwd(
+	env: AnonPiEnv,
+	machine: string,
+	piArgs: readonly string[] | undefined,
+): string | undefined {
+	const id = resumeSessionId(piArgs);
+	if (id === undefined) return undefined;
+	const sessionsRoot = machineSessionsDir(env, machine);
+	if (!existsSync(sessionsRoot)) return undefined;
+	try {
+		// sessions/<slug>/<ts>_<id>.jsonl: scan each slug dir for a file whose name
+		// contains the id. The id is a UUID (no path/glob metachars), so a substring
+		// match is safe and cheap for the short session lists here.
+		for (const slug of readdirSync(sessionsRoot, {withFileTypes: true})) {
+			if (!slug.isDirectory()) continue;
+			const slugDir = join(sessionsRoot, slug.name);
+			for (const f of readdirSync(slugDir)) {
+				if (!f.endsWith('.jsonl') || !f.includes(id)) continue;
+				const header = firstLine(join(slugDir, f));
+				if (header === undefined) return undefined;
+				return sessionHeaderCwd(header);
+			}
+		}
+	} catch {
+		return undefined;
+	}
+	return undefined;
+}
+
+/** Read a file's FIRST line (up to a newline), or undefined if unreadable. */
+function firstLine(path: string): string | undefined {
+	try {
+		const text = readFileSync(path, 'utf8');
+		const nl = text.indexOf('\n');
+		return nl === -1 ? text : text.slice(0, nl);
+	} catch {
+		return undefined;
+	}
 }
 
 /** Spawn netcage with inherited stdio; propagate its exit code. */

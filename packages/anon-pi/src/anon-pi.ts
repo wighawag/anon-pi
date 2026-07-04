@@ -749,6 +749,15 @@ export interface LaunchIntent {
 	 */
 	project?: string;
 	/**
+	 * A RESUME-family launch's resolved session cwd (e.g. `/projects/test`), the
+	 * cwd pi keyed the resumed session by. Set by the CLI ONLY for a NO-project
+	 * `--session`/`--resume <id>` whose id it found in the host session store; it
+	 * OVERRIDES the default no-project cwd (the projects root) so pi resumes in
+	 * place instead of prompting to fork. Ignored when a project is given (the
+	 * user is trusted) or when the id is unresolvable (pi decides, as before).
+	 */
+	sessionCwd?: string;
+	/**
 	 * `--mount <parent>`: a resolved HOST parent path. When set it adds EXACTLY
 	 * one mount (<parent>:/work) and re-roots the cwd there (/work[/<project>]);
 	 * it changes nothing else (the two invariant mounts stay). Sidesteps podman
@@ -843,13 +852,18 @@ export interface ParsedLaunch {
 }
 
 /**
- * pi flags that make sense with NO anon-pi project, so `anon-pi <flag> ...`
- * launches pi (at the projects root) and forwards this flag + everything after
- * it verbatim. Two families:
- *  - SESSION selection (`--session <id>` etc.): pi finds the session file (in the
- *    always-mounted machine home) and switches to its own project cwd, so no
- *    project is needed. Mirrors pi's own resume hint (`pi --session <id>`), so
- *    pasting `anon-pi --session <id>` just works.
+ * pi flags anon-pi RECOGNISES in the no-project position, so `anon-pi <flag> ...`
+ * forwards this flag + everything after it verbatim. Three families with three
+ * no-project policies:
+ *  - RESUME (`--session`/`--session-id`/`--resume`/`-r <id>`): resume ONE session
+ *    in place. anon-pi resolves the session's recorded cwd from the host store
+ *    and cds there (isPiResumeFlag / resumeSessionId), so pi resumes cleanly.
+ *    Mirrors pi's own resume hint (`pi --session <id>`), so pasting `anon-pi
+ *    --session <id>` just works.
+ *  - NEEDS-PROJECT (`--fork`, `--continue`/`-c`): REFUSED without a project
+ *    (isPiNeedsProjectFlag) so the (new / newest) conversation never lands in
+ *    the projects root by surprise. Add a project (`.` for the root; created on
+ *    demand): `anon-pi <project> --fork <id>`.
  *  - QUERY (`--list-models`/`--models`): pi prints + exits, no project relevant.
  * For arbitrary pi flags with no project (e.g. `--model x`), use the explicit
  * `anon-pi pi <args…>` passthrough instead.
@@ -871,6 +885,111 @@ const PI_NO_PROJECT_FLAGS: ReadonlySet<string> = new Set([
 /** True iff `a` is a pi flag anon-pi accepts with no project (see PI_NO_PROJECT_FLAGS). */
 function isPiNoProjectFlag(a: string): boolean {
 	return PI_NO_PROJECT_FLAGS.has(a);
+}
+
+/**
+ * The RESUME family: session-selecting flags that resume ONE existing session in
+ * place (`--session`/`--session-id <id>`, `--resume`/`-r <id>`). With NO project,
+ * anon-pi resolves the session's recorded cwd from the host session store and
+ * cds THERE (setSessionCwd), so pi resumes cleanly instead of prompting to fork
+ * (its guard fires when the launch cwd differs from the session cwd). With an
+ * explicit project the user is trusted verbatim: anon-pi cds into that project
+ * and lets pi's own fork-prompt guard a mismatch. `--continue`/`--fork` are NOT
+ * here: they need a project (see PI_RESUME_NEEDS_PROJECT_FLAGS).
+ */
+const PI_RESUME_FLAGS: ReadonlySet<string> = new Set([
+	'--session',
+	'--session-id',
+	'--resume',
+	'-r',
+]);
+
+/**
+ * Session flags that REQUIRE an explicit project with no-project: `--fork` and
+ * `--continue`/`-c`. `--fork` writes a NEW session and would otherwise land it
+ * silently in the projects ROOT (a surprise); `--continue`/`-c` resumes the
+ * newest session for the launch cwd, so at the root it resolves ambiguously.
+ * anon-pi refuses both without a project (the project may be `.` for the root,
+ * and is created on demand), so where the conversation lands is always explicit.
+ */
+const PI_RESUME_NEEDS_PROJECT_FLAGS: ReadonlySet<string> = new Set([
+	'--fork',
+	'--continue',
+	'-c',
+]);
+
+/** True iff `a` is a RESUME-family flag (resolve session cwd; see PI_RESUME_FLAGS). */
+export function isPiResumeFlag(a: string): boolean {
+	return PI_RESUME_FLAGS.has(a);
+}
+
+/** True iff `a` is a session flag that needs an explicit project (--fork/--continue). */
+export function isPiNeedsProjectFlag(a: string): boolean {
+	return PI_RESUME_NEEDS_PROJECT_FLAGS.has(a);
+}
+
+/**
+ * PURE: the human name a --fork/--continue no-project refusal quotes. `-c` is
+ * spelled as its long form `--continue` in the message (clearer guidance).
+ */
+export function needsProjectFlagName(flag: string): string {
+	return flag === '-c' ? '--continue' : flag;
+}
+
+/**
+ * PURE: the leading session-id `--fork <id>` / `--continue <id>` accepts, or
+ * undefined. Used only to build a copy-pasteable "add a project" hint in the
+ * refusal (`anon-pi . --fork <id>`); the id is the token right after the flag
+ * when it is not itself another flag.
+ */
+export function resumeFlagId(piArgs: readonly string[]): string | undefined {
+	if (piArgs.length < 2) return undefined;
+	const id = piArgs[1];
+	return id.startsWith('-') ? undefined : id;
+}
+
+/**
+ * PURE: extract the session id a RESUME-family launch selects, so the CLI can
+ * look its cwd up in the host session store. Scans forwarded pi args for a
+ * resume flag (isPiResumeFlag) and returns the NEXT token when it is an id (not
+ * another flag). Returns undefined when there is no resume flag or no id after
+ * it (e.g. a bare `--resume` picker), in which case the CLI cds nowhere and pi
+ * decides as today.
+ */
+export function resumeSessionId(
+	piArgs: readonly string[] | undefined,
+): string | undefined {
+	if (!piArgs) return undefined;
+	for (let i = 0; i < piArgs.length; i++) {
+		if (isPiResumeFlag(piArgs[i])) {
+			const next = piArgs[i + 1];
+			if (next !== undefined && !next.startsWith('-')) return next;
+			return undefined;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * PURE: read a pi session's recorded cwd from its session-file HEADER line (the
+ * first JSONL record, `{"type":"session","id":"…","cwd":"/projects/x"}`). This
+ * is the authoritative cwd (what pi keys the conversation by), better than
+ * reversing the lossy `--…--` dir slug. Returns the cwd string, or undefined if
+ * the line is not the expected session header with a non-empty string cwd. The
+ * caller (CLI) supplies the file's first line; this stays pure + testable.
+ */
+export function sessionHeaderCwd(headerLine: string): string | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(headerLine);
+	} catch {
+		return undefined;
+	}
+	if (!parsed || typeof parsed !== 'object') return undefined;
+	const rec = parsed as Record<string, unknown>;
+	if (rec.type !== 'session') return undefined;
+	const cwd = rec.cwd;
+	return typeof cwd === 'string' && cwd.length > 0 ? cwd : undefined;
 }
 
 /**
@@ -1013,13 +1132,34 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 			});
 		}
 		if (isPiNoProjectFlag(a)) {
-			// A pi flag that needs NO anon-pi project (`--session <id>`/`--continue`/
-			// `--fork` resume by id; `--list-models`/`--models` print + exit). pi
-			// resolves its own cwd (or just prints), so anon-pi launches pi at the
-			// projects root and forwards this flag + everything after it verbatim.
-			// This makes pi's own "To resume: pi --session <id>" hint usable as
-			// `anon-pi --session <id>`. (For ARBITRARY pi flags with no project, use
-			// the explicit `anon-pi pi <args…>` passthrough.)
+			// A pi flag that needs NO anon-pi project (RESUME family `--session <id>`/
+			// `--resume <id>`; `--list-models`/`--models` print + exit). pi resolves
+			// its own cwd (or just prints), so anon-pi launches pi at the projects
+			// root and forwards this flag + everything after it verbatim. For the
+			// RESUME family the CLI then resolves the session's recorded cwd and cds
+			// there so pi resumes in place (no fork prompt). This makes pi's own "To
+			// resume: pi --session <id>" hint usable as `anon-pi --session <id>`. (For
+			// ARBITRARY pi flags with no project, use `anon-pi pi <args…>`.)
+			//
+			// --fork / --continue are REFUSED with no project: they would land a
+			// (new / newest) conversation in the projects ROOT silently. Require an
+			// explicit project (created on demand; `.` for the root) so where the
+			// conversation lands is never a surprise.
+			if (isPiNeedsProjectFlag(a)) {
+				const rest = args.slice(i);
+				const name = needsProjectFlagName(a);
+				const id = resumeFlagId(rest);
+				const example = id
+					? `anon-pi <project> ${name} ${id}` +
+						` (or \`anon-pi . ${name} ${id}\` for the root)`
+					: `anon-pi <project> ${name} …` +
+						` (or \`anon-pi . ${name} …\` for the root)`;
+				fail(
+					`${name} needs a project so the conversation lands in a known ` +
+						`directory, not the projects root. Add one (it is created on ` +
+						`demand): ${example}.`,
+				);
+			}
 			piArgs = args.slice(i);
 			project = undefined;
 			i = args.length;
@@ -1148,7 +1288,15 @@ export function resolveRunPlan(
 	// Which root the cwd resolves under: /work when --mount, else /projects.
 	const rootKind: RootKind = mounted ? 'mount' : 'projects';
 
-	const cwd = launchCwd(mode, rootKind, project);
+	// A RESUME-family launch with NO project overrides the default no-project cwd
+	// (the projects root) with the session's own recorded cwd, so pi resumes in
+	// place. Only honoured for a projectless pi launch; a given project always
+	// wins (the user is trusted, pi guards a mismatch).
+	const sessionCwd = nonEmpty(intent.sessionCwd);
+	const cwd =
+		mode === 'pi' && project === undefined && sessionCwd !== undefined
+			? sessionCwd
+			: launchCwd(mode, rootKind, project);
 
 	const fresh = homeFresh(machine.home);
 	const seedVersion = intent.seedVersion ?? SEED_VERSION;
@@ -2550,8 +2698,8 @@ USAGE
   anon-pi                        MENU: pick a project (pi), a shell, or a new project
   anon-pi <project>              pi in the project (${CONTAINER_PROJECTS_ROOT}/<project>); exit pi -> host
   anon-pi <project> <pi-args…>   forward args to pi (e.g. -p for a headless one-shot)
-  anon-pi --session <id>         resume a pi session by id (forwarded to pi; no project needed)
-  anon-pi --continue             continue your most recent pi session (also -r/--resume, --fork)
+  anon-pi --session <id>         resume a pi session by id, in its own project (also -r/--resume)
+  anon-pi <project> --fork <id>  fork a session into <project> (\`.\`=root; --continue too; project required)
   anon-pi --list-models          list the models pi sees (also --models; no project needed)
   anon-pi pi <pi-args…>          run pi with ANY args and no project (the passthrough)
   anon-pi --version              print anon-pi's version (also -V)

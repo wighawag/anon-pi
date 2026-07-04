@@ -29,6 +29,8 @@ import {
 	parseConfigJson,
 	parseMachineJson,
 	pathSlug,
+	resumeSessionId,
+	sessionHeaderCwd,
 	resolveAnonPiHome,
 	resolveLlm,
 	resolveProjectsRoot,
@@ -658,5 +660,57 @@ describe("pathSlug (pi's session-dir convention, not a hash)", () => {
 	it('wraps in -- and maps / \\ : to -', () => {
 		expect(pathSlug('/home/u/dev/x')).toBe('--home-u-dev-x--');
 		expect(pathSlug('/work')).toBe('--work--');
+	});
+});
+
+describe('resumeSessionId (the id a RESUME launch selects)', () => {
+	it('returns the token after a resume flag', () => {
+		expect(resumeSessionId(['--session', '019f2cca'])).toBe('019f2cca');
+		expect(resumeSessionId(['--session-id', 'abc'])).toBe('abc');
+		expect(resumeSessionId(['--resume', 'id-1'])).toBe('id-1');
+		expect(resumeSessionId(['-r', 'id-2'])).toBe('id-2');
+	});
+
+	it('finds the id even when the resume flag is not first', () => {
+		expect(resumeSessionId(['--model', 'x', '--session', 'the-id'])).toBe(
+			'the-id',
+		);
+	});
+
+	it('is undefined for a bare resume flag (no id / a picker)', () => {
+		expect(resumeSessionId(['--resume'])).toBeUndefined();
+		expect(resumeSessionId(['--session', '--model'])).toBeUndefined();
+	});
+
+	it('is undefined with no resume flag, or no args', () => {
+		expect(resumeSessionId(['--list-models'])).toBeUndefined();
+		expect(resumeSessionId([])).toBeUndefined();
+		expect(resumeSessionId(undefined)).toBeUndefined();
+	});
+});
+
+describe('sessionHeaderCwd (cwd from a session file header line)', () => {
+	it('reads cwd from a valid session header', () => {
+		const line = JSON.stringify({
+			type: 'session',
+			version: 3,
+			id: '019f2cca',
+			cwd: '/projects/test',
+		});
+		expect(sessionHeaderCwd(line)).toBe('/projects/test');
+	});
+
+	it('is undefined for a non-session record, missing/empty cwd, or bad JSON', () => {
+		expect(
+			sessionHeaderCwd(JSON.stringify({type: 'message', cwd: '/x'})),
+		).toBeUndefined();
+		expect(
+			sessionHeaderCwd(JSON.stringify({type: 'session', id: 'a'})),
+		).toBeUndefined();
+		expect(
+			sessionHeaderCwd(JSON.stringify({type: 'session', cwd: ''})),
+		).toBeUndefined();
+		expect(sessionHeaderCwd('not json')).toBeUndefined();
+		expect(sessionHeaderCwd('')).toBeUndefined();
 	});
 });
