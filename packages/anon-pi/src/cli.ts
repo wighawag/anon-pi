@@ -11,7 +11,15 @@
 // ALWAYS carries --proxy + the one --allow-direct; the CLI never strips or adds
 // egress.
 
-import {existsSync, mkdirSync, readFileSync} from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
+import {readSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {join} from 'node:path';
 import {
@@ -26,6 +34,7 @@ import {
 	machineJsonPath,
 	parseConfigJson,
 	parseLaunchArgs,
+	parseMachineArgs,
 	parseMachineJson,
 	projectHostDir,
 	resolveAnonPiHome,
@@ -34,6 +43,8 @@ import {
 	resolveProxy,
 	resolveRunPlan,
 	resolveRunVsStart,
+	serializeMachineJson,
+	setImageWarning,
 	keptContainerKey,
 	type AnonPiConfig,
 	type AnonPiEnv,
@@ -41,6 +52,7 @@ import {
 	type LaunchIntent,
 	type Machine,
 	type MachineConfig,
+	type MachineCommand,
 	type ParsedLaunch,
 } from './anon-pi.js';
 
@@ -56,6 +68,13 @@ function main(argv: string[]): number {
 	if (args.includes('--help') || args.includes('-h')) {
 		process.stdout.write(HELP);
 		return 0;
+	}
+
+	// `machine …` is the machine-management surface (create/list/set-image/rm),
+	// dispatched BEFORE the launch grammar so a bare `machine` is never parsed as
+	// a project named "machine". Everything else is a launch.
+	if (args[0] === 'machine') {
+		return runMachine(args.slice(1));
 	}
 
 	let parsed: ParsedLaunch;
@@ -223,6 +242,226 @@ function runMenu(_intent: LaunchIntent, machine: Machine): number {
 	);
 	return 1;
 }
+
+// --- the `machine` verbs (thin dispatch over the pure parts) -----------------
+//
+// Parse the `machine <verb> …` grammar (pure parseMachineArgs), then do only the
+// I/O: mkdir/write the machine layout (create), read machines/*/machine.json
+// (list), rewrite machine.json + WARN (set-image), and rm the machine dir with
+// the confirm/`--yes`/non-TTY discipline (rm). All validation + the machine.json
+// body + the warning wording live in the pure module.
+function runMachine(machineArgs: string[]): number {
+	if (machineArgs.includes('--help') || machineArgs.includes('-h')) {
+		process.stdout.write(MACHINE_HELP);
+		return 0;
+	}
+
+	const env = envFromProcess(process.env);
+	let cmd: MachineCommand;
+	try {
+		cmd = parseMachineArgs(machineArgs);
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+
+	try {
+		switch (cmd.verb) {
+			case 'create':
+				return machineCreate(env, cmd.name, cmd.image);
+			case 'list':
+				return machineList(env);
+			case 'set-image':
+				return machineSetImage(env, cmd.name, cmd.image);
+			case 'rm':
+				return machineRm(env, cmd.name, cmd.yes);
+		}
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+}
+
+/**
+ * `machine create <name> [--image <ref>]`: write machines/<name>/{machine.json,
+ * home/} and PIN the image (from --image or a TTY prompt). The home is only a
+ * dir here; it is SEEDED on first LAUNCH, not now. Refuses to clobber an
+ * existing machine.
+ */
+function machineCreate(
+	env: AnonPiEnv,
+	name: string,
+	image: string | undefined,
+): number {
+	const dir = machineDir(env, name);
+	if (existsSync(dir)) {
+		process.stderr.write(
+			`anon-pi: machine ${JSON.stringify(name)} already exists (${dir}). ` +
+				'Use `anon-pi machine set-image` to re-pin its image, or `anon-pi machine rm` first.\n',
+		);
+		return 1;
+	}
+
+	// Pin the image: --image wins; else prompt on a TTY; else it is an error (a
+	// machine with no image cannot launch, so we refuse a headless imageless create).
+	let pinned = image;
+	if (pinned === undefined) {
+		if (!process.stdin.isTTY) {
+			process.stderr.write(
+				'anon-pi: no image and no TTY to prompt. Pass `--image <ref>` to pin the ' +
+					"machine's image (a container ref with `pi` on PATH).\n",
+			);
+			return 1;
+		}
+		pinned = promptLine(
+			`Image ref for machine ${JSON.stringify(name)} (a container with \`pi\` on PATH): `,
+		);
+		if (pinned === undefined || pinned.trim() === '') {
+			process.stderr.write('anon-pi: no image given; aborting create.\n');
+			return 1;
+		}
+	}
+
+	mkdirSync(machineHomeDir(env, name), {recursive: true});
+	writeFileSync(
+		machineJsonPath(env, name),
+		serializeMachineJson({image: pinned}),
+	);
+	process.stdout.write(
+		`anon-pi: created machine ${JSON.stringify(name)} (image ${pinned.trim()}) at ${dir}.\n` +
+			`Its home is seeded on first launch, e.g. \`anon-pi -m ${name} --shell\`.\n`,
+	);
+	return 0;
+}
+
+/**
+ * `machine list`: print each machine under machines/ with its pinned image
+ * (reading each machine's machine.json). An absent/garbage machine.json shows
+ * `(no image)` rather than erroring, so a hand-edited workspace still lists.
+ */
+function machineList(env: AnonPiEnv): number {
+	const root = join(resolveAnonPiHome(env), 'machines');
+	const names = existsSync(root)
+		? readdirSync(root, {withFileTypes: true})
+				.filter((d) => d.isDirectory())
+				.map((d) => d.name)
+				.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+		: [];
+	if (names.length === 0) {
+		process.stdout.write(
+			'anon-pi: no machines yet. Create one with `anon-pi machine create <name> --image <ref>`.\n',
+		);
+		return 0;
+	}
+	for (const name of names) {
+		const conf = readMachineJson(env, name);
+		const image = conf.image ?? '(no image)';
+		process.stdout.write(`${name}\t${image}\n`);
+	}
+	return 0;
+}
+
+/**
+ * `machine set-image <name> <ref>`: RE-PIN the image and WARN only. It does NOT
+ * reseed or touch the home (the home's extensions/bin were built for the OLD
+ * image). Preserves any per-machine projects override. The machine must exist.
+ */
+function machineSetImage(env: AnonPiEnv, name: string, image: string): number {
+	const dir = machineDir(env, name);
+	if (!existsSync(dir)) {
+		process.stderr.write(
+			`anon-pi: no machine ${JSON.stringify(name)} (${dir}). ` +
+				'Create it first with `anon-pi machine create`.\n',
+		);
+		return 1;
+	}
+	const prev = readMachineJson(env, name);
+	writeFileSync(
+		machineJsonPath(env, name),
+		serializeMachineJson({image, projects: prev.projects}),
+	);
+	process.stderr.write(setImageWarning(name, prev.image, image.trim()) + '\n');
+	return 0;
+}
+
+/**
+ * `machine rm <name> [--yes]`: delete the machine dir (its machine.json + home)
+ * after a confirm. Mirrors the destructive data-verb discipline: confirm on a
+ * TTY, `--yes` skips it, and a non-TTY WITHOUT `--yes` ABORTS (never deletes
+ * unprompted in a script). The machine must exist.
+ */
+function machineRm(env: AnonPiEnv, name: string, yes: boolean): number {
+	const dir = machineDir(env, name);
+	if (!existsSync(dir)) {
+		process.stderr.write(
+			`anon-pi: no machine ${JSON.stringify(name)} (${dir}); nothing to remove.\n`,
+		);
+		return 1;
+	}
+
+	if (!yes) {
+		if (!process.stdin.isTTY) {
+			process.stderr.write(
+				`anon-pi: refusing to delete machine ${JSON.stringify(name)} without a TTY to confirm. ` +
+					'Re-run with `--yes` to delete it (its home + conversations) non-interactively.\n',
+			);
+			return 1;
+		}
+		const answer = promptLine(
+			`Delete machine ${JSON.stringify(name)} and its home (conversations, config) at ${dir}? [y/N] `,
+		);
+		if (answer === undefined || !/^y(es)?$/i.test(answer.trim())) {
+			process.stderr.write('anon-pi: aborted; nothing deleted.\n');
+			return 1;
+		}
+	}
+
+	rmSync(dir, {recursive: true, force: true});
+	process.stdout.write(
+		`anon-pi: removed machine ${JSON.stringify(name)} (${dir}).\n`,
+	);
+	return 0;
+}
+
+/**
+ * Read one line from stdin synchronously for a confirm/value prompt, writing the
+ * prompt to stderr first. Returns undefined on EOF/error. Only called on a TTY
+ * (the verbs enforce the non-TTY discipline before prompting), so a blocking
+ * byte-at-a-time read from fd 0 is fine: the user types a line and hits enter.
+ */
+function promptLine(prompt: string): string | undefined {
+	process.stderr.write(prompt);
+	const byte = Buffer.alloc(1);
+	let line = '';
+	for (;;) {
+		let n: number;
+		try {
+			n = readSync(0, byte, 0, 1, null);
+		} catch (e) {
+			// EAGAIN on a non-blocking TTY: retry; anything else ends the read.
+			if ((e as NodeJS.ErrnoException).code === 'EAGAIN') continue;
+			break;
+		}
+		if (n === 0) break; // EOF
+		const ch = byte.toString('utf8', 0, 1);
+		if (ch === '\n') return line;
+		if (ch !== '\r') line += ch;
+	}
+	return line === '' ? undefined : line;
+}
+
+/** The `machine` subcommand help. */
+const MACHINE_HELP = `anon-pi machine - manage machines (an image + a persistent host home)
+
+USAGE
+  anon-pi machine create <name> [--image <ref>]   create a machine, pin its image
+  anon-pi machine list                            list machines and their images
+  anon-pi machine set-image <name> <ref>          re-pin the image (WARNS; no reseed)
+  anon-pi machine rm <name> [--yes]               delete the machine + its home
+
+A machine is an image + a persistent host home (machines/<name>/{machine.json,home/}).
+The home is seeded on FIRST LAUNCH, not at create. \`set-image\` re-pins only and
+warns (the home was built for the old image); \`rm\` confirms on a TTY, skips with
+\`--yes\`, and aborts non-interactively without it.
+`;
 
 // --- impure helpers ---------------------------------------------------------
 
