@@ -248,7 +248,7 @@ anon-pi does not ship or default an image: a machine points at an image that has
 ```sh
 # from wherever this package's Dockerfile.pi is (e.g. node_modules/anon-pi)
 podman build -t localhost/anon-pi/pi:latest -f Dockerfile.pi .
-# make netcage's store see it (until netcage ships a build/load verb):
+# make netcage's store see it (netcage >= 0.7.1 ships `netcage load` for this):
 podman save localhost/anon-pi/pi:latest | podman --root /var/tmp/netcage-storage load
 anon-pi machine set-image default localhost/anon-pi/pi:latest
 ```
