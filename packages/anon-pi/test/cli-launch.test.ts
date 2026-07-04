@@ -208,6 +208,63 @@ describe('resolution + errors', () => {
 	});
 });
 
+describe('every launch stamps the anon-pi.key label (forward/ports enabler)', () => {
+	it('a default --rm run carries --label anon-pi.key= (so forward finds it while up)', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		const r = run(['recon', '-p', 'x'], {home});
+		expect(r.status).toBe(0);
+		const argv = lastArgv();
+		expect(argv[0]).toBe('run');
+		const li = argv.indexOf('--label');
+		expect(li).toBeGreaterThan(-1);
+		expect(argv[li + 1]).toMatch(/^anon-pi\.key=/);
+		// still a throwaway run (the label is additive, --rm stays)
+		expect(argv).toContain('--rm');
+	});
+});
+
+describe('forward / ports host-access verbs', () => {
+	it('forward with no running container errors with clear guidance', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		const r = run(['forward', '--port', '3001'], {home});
+		expect(r.status).toBe(1);
+		expect(r.stderr).toContain('no running anon-pi container');
+	});
+
+	it('ports with no running container errors the same way', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		const r = run(['ports'], {home});
+		expect(r.status).toBe(1);
+		expect(r.stderr).toContain('no running anon-pi container');
+	});
+
+	it('a numeric positional is a PROJECT filter, not a port', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		const r = run(['forward', '3001'], {home});
+		expect(r.status).toBe(1);
+		// filtered by project "3001", so the scope names it (never treated as a port)
+		expect(r.stderr).toContain('"3001"');
+	});
+
+	it('forward --help / ports --help print usage', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		const f = run(['forward', '--help'], {home});
+		expect(f.status).toBe(0);
+		expect(f.stdout).toContain('anon-pi forward');
+		expect(f.stdout).toContain('--port');
+		const p = run(['ports', '--help'], {home});
+		expect(p.status).toBe(0);
+		expect(p.stdout).toContain('anon-pi ports');
+	});
+
+	it('a bad --port is rejected before any netcage call', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		const r = run(['forward', '--port', '99999'], {home});
+		expect(r.status).toBe(1);
+		expect(r.stderr.toLowerCase()).toContain('invalid --port');
+	});
+});
+
 describe('machine.json image + -m machine selection', () => {
 	it('-m <machine> mounts THAT machine home and uses its machine.json image', () => {
 		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));

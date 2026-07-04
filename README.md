@@ -62,6 +62,8 @@ anon-pi --list-models          list the models pi sees (also --models; no projec
 anon-pi pi <pi-args…>          run pi with ANY args and no project (the passthrough)
 anon-pi --version              print anon-pi's version (also -V)
 anon-pi --shell [<project>]    a jailed bash (at ~, or cd'd into <project>) - the project-hopper
+anon-pi forward [<p>] [--port …]  open a host port onto a running container's in-jail server
+anon-pi ports [<project>]      list a running container's open in-jail TCP listeners
 anon-pi -m <machine> [<p>]     the same, on <machine> (its own image + home + conversations)
 anon-pi --mount <parent> [<p>] root at a HOST parent folder instead of the projects root
 anon-pi init                   onboard: verify your proxy, capture your local model, pick an image
@@ -86,6 +88,8 @@ Every subcommand carries its own help: `anon-pi --help` (the launch surface), `a
 | Fork a session into a project | `anon-pi <project> --fork <id>` (`.` for the root; created on demand) |
 | Run a one-shot prompt (scriptable) | `anon-pi <project> -p "…"` |
 | Hop between projects / poke the box | `anon-pi --shell` then `cd /projects/<p> && pi` |
+| Open an in-jail server on the host | `anon-pi forward <project> --port 3001` (or `8080:3001`) |
+| See a container's open in-jail ports | `anon-pi ports <project>` |
 | A scratch pi not tied to a subfolder | `anon-pi .` |
 | Use a separate anonymized environment | `anon-pi -m <machine> <project>` |
 | Jail pi into a host folder you edit with host tools | `anon-pi --mount <host-parent> <subfolder>` |
@@ -122,6 +126,34 @@ anon-pi --shell recon      # bash cd'd into /projects/recon
 ```
 
 From inside the shell you can `cd` between `/projects/*` and run `pi` yourself in whichever one you want. The shell forwards no arguments (`anon-pi --shell recon extra` is an error); run pi from inside it instead. Same forced-egress jail as a pi launch.
+
+### Reaching an in-jail server from the host (`forward` / `ports`)
+
+A jailed tool sometimes runs a server you want to open on the host: a dev/preview server on `:3001`, a local API. The jail deliberately publishes no ports (that would open an inbound path around the forced egress), so host access is a separate, explicit verb, the way `kubectl port-forward` / `ssh -L` work. anon-pi wraps netcage's `forward` so you never handle the raw container name (needs **netcage >= 0.9.0**):
+
+```sh
+# terminal 1: a running session with a server inside (e.g. pi started `pnpm dev` on :3001)
+anon-pi recon
+# terminal 2: open that port on your host
+anon-pi forward recon --port 3001        # host 127.0.0.1:3001 -> jail 3001, until Ctrl-C
+```
+
+The port is host-first, like docker/kubectl, so you can bind it on a **different host port**:
+
+```sh
+anon-pi forward recon --port 8080:3001   # host 8080 -> jail 3001
+anon-pi forward recon --port 3001 --bind 0.0.0.0   # LAN-visible (netcage warns; loopback is the default)
+```
+
+The positional is always the **project** (a numeric name like `3001` is a project, never a port), and it only **filters** which containers are offered. If several sessions match (you can run `anon-pi recon` in two terminals), anon-pi shows a picker, each row annotated with that container's open in-jail ports.
+
+**Don't know the port?** Omit `--port` and anon-pi lists the container's open listeners and prompts you (defaulting to the obvious one), then asks whether to expose it on a different host port. You can also just list them:
+
+```sh
+anon-pi ports recon      # the container's open in-jail TCP listeners
+```
+
+`ports` reads the jail's listeners **image-independently** (netcage reads `/proc/net/tcp*` via the sidecar), so it works even for a minimal image with no `ss`/`netstat`/`nc`. An explicit `--port` may name a port that **isn't open yet**: the forward binds the host side immediately and reaches into the jail on the first connection, so you can set it up before the server starts. Forwarding works for both throwaway (`--rm`) and `--keep` containers, for as long as the container is running.
 
 ### Headless / one-shot
 
