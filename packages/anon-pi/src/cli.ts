@@ -1848,11 +1848,11 @@ function detectProxyViaNetcage(): NetcageDetectProxy | undefined {
  * (`--root <graphroot>`), NOT the operator's default rootless store, so a plain
  * `podman build` would put the image where `netcage run` cannot see it (it would
  * try to pull the `localhost/…` ref and fail). We therefore:
- *   1. PREFER `netcage build` when netcage exposes it (future-proof: netcage owns
- *      its store + graphroot, no path hardcoded here); else
+ *   1. PREFER `netcage build` when netcage exposes it (netcage >= 0.7.1; netcage
+ *      owns its store + graphroot, no path hardcoded here); else
  *   2. `podman build` into the default store, then `podman save | podman --root
- *      <graphroot> load` to copy it into netcage's store (the interim workaround
- *      until netcage ships a build/load verb).
+ *      <graphroot> load` to copy it into netcage's store (the fallback for an
+ *      older netcage without the build/load verbs).
  * Streams output (inherited stdio) so the user sees the build. Returns true on
  * success. The build CONTEXT is the Dockerfile's own directory.
  */
@@ -1901,8 +1901,8 @@ function buildImage(dockerfile: string, tag: string): boolean {
  * Copy a locally-built image (in the default podman store) INTO netcage's
  * private graphroot store, so `netcage run <tag>` finds it without a pull. Uses
  * `podman save <tag> | podman --root <graphroot> load`. Best-effort: on failure
- * it warns (the image still exists in the default store; a future `netcage
- * build`/`load` verb removes this dance). Returns true on success.
+ * it warns (the image still exists in the default store; on netcage >= 0.7.1 the
+ * `netcage build`/`load` verbs remove this dance). Returns true on success.
  */
 function loadImageIntoNetcageStore(tag: string): boolean {
 	const graphroot = resolveNetcageGraphroot(process.env);
@@ -2095,6 +2095,13 @@ function withKeyLabel(netcageArgs: string[], key: string): string[] {
 
 /** Spawn netcage with inherited stdio; propagate its exit code. */
 function spawnNetcage(netcageArgs: string[]): number {
+	// Explain the pause: netcage sets up the jail (netns, firewall, DNS, container
+	// start) BEFORE pi paints, so without this line the user sees only a blinking
+	// cursor. Goes to stderr so it never pollutes any piped stdout, and is
+	// transient (pi typically clears the screen when its TUI comes up).
+	process.stderr.write(
+		'anon-pi: entering the netcage jail (setting up forced-egress)\u2026\n',
+	);
 	const res = spawnSync('netcage', netcageArgs, {stdio: 'inherit'});
 	if (res.error) {
 		process.stderr.write(
