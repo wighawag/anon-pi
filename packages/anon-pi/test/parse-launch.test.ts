@@ -181,17 +181,16 @@ describe('parseLaunchArgs — reserved-name guard + validation', () => {
 });
 
 describe('parseLaunchArgs — pi session resume (no project)', () => {
-	// `anon-pi --session <id>` (and --resume/--continue/--fork) forward to pi with
-	// NO anon-pi project: pi resolves the session by id + switches to its cwd. So
-	// pi's own hint `pi --session <id>` is usable as `anon-pi --session <id>`.
+	// The RESUME family (`--session`/`--session-id`/`--resume`/`-r <id>`) forwards
+	// to pi with NO anon-pi project: the CLI resolves the session's cwd from the
+	// store and cds there so pi resumes in place. So pi's own hint `pi --session
+	// <id>` is usable as `anon-pi --session <id>`.
 	for (const flags of [
 		['--session', '019f2bde-fd47'],
 		['--session-id', 'abc'],
 		['--resume'],
 		['-r'],
-		['--continue'],
-		['-c'],
-		['--fork', 'abc123'],
+		['--resume', 'abc123'],
 	]) {
 		it(`\`${flags.join(' ')}\` is a no-project pi launch that forwards to pi`, () => {
 			const p = parseLaunchArgs(flags);
@@ -200,6 +199,50 @@ describe('parseLaunchArgs — pi session resume (no project)', () => {
 			expect(p.piArgs).toEqual(flags);
 		});
 	}
+
+	// --fork / --continue REFUSE the no-project position: they would land a new /
+	// newest conversation in the projects root by surprise. The user must name a
+	// project (`.` for the root; created on demand).
+	for (const flags of [
+		['--fork', 'abc123'],
+		['--fork'],
+		['--continue'],
+		['-c'],
+	]) {
+		it(`\`${flags.join(' ')}\` with no project is refused (needs a project)`, () => {
+			expect(() => parseLaunchArgs(flags)).toThrow(AnonPiError);
+			expect(() => parseLaunchArgs(flags)).toThrow(/needs a project/);
+		});
+	}
+
+	it('the --fork refusal names a copy-pasteable project example with the id', () => {
+		expect(() => parseLaunchArgs(['--fork', 'sess-1'])).toThrow(
+			/anon-pi <project> --fork sess-1/,
+		);
+		expect(() => parseLaunchArgs(['--fork', 'sess-1'])).toThrow(
+			/anon-pi \. --fork sess-1/,
+		);
+	});
+
+	it('-c is quoted as --continue in its no-project refusal', () => {
+		expect(() => parseLaunchArgs(['-c'])).toThrow(/--continue needs a project/);
+	});
+
+	// --fork / --continue DO work once a project (or `.`) is given: the project is
+	// created on demand, so the fork lands in a known directory.
+	it('--fork AFTER a project is forwarded (fork into that project)', () => {
+		const p = parseLaunchArgs(['newproj', '--fork', 'sess-1']);
+		expect(p.mode).toBe('pi');
+		expect(p.project).toBe('newproj');
+		expect(p.piArgs).toEqual(['--fork', 'sess-1']);
+	});
+
+	it('--continue AFTER the `.` root is forwarded (continue at the root)', () => {
+		const p = parseLaunchArgs(['.', '--continue']);
+		expect(p.mode).toBe('pi');
+		expect(p.project).toBe('.');
+		expect(p.piArgs).toEqual(['--continue']);
+	});
 
 	it('honours -m before a session flag (picks the machine)', () => {
 		const p = parseLaunchArgs(['-m', 'webveil', '--session', 'xyz']);
