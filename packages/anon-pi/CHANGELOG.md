@@ -1,5 +1,48 @@
 # anon-pi
 
+## 0.6.0
+
+### Minor Changes
+
+- 33c5b3f: First-run onboarding + a projects-root step in `init`.
+
+  - **Auto-onboard on first launch.** Running a launch (e.g. `anon-pi` or
+    `anon-pi <project>`) with no `config.json` yet now shows a short welcome and
+    runs `anon-pi init` automatically, then continues into the launch — instead of
+    failing deep with the bare "set `ANON_PI_PROXY`" guidance the first time. It
+    only auto-onboards on an interactive terminal; a script (no TTY) still gets the
+    fail-closed proxy error, and an env-driven run (`ANON_PI_PROXY` set) skips
+    onboarding entirely.
+  - **`init` gained a projects-root step (now 4 steps).** After the image step,
+    `init` asks for the projects root — the host folder mounted at `/projects`
+    where bare `anon-pi` looks for projects — defaulting to `~/.anon-pi/projects/`.
+    Point it at your own dev folder to jail pi into files you edit with host tools;
+    `--mount <parent>` still overrides it per-launch. Accepting the default leaves
+    `config.json` clean (no explicit `projects` key).
+
+- 2722779: `init` now imports real models for the local endpoint (and sets a default).
+
+  Previously the generated `models.json` had an empty models list, so pi saw the
+  provider but had no pickable model. The local-model step now:
+
+  - **Merges two endpoint-scoped sources**: the provider in your own
+    `~/.pi/agent/models.json` whose baseUrl matches the endpoint (marked
+    `[configured]` — your hand-tuned entries, with their `contextWindow`/
+    `maxTokens`/etc. preserved) and the endpoint's live `GET /v1/models` (marked
+    `[server]`). ONLY the provider served by the endpoint (the one
+    `--allow-direct` hole) is ever read, so no other provider — and no other key —
+    can enter the seed.
+  - **Lets you choose** which models to import (Enter/`c` = all configured, `a` =
+    all server+configured, numbers, `s` = skip) and **which is the default**.
+  - Writes `models.json` (the chosen entries under the neutral `local` provider)
+    **and** a settings seed that the first-launch promotion merges into the home's
+    `settings.json` — setting `defaultProvider`/`defaultModel`/`enabledModels`
+    without clobbering image-staged packages/extensions.
+  - **Refuses a real apiKey by default**: if the matching host provider carries a
+    non-benign apiKey, init aborts (a host credential should not enter the anon
+    home) unless you pass `--force-allow-local-llm-api-key`, which carries it
+    through with a warning.
+
 ## 0.5.0
 
 ### Minor Changes
