@@ -32,6 +32,8 @@ import {
 	machineDir,
 	machineHomeDir,
 	machineJsonPath,
+	resolveDeleteHome,
+	resolveDeleteProject,
 	parseConfigJson,
 	parseLaunchArgs,
 	parseMachineArgs,
@@ -75,6 +77,18 @@ function main(argv: string[]): number {
 	// a project named "machine". Everything else is a launch.
 	if (args[0] === 'machine') {
 		return runMachine(args.slice(1));
+	}
+
+	// The destructive cleanup verbs (replacing the old `--fresh`). Dispatched
+	// BEFORE the launch grammar: they are top-level data verbs, not launch flags,
+	// each with the confirm/`--yes`/non-TTY discipline. `--delete-home` takes an
+	// OPTIONAL machine (default machine when omitted); `--delete-project` REQUIRES
+	// a project.
+	if (args[0] === '--delete-home') {
+		return runDeleteHome(args.slice(1));
+	}
+	if (args[0] === '--delete-project') {
+		return runDeleteProject(args.slice(1));
 	}
 
 	let parsed: ParsedLaunch;
@@ -419,6 +433,199 @@ function machineRm(env: AnonPiEnv, name: string, yes: boolean): number {
 		`anon-pi: removed machine ${JSON.stringify(name)} (${dir}).\n`,
 	);
 	return 0;
+}
+
+// --- the destructive cleanup verbs (thin I/O over the pure resolvers) --------
+//
+// `--delete-home [<machine>]` and `--delete-project <project>` REPLACE the old
+// `--fresh`. The pure module resolves the affected host paths (resolveDeleteHome
+// / resolveDeleteProject); the CLI does ONLY the I/O: read config (for the
+// default machine + the projects root), filter the resolved paths to those that
+// exist, run the shared confirm/`--yes`/non-TTY discipline, then `rm`.
+
+/**
+ * Parse the shared `[<positional>] [--yes|-y]` tail of a data verb. Returns the
+ * (optional) positional (a machine or project name) + the `--yes` flag, or an
+ * AnonPiError-style exit for an unknown flag / an extra positional.
+ */
+function parseDeleteArgs(
+	args: string[],
+	verb: string,
+): {name?: string; yes: boolean} | number {
+	let name: string | undefined;
+	let yes = false;
+	for (const a of args) {
+		if (a === '--yes' || a === '-y') {
+			yes = true;
+			continue;
+		}
+		if (a.startsWith('-')) {
+			process.stderr.write(
+				`anon-pi: unknown option for ${verb}: ${a}. Run \`anon-pi --help\`.\n`,
+			);
+			return 1;
+		}
+		if (name !== undefined) {
+			process.stderr.write(
+				`anon-pi: ${verb} takes one name, got extra: ${a}. Run \`anon-pi --help\`.\n`,
+			);
+			return 1;
+		}
+		name = a;
+	}
+	return {name, yes};
+}
+
+/**
+ * Run the confirm/`--yes`/non-TTY discipline for a destructive delete: `--yes`
+ * skips the prompt; a non-TTY WITHOUT `--yes` ABORTS (never deletes unprompted
+ * in a script); a TTY prompts `[y/N]`. Returns true to PROCEED, false to abort
+ * (the caller has already printed nothing; this prints the abort/refusal note).
+ */
+function confirmDelete(what: string, yes: boolean): boolean {
+	if (yes) return true;
+	if (!process.stdin.isTTY) {
+		process.stderr.write(
+			`anon-pi: refusing to delete ${what} without a TTY to confirm. ` +
+				'Re-run with `--yes` to delete it non-interactively.\n',
+		);
+		return false;
+	}
+	const answer = promptLine(`Delete ${what}? [y/N] `);
+	if (answer === undefined || !/^y(es)?$/i.test(answer.trim())) {
+		process.stderr.write('anon-pi: aborted; nothing deleted.\n');
+		return false;
+	}
+	return true;
+}
+
+/**
+ * `--delete-home [<machine>]`: delete ONE machine's HOME (config + convos + shell
+ * env), keeping its machine.json image pin (so it can be relaunched to reseed a
+ * fresh home) and ALL project files (they live under the projects root). Default
+ * machine (config.defaultMachine, else the built-in DEFAULT_MACHINE) when the
+ * name is omitted. Confirm / `--yes` / non-TTY abort.
+ */
+function runDeleteHome(args: string[]): number {
+	if (args.includes('--help') || args.includes('-h')) {
+		process.stdout.write(HELP);
+		return 0;
+	}
+	const env = envFromProcess(process.env);
+	const parsed = parseDeleteArgs(args, '--delete-home');
+	if (typeof parsed === 'number') return parsed;
+
+	const config = readJsonConfig(env);
+	const machine = parsed.name ?? config.defaultMachine ?? DEFAULT_MACHINE;
+
+	let plan;
+	try {
+		plan = resolveDeleteHome(env, machine);
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+
+	if (!existsSync(plan.home)) {
+		process.stderr.write(
+			`anon-pi: no home for machine ${JSON.stringify(plan.machine)} (${plan.home}); nothing to delete.\n`,
+		);
+		return 1;
+	}
+
+	if (
+		!confirmDelete(
+			`machine ${JSON.stringify(plan.machine)} home (conversations + config) at ${plan.home}`,
+			parsed.yes,
+		)
+	) {
+		return 1;
+	}
+
+	rmSync(plan.home, {recursive: true, force: true});
+	process.stdout.write(
+		`anon-pi: deleted machine ${JSON.stringify(plan.machine)} home (${plan.home}). ` +
+			'Its image pin is kept; relaunch to seed a fresh home.\n',
+	);
+	return 0;
+}
+
+/**
+ * `--delete-project <project>`: delete the project's FILES (its folder under the
+ * resolved projects root) AND that project's per-machine session dir in EVERY
+ * machine home (the machine-invariant slug), keeping the homes otherwise intact.
+ * Confirm / `--yes` / non-TTY abort. The project name is REQUIRED.
+ */
+function runDeleteProject(args: string[]): number {
+	if (args.includes('--help') || args.includes('-h')) {
+		process.stdout.write(HELP);
+		return 0;
+	}
+	const env = envFromProcess(process.env);
+	const parsed = parseDeleteArgs(args, '--delete-project');
+	if (typeof parsed === 'number') return parsed;
+	if (parsed.name === undefined) {
+		process.stderr.write(
+			'anon-pi: --delete-project needs a <project>. Run `anon-pi --help`.\n',
+		);
+		return 1;
+	}
+
+	const config = readJsonConfig(env);
+	// The RESOLVED projects root (config/env override, else the built-in). No
+	// --mount here: a data verb targets the durable projects root, not a per-run
+	// host parent.
+	const projectsRoot = resolveProjectsRoot({env, config});
+	const machines = listMachineNames(env);
+
+	let plan;
+	try {
+		plan = resolveDeleteProject({
+			env,
+			project: parsed.name,
+			projectsRoot,
+			machines,
+		});
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+
+	// Only the paths that actually exist: the folder (maybe absent) + whichever
+	// machine homes hold this project's session dir.
+	const targets = [plan.folder, ...plan.sessions].filter((p) => existsSync(p));
+	if (targets.length === 0) {
+		process.stderr.write(
+			`anon-pi: no files or sessions found for project ${JSON.stringify(plan.project)} ` +
+				`(looked in ${plan.folder} and each machine home); nothing to delete.\n`,
+		);
+		return 1;
+	}
+
+	const sessionCount = targets.length - (existsSync(plan.folder) ? 1 : 0);
+	if (
+		!confirmDelete(
+			`project ${JSON.stringify(plan.project)}: its files (${plan.folder}) ` +
+				`and ${sessionCount} per-machine session dir(s)`,
+			parsed.yes,
+		)
+	) {
+		return 1;
+	}
+
+	for (const p of targets) rmSync(p, {recursive: true, force: true});
+	process.stdout.write(
+		`anon-pi: deleted project ${JSON.stringify(plan.project)} ` +
+			`(files + ${sessionCount} per-machine session dir(s)). The machine homes are kept.\n`,
+	);
+	return 0;
+}
+
+/** List machine names (readdir of machines/), or [] if the dir is absent. */
+function listMachineNames(env: AnonPiEnv): string[] {
+	const root = join(resolveAnonPiHome(env), 'machines');
+	if (!existsSync(root)) return [];
+	return readdirSync(root, {withFileTypes: true})
+		.filter((d) => d.isDirectory())
+		.map((d) => d.name);
 }
 
 /**

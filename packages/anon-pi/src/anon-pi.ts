@@ -204,9 +204,122 @@ export function machineJsonPath(env: AnonPiEnv, name: string): string {
 	return join(machineDir(env, name), 'machine.json');
 }
 
+/** The sessions dirname pi keeps its per-cwd conversation dirs under (in the agent dir). */
+export const SESSIONS_DIRNAME = 'sessions';
+
+/**
+ * A machine's HOST pi agent dir: the host side of the container's
+ * CONTAINER_AGENT_DIR (`/root/.pi/agent`, since the home is bind-mounted at
+ * /root). i.e. <machineHome>/.pi/agent. Where pi's config + sessions live.
+ */
+export function machineAgentDir(env: AnonPiEnv, name: string): string {
+	return join(machineHomeDir(env, name), '.pi', 'agent');
+}
+
+/**
+ * A machine's HOST pi sessions dir: <machineAgentDir>/sessions. Each per-cwd
+ * conversation is a slug-named subdir here (projectSessionSlug for a project).
+ */
+export function machineSessionsDir(env: AnonPiEnv, name: string): string {
+	return join(machineAgentDir(env, name), SESSIONS_DIRNAME);
+}
+
+/**
+ * The HOST session dir a given project's conversation occupies in a given
+ * machine's home: <machineSessionsDir>/<projectSessionSlug>. Because the slug is
+ * MACHINE-INVARIANT (pi keys by the `/projects/<name>` cwd, identical on every
+ * machine), the SAME shared project has this dir in each machine that used it.
+ * Validates the project name (rejecting traversal) via projectSessionSlug.
+ */
+export function machineProjectSessionDir(
+	env: AnonPiEnv,
+	machine: string,
+	project: string,
+): string {
+	return join(machineSessionsDir(env, machine), projectSessionSlug(project));
+}
+
 /** The built-in default global projects root: <home>/projects. */
 export function builtinProjectsRoot(env: AnonPiEnv): string {
 	return join(resolveAnonPiHome(env), 'projects');
+}
+
+// --- The destructive cleanup verbs' affected-path resolvers ------------------
+//
+// `--delete-home [<machine>]` and `--delete-project <project>` replace the old
+// `--fresh`. This module owns only the PURE affected-path resolution (which host
+// paths a delete would remove); the CLI does the confirm prompt + the actual
+// `rm` (cli-delete.test.ts). Per the prd behaviour table:
+//   - delete-home drops ONE machine's home (config + convos + shell env) and
+//     keeps the project FILES (they live under the projects root, not the home);
+//   - delete-project drops that project's FILES and its per-machine session dir
+//     in EVERY machine home (the machine-invariant slug), keeping the homes.
+
+/** The affected-path plan for `--delete-home <machine>`. */
+export interface DeleteHomePlan {
+	/** The machine whose home is dropped. */
+	machine: string;
+	/**
+	 * The single dir removed: the machine's persistent HOST home
+	 * (machineHomeDir). The machine dir's machine.json (its image pin) is KEPT, so
+	 * the machine can be relaunched to seed a FRESH home.
+	 */
+	home: string;
+}
+
+/**
+ * PURE: resolve the affected path for `--delete-home <machine>`: the machine's
+ * HOME dir only (config + convos + shell env), NOT the whole machine dir, so the
+ * image pin (machine.json) survives a re-seed. Validates the machine name
+ * (rejecting traversal) via machineHomeDir's join being under a validated name;
+ * we validate explicitly here so the plan itself is a safe single segment.
+ */
+export function resolveDeleteHome(
+	env: AnonPiEnv,
+	machine: string,
+): DeleteHomePlan {
+	validateName(machine, 'machine');
+	return {machine, home: machineHomeDir(env, machine)};
+}
+
+/** The affected-path plan for `--delete-project <project>`. */
+export interface DeleteProjectPlan {
+	/** The project whose files + per-machine sessions are dropped. */
+	project: string;
+	/** The project's files: <projectsRoot>/<project> (the host folder). */
+	folder: string;
+	/**
+	 * The per-machine session dirs for this project's (machine-invariant) slug,
+	 * ONE per supplied machine, in the SUPPLIED order. The homes themselves are
+	 * kept; only these slug dirs are dropped. The CLI supplies the machine names
+	 * (readdir of machines/) and skips any that do not exist on disk.
+	 */
+	sessions: string[];
+}
+
+/**
+ * PURE: resolve the affected paths for `--delete-project <project>`: the
+ * project's files under the RESOLVED projects root, plus that project's session
+ * dir in each SUPPLIED machine home (the machine-invariant slug). Validates the
+ * project name (rejecting traversal) so both the folder join and every session
+ * join stay inside their roots. The homes are NOT targeted (only the per-project
+ * slug dir inside each), matching the prd behaviour table.
+ */
+export function resolveDeleteProject(args: {
+	env: AnonPiEnv;
+	project: string;
+	/** The resolved projects root (host dir mounted at /projects). */
+	projectsRoot: string;
+	/** The machine names whose homes may hold this project's session dir. */
+	machines: readonly string[];
+}): DeleteProjectPlan {
+	const {env, project, projectsRoot, machines} = args;
+	validateName(project, 'project');
+	return {
+		project,
+		folder: projectHostDir(projectsRoot, project),
+		sessions: machines.map((m) => machineProjectSessionDir(env, m, project)),
+	};
 }
 
 // --- Name validation + the "." root token ------------------------------------
@@ -1405,6 +1518,8 @@ USAGE
   anon-pi --mount <parent> [<p>] root at a HOST parent folder instead of the projects root
   anon-pi init                   onboard: verify your proxy, capture your local model, pick an image
   anon-pi machine …              manage machines (create / list / set-image / rm)
+  anon-pi --delete-home [<m>]    delete a machine's home (config + convos); keep its image pin + files
+  anon-pi --delete-project <p>   delete a project's files + its per-machine sessions; keep the homes
 
   <project>   a folder under the projects root (mounted at ${CONTAINER_PROJECTS_ROOT}; pi's cwd). \`.\` means
               the root itself (a scratch pi at ${CONTAINER_PROJECTS_ROOT}, ${CONTAINER_MOUNT_ROOT} for --mount, or ~).
