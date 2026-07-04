@@ -682,7 +682,7 @@ function runMachine(machineArgs: string[]): number {
 			case 'rm':
 				return machineRm(env, cmd.name, cmd.yes);
 			case 'snapshot':
-				return machineSnapshot(env, cmd.source, cmd.name, cmd.imageTag);
+				return machineSnapshot(env, cmd.name, cmd.machine, cmd.imageTag);
 		}
 	} catch (e) {
 		return reportAnonPiError(e);
@@ -831,21 +831,23 @@ function machineRm(env: AnonPiEnv, name: string, yes: boolean): number {
 }
 
 /**
- * `machine snapshot <source> <new-name> [--image-tag <ref>]`: commit the source
- * machine's RUNNING jailed container into a new image and create <new-name>
- * pinned to it. The user does interactive system work in a session (e.g.
- * `sudo apt install`), then, WITHOUT having exited (the default `--rm` would
- * have destroyed the container), preserves that exact environment as a new
- * machine. podman pauses the container during commit and unpauses, so the live
- * session survives. The new machine gets a FRESH home (image and home are
- * orthogonal; snapshot keeps the SOFTWARE, not the conversations). Forced egress
- * is untouched: commit is a local podman op, and the snapshot machine relaunches
+ * `machine snapshot <new-name> [-m <machine>] [--image-tag <ref>]`: commit a
+ * RUNNING jailed container into a new image and create <new-name> pinned to it.
+ * The user does interactive system work in a session (e.g. `sudo apt install`),
+ * then, WITHOUT having exited (the default `--rm` would have destroyed the
+ * container), preserves that exact environment as a new machine. The container
+ * to commit is AUTO-DETECTED from the running anon-pi containers (a picker when
+ * several are up); `-m <machine>` is an OPTIONAL filter, not a required source.
+ * podman pauses the container during commit and unpauses, so the live session
+ * survives. The new machine gets a FRESH home (image and home are orthogonal;
+ * snapshot keeps the SOFTWARE, not the conversations). Forced egress is
+ * untouched: commit is a local podman op, and the snapshot machine relaunches
  * through the same forced-egress jail.
  */
 function machineSnapshot(
 	env: AnonPiEnv,
-	source: string,
 	name: string,
+	machine: string | undefined,
 	imageTag: string | undefined,
 ): number {
 	// Refuse to clobber an existing target machine FIRST (before netcage / any
@@ -862,9 +864,9 @@ function machineSnapshot(
 
 	if (!hasNetcage()) return netcageMissing();
 
-	// Resolve the ONE running anon-pi container for the SOURCE machine (reuse the
-	// forward/ports running-container resolution, scoped by machine).
-	const target = resolveRunningContainer(source, 'snapshot');
+	// Auto-detect the running anon-pi container to commit (optionally filtered by
+	// -m <machine>); reuses the forward/ports running-container resolution.
+	const target = resolveRunningContainer(machine, 'snapshot');
 	if (target === undefined) return 1;
 
 	const imageRef = imageTag ?? snapshotImageRef(name, new Date());
@@ -887,7 +889,7 @@ function machineSnapshot(
 		serializeMachineJson({image: imageRef}),
 	);
 	process.stdout.write(
-		`anon-pi: snapshotted machine ${JSON.stringify(source)} into ${JSON.stringify(name)} ` +
+		`anon-pi: snapshotted ${target.name} into machine ${JSON.stringify(name)} ` +
 			`(image ${imageRef}) at ${targetDir}.\n` +
 			`Its home seeds fresh on first launch, e.g. \`anon-pi -m ${name} --shell\`.\n`,
 	);
@@ -2114,22 +2116,24 @@ USAGE
   anon-pi machine list                            list machines and their images
   anon-pi machine set-image <name> <ref>          re-pin the image (WARNS; no reseed)
   anon-pi machine rm <name> [--yes]               delete the machine + its home
-  anon-pi machine snapshot <machine> <new-name> [--image-tag <ref>]
-                                                  commit <machine>'s RUNNING container
-                                                  into a new image + create <new-name>
+  anon-pi machine snapshot <new-name> [-m <machine>] [--image-tag <ref>]
+                                                  commit a RUNNING container into a
+                                                  new image + create <new-name>
 
 A machine is an image + a persistent host home (machines/<name>/{machine.json,home/}).
 The home is seeded on FIRST LAUNCH, not at create. \`set-image\` re-pins only and
 warns (the home was built for the old image); \`rm\` confirms on a TTY, skips with
 \`--yes\`, and aborts non-interactively without it.
 
-\`snapshot\` captures the CURRENT filesystem of <machine>'s running jailed
-container (e.g. after \`sudo apt install\`) into a new image and creates
-<new-name> pinned to it, so you can preserve an environment you built
-interactively WITHOUT having pre-decided \`--keep\`. The container must still be
-RUNNING (do not exit the session); podman pauses it briefly during the commit.
-The new machine gets a FRESH home (the image is the software, the home is
-separate). Same forced-egress jail on relaunch.
+\`snapshot\` captures the CURRENT filesystem of a RUNNING jailed container (e.g.
+after \`sudo apt install\`) into a new image and creates <new-name> pinned to it,
+so you can preserve an environment you built interactively WITHOUT having
+pre-decided \`--keep\`. The container is auto-detected from the running anon-pi
+containers (a picker when several are up); \`-m <machine>\` is an OPTIONAL filter,
+not a required source. The container must still be RUNNING (do not exit the
+session); podman pauses it briefly during the commit. The new machine gets a
+FRESH home (the image is the software, the home is separate). Same forced-egress
+jail on relaunch.
 `;
 
 // --- impure helpers ---------------------------------------------------------
@@ -2303,14 +2307,16 @@ function resolveForwardTarget(
 }
 
 /**
- * Resolve the ONE running anon-pi container for a MACHINE (no project scope, no
- * port hints), for `machine snapshot`. Filters the running managed containers by
- * machine: 0 => error (start a session first), 1 => it, many => an arrow-key
- * picker labelled by each container's project + name. Returns undefined on
- * no-match or a cancelled pick (reason printed). TTY needed only for the picker.
+ * Resolve the ONE running anon-pi container to act on, for `machine snapshot`.
+ * The container is what matters; `machine` is an OPTIONAL narrowing filter
+ * (undefined = every running anon-pi container qualifies). 0 => error (start a
+ * session first), 1 => it, many => an arrow-key picker labelled by each
+ * container's machine + project + name (so a cross-machine list is
+ * distinguishable). Returns undefined on no-match or a cancelled pick (reason
+ * printed). TTY needed only for the picker.
  */
 function resolveRunningContainer(
-	machine: string,
+	machine: string | undefined,
 	verb: string,
 ): ManagedContainer | undefined {
 	const matches = resolveManagedMatches({
@@ -2318,10 +2324,12 @@ function resolveRunningContainer(
 		machine,
 		project: undefined,
 	});
+	const scope =
+		machine !== undefined ? ` for machine ${JSON.stringify(machine)}` : '';
 	if (matches.length === 0) {
 		process.stderr.write(
-			`anon-pi: no running anon-pi container for machine ${JSON.stringify(machine)}. ` +
-				`Start a session (e.g. \`anon-pi -m ${machine} --shell\`), do your work, and ` +
+			`anon-pi: no running anon-pi container${scope}. ` +
+				'Start a session (e.g. `anon-pi <project>`), do your work, and ' +
 				`WITHOUT exiting run \`anon-pi machine ${verb}\` from another terminal.\n`,
 		);
 		return undefined;
@@ -2330,15 +2338,20 @@ function resolveRunningContainer(
 
 	if (!process.stdin.isTTY) {
 		process.stderr.write(
-			`anon-pi: ${matches.length} running containers on machine ${JSON.stringify(machine)}; ` +
-				'a terminal is needed to pick one.\n',
+			`anon-pi: ${matches.length} running containers${scope}; a terminal is needed ` +
+				'to pick one (or narrow with `-m <machine>`).\n',
 		);
 		return undefined;
 	}
 	const entries: MenuEntry[] = matches.map((c) => {
-		const proj = keyProject(parseKeptKey(c.key));
+		const f = parseKeptKey(c.key);
+		const proj = keyProject(f);
 		const label = proj === '' ? '(shell)' : proj;
-		return {kind: 'project', project: c.ref, label: `${label} [${c.name}]`};
+		return {
+			kind: 'project',
+			project: c.ref,
+			label: `${f.machine ?? '?'} / ${label} [${c.name}]`,
+		};
 	});
 	const picked = select(entries, {
 		header: `anon-pi: pick a container to ${verb} (\u2191/\u2193 move, Enter select, Ctrl-C quit)`,

@@ -106,44 +106,51 @@ describe('parseMachineArgs — the verb grammar', () => {
 		);
 	});
 
-	it('snapshot <machine> <new-name> validates both names, imageTag undefined', () => {
-		expect(parseMachineArgs(['snapshot', 'recon', 'recon-net'])).toEqual({
+	it('snapshot <new-name>: the sole positional is the new name; machine undefined', () => {
+		expect(parseMachineArgs(['snapshot', 'recon-net'])).toEqual({
 			verb: 'snapshot',
-			source: 'recon',
 			name: 'recon-net',
+			machine: undefined,
 			imageTag: undefined,
 		});
 	});
 
+	it('snapshot -m/--machine is an OPTIONAL filter (validated), not a source', () => {
+		expect(parseMachineArgs(['snapshot', 'recon-net', '-m', 'recon'])).toEqual({
+			verb: 'snapshot',
+			name: 'recon-net',
+			machine: 'recon',
+			imageTag: undefined,
+		});
+		expect(
+			parseMachineArgs(['snapshot', 'recon-net', '--machine', 'recon']).machine,
+		).toBe('recon');
+	});
+
 	it('snapshot --image-tag <ref> overrides the generated image name', () => {
 		expect(
-			parseMachineArgs([
-				'snapshot',
-				'recon',
-				'recon-net',
-				'--image-tag',
-				'my/snap:1',
-			]),
+			parseMachineArgs(['snapshot', 'recon-net', '--image-tag', 'my/snap:1']),
 		).toEqual({
 			verb: 'snapshot',
-			source: 'recon',
 			name: 'recon-net',
+			machine: undefined,
 			imageTag: 'my/snap:1',
 		});
 	});
 
-	it('snapshot rejects a missing name, an extra positional, an empty --image-tag, and bad names', () => {
-		expect(() => parseMachineArgs(['snapshot', 'recon'])).toThrow(AnonPiError);
-		expect(() => parseMachineArgs(['snapshot', 'recon', 'a', 'b'])).toThrow(
-			/got extra/,
+	it('snapshot rejects a missing name, an extra positional, empty -m/--image-tag, and bad names', () => {
+		expect(() => parseMachineArgs(['snapshot'])).toThrow(/needs a <new-name>/);
+		expect(() => parseMachineArgs(['snapshot', 'a', 'b'])).toThrow(/got extra/);
+		expect(() => parseMachineArgs(['snapshot', 'a', '-m'])).toThrow(
+			AnonPiError,
 		);
-		expect(() =>
-			parseMachineArgs(['snapshot', 'recon', 'a', '--image-tag']),
-		).toThrow(AnonPiError);
-		expect(() => parseMachineArgs(['snapshot', 'a/b', 'c'])).toThrow(
+		expect(() => parseMachineArgs(['snapshot', 'a', '--image-tag'])).toThrow(
+			AnonPiError,
+		);
+		expect(() => parseMachineArgs(['snapshot', 'a/b'])).toThrow(
 			/invalid machine name/,
 		);
-		expect(() => parseMachineArgs(['snapshot', 'recon', '..'])).toThrow(
+		expect(() => parseMachineArgs(['snapshot', 'ok', '-m', 'a/b'])).toThrow(
 			AnonPiError,
 		);
 	});

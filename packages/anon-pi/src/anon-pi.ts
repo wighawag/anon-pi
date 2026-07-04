@@ -1579,21 +1579,22 @@ export function keyProject(fields: KeptKeyFields): string {
 }
 
 /**
- * PURE: pick the RUNNING anon-pi containers a `forward`/`ports` should offer.
- * Filters the supplied running managed containers (each with its decoded key
- * fields) to those on `machine`, optionally narrowed to `project` (its leaf cwd
- * name). With no project, every anon-pi container on the machine qualifies. The
- * caller resolves 0 (error) / 1 (auto) / many (picker).
+ * PURE: pick the RUNNING anon-pi containers a `forward`/`ports`/`snapshot` should
+ * offer. Filters the supplied running managed containers (each with its decoded
+ * key fields) OPTIONALLY by `machine` (undefined = every machine qualifies, used
+ * by `snapshot` where the machine is only a narrowing filter) and OPTIONALLY by
+ * `project` (its leaf cwd name). The caller resolves 0 (error) / 1 (auto) / many
+ * (picker).
  */
 export function resolveManagedMatches(args: {
 	containers: readonly ManagedContainer[];
-	machine: string;
+	machine?: string;
 	project?: string;
 }): ManagedContainer[] {
 	const {containers, machine, project} = args;
 	return containers.filter((c) => {
 		const f = parseKeptKey(c.key);
-		if (f.machine !== machine) return false;
+		if (machine !== undefined && f.machine !== machine) return false;
 		if (project !== undefined && keyProject(f) !== project) return false;
 		return true;
 	});
@@ -2907,16 +2908,18 @@ export function anonPiVersion(): string | undefined {
  *   - `set-image <name> <ref>`: name validated; the new image ref (non-empty).
  *   - `rm <name> [--yes]`: name validated; `yes` skips the confirm (the CLI
  *     still enforces the non-TTY abort when `yes` is false).
- *   - `snapshot <machine> <new-name> [--image-tag <ref>]`: both names validated;
- *     commits the source machine's running container into a new image and
- *     creates <new-name> pinned to it (the CLI does the netcage commit + create).
+ *   - `snapshot <new-name> [-m <machine>] [--image-tag <ref>]`: the sole
+ *     positional is the NEW machine name (validated); `-m <machine>` is an
+ *     OPTIONAL filter (which running container to commit when several are up),
+ *     NOT a required source. The CLI auto-detects the running container (picker
+ *     when several match), commits it, and creates <new-name> pinned to it.
  */
 export type MachineCommand =
 	| {verb: 'create'; name: string; image?: string}
 	| {verb: 'list'}
 	| {verb: 'set-image'; name: string; image: string}
 	| {verb: 'rm'; name: string; yes: boolean}
-	| {verb: 'snapshot'; source: string; name: string; imageTag?: string};
+	| {verb: 'snapshot'; name: string; machine?: string; imageTag?: string};
 
 /**
  * PURE: parse the tokens AFTER `machine` into a MachineCommand. Validates the
@@ -3013,15 +3016,22 @@ export function parseMachineArgs(args: readonly string[]): MachineCommand {
 	}
 
 	if (verb === 'snapshot') {
-		// snapshot <source-machine> <new-name> [--image-tag <ref>]: commit the
-		// source machine's running container into a new image and create <new-name>
-		// pinned to it. Both names are validated (safe machine segments); the
-		// image tag, if given, is a free-form ref.
-		let source: string | undefined;
+		// snapshot <new-name> [-m <machine>] [--image-tag <ref>]: commit a RUNNING
+		// container into a new image and create <new-name> pinned to it. The sole
+		// positional is the new machine name; `-m` is an OPTIONAL filter (which
+		// container when several are up), not a required source. The CLI auto-detects
+		// the container (picker when several match).
 		let name: string | undefined;
+		let machine: string | undefined;
 		let imageTag: string | undefined;
 		for (let i = 0; i < rest.length; i++) {
 			const a = rest[i];
+			if (a === '-m' || a === '--machine') {
+				const v = rest[++i];
+				if (v === undefined) fail(`${a} needs a machine name`);
+				machine = validateName(v as string, 'machine');
+				continue;
+			}
 			if (a === '--image-tag') {
 				const v = rest[++i];
 				if (v === undefined) fail('--image-tag needs an image ref');
@@ -3029,20 +3039,15 @@ export function parseMachineArgs(args: readonly string[]): MachineCommand {
 				continue;
 			}
 			if (a.startsWith('-')) fail(`unknown option: ${a}`);
-			if (source === undefined) {
-				source = validateName(a, 'machine');
-			} else if (name === undefined) {
-				name = validateName(a, 'machine');
-			} else {
-				fail(`machine snapshot takes <machine> <new-name>, got extra: ${a}`);
-			}
+			if (name !== undefined)
+				fail(`machine snapshot takes one <new-name>, got extra: ${a}`);
+			name = validateName(a, 'machine');
 		}
-		if (source === undefined || name === undefined)
-			fail('machine snapshot needs a <machine> and a <new-name>');
+		if (name === undefined) fail('machine snapshot needs a <new-name>');
 		return {
 			verb: 'snapshot',
-			source: source as string,
 			name: name as string,
+			machine: nonEmpty(machine),
 			imageTag: nonEmpty(imageTag),
 		};
 	}

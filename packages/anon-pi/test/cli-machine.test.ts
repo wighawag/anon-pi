@@ -192,26 +192,33 @@ describe('machine snapshot', () => {
 	it('refuses to clobber an existing target machine (before any commit)', () => {
 		const home = tempHome();
 		run(['machine', 'create', 'recon-net', '--image', 'my/pi:tag'], {home});
-		const r = run(['machine', 'snapshot', 'recon', 'recon-net'], {home});
+		const r = run(['machine', 'snapshot', 'recon-net'], {home});
 		expect(r.status).toBe(1);
 		expect(r.stderr).toContain('already exists');
 	});
 
-	it('with no running container (or no netcage), exits 1 and writes no machine', () => {
-		// Deterministic regardless of whether netcage is on PATH: either the
-		// netcage-missing error or the no-running-container error, both exit 1 and
-		// must NOT create the target machine. Force an empty PATH-ish netcage lookup
-		// is not portable, so we assert the invariant that holds either way.
+	it('with netcage unavailable, exits 1 and writes no machine (never commits)', () => {
+		// HERMETIC: force netcage OFF by narrowing PATH to the base dirs (netcage
+		// lives in ~/.local/bin, not here), so `hasNetcage()` is false and the verb
+		// exits at netcageMissing BEFORE resolving/committing any real container.
+		// This test must NEVER reach `netcage commit` (that would mutate the real
+		// image store), so we do not rely on the ambient netcage state.
 		const home = tempHome();
-		const r = run(['machine', 'snapshot', 'ghost', 'ghost-snap'], {home});
+		const r = run(['machine', 'snapshot', 'ghost-snap'], {
+			home,
+			env: {PATH: '/usr/bin:/bin'},
+		});
 		expect(r.status).toBe(1);
+		expect(r.stderr.toLowerCase()).toContain('netcage');
 		expect(existsSync(join(home, 'machines', 'ghost-snap'))).toBe(false);
 	});
 
-	it('rejects an invalid new-name / source-name (traversal guard)', () => {
+	it('rejects an invalid new-name and an invalid -m filter (traversal guard)', () => {
 		const home = tempHome();
-		expect(run(['machine', 'snapshot', 'a/b', 'ok'], {home}).status).toBe(1);
-		expect(run(['machine', 'snapshot', 'ok', '..'], {home}).status).toBe(1);
+		expect(run(['machine', 'snapshot', 'a/b'], {home}).status).toBe(1);
+		expect(run(['machine', 'snapshot', 'ok', '-m', 'a/b'], {home}).status).toBe(
+			1,
+		);
 	});
 });
 

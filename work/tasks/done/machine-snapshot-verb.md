@@ -14,8 +14,14 @@ that exact environment as a recoverable machine, so long as they have not exited
 (the default `--rm` deletes the container on exit; a live container is required).
 
 ```
-anon-pi machine snapshot <machine> <new-name> [-m <machine>] [--image-tag <ref>]
+anon-pi machine snapshot <new-name> [-m <machine>] [--image-tag <ref>]
 ```
+
+The sole positional is the NEW machine name. The container to commit is
+AUTO-DETECTED from the running anon-pi containers (a picker when several are up);
+`-m <machine>` is an OPTIONAL narrowing filter, NOT a required source (the
+container, identified by its ref, is what matters; the machine is only a filter,
+just as it is for `forward`/`ports`).
 
 - Resolve the ONE running anon-pi container for `<machine>` (reuse the
   `forward`/`ports` running-container resolution: `queryRunningContainers` +
