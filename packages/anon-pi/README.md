@@ -58,6 +58,9 @@ anon-pi <project>              pi in the project (/projects/<project>); exit pi 
 anon-pi <project> <pi-args…>   forward args to pi (e.g. -p for a headless one-shot)
 anon-pi --session <id>         resume a pi session by id (forwarded to pi; no project needed)
 anon-pi --continue             continue your most recent pi session (also -r/--resume, --fork)
+anon-pi --list-models          list the models pi sees (also --models; no project needed)
+anon-pi pi <pi-args…>          run pi with ANY args and no project (the passthrough)
+anon-pi --version              print anon-pi's version (also -V)
 anon-pi --shell [<project>]    a jailed bash (at ~, or cd'd into <project>) - the project-hopper
 anon-pi -m <machine> [<p>]     the same, on <machine> (its own image + home + conversations)
 anon-pi --mount <parent> [<p>] root at a HOST parent folder instead of the projects root
@@ -138,6 +141,19 @@ anon-pi -m webveil --session <id>   # on a specific machine
 ```
 
 So when pi prints `To resume this session: pi --session <id>` on exit, just prefix it: `anon-pi --session <id>`.
+
+### Running pi directly (`anon-pi pi …`)
+
+Any tokens **after a project** are already forwarded to pi (`anon-pi recon --model qwen -p "…"`). For pi commands that need **no project** — listing models, exporting a session, any other pi flag — use the passthrough:
+
+```sh
+anon-pi --list-models              # what models does pi see in the jail? (also --models)
+anon-pi pi --model qwen3-coder     # run pi with arbitrary flags, no project
+anon-pi pi --export out.html --session <id>   # export a session and exit
+anon-pi -m webveil pi --version    # pi's own version, on a machine
+```
+
+`anon-pi pi <args…>` is the general escape hatch: it runs pi inside the jail with exactly the args you give and no project, so you never need anon-pi to special-case each pi flag. (`--version`/`-V` on its own prints *anon-pi's* version; use `anon-pi pi --version` for pi's.)
 
 ### `--mount`: root at a host parent (the caveat)
 

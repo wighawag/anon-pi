@@ -81,6 +81,12 @@ describe('validateName (machines + projects)', () => {
 		expect(() => validateName('.', 'machine')).toThrow(AnonPiError);
 	});
 
+	it('rejects the reserved `pi` passthrough token as a plain name', () => {
+		// `pi` is the `anon-pi pi <args…>` passthrough token, never a project.
+		expect(() => validateName('pi', 'project')).toThrow(AnonPiError);
+		expect(() => validateName('pi', 'machine')).toThrow(AnonPiError);
+	});
+
 	it('names the kind in the error (machine vs project)', () => {
 		let msg = '';
 		try {

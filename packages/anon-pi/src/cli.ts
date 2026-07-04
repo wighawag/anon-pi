@@ -52,6 +52,7 @@ import {
 	parseConfigJson,
 	parseLaunchArgs,
 	isHeadlessPiArgs,
+	anonPiVersion,
 	parseMachineArgs,
 	parseMachineJson,
 	projectHostDir,
@@ -110,6 +111,14 @@ const ANON_PI_KEY_LABEL = 'anon-pi.key';
 
 function main(argv: string[]): number {
 	const args = argv.slice(2);
+
+	// `--version`/`-V` prints anon-pi's own version and exits (before the launch
+	// grammar, so it is never parsed as a project/flag). For pi's version inside
+	// the jail, forward it: `anon-pi pi --version`.
+	if (args[0] === '--version' || args[0] === '-V') {
+		process.stdout.write(`anon-pi ${anonPiVersion() ?? '(unknown)'}\n`);
+		return 0;
+	}
 
 	// The global `--help`/`-h` prints the top-level HELP, EXCEPT when the first
 	// token is a subcommand that owns its own `--help` (so `anon-pi init --help`

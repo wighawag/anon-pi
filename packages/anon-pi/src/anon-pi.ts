@@ -30,7 +30,7 @@
 // init's proxy detect/verify decisions). cli.ts owns only the impure edges (fs,
 // the interactive TUI, the netcage query, the spawn).
 
-import {existsSync} from 'node:fs';
+import {existsSync, readFileSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -433,7 +433,9 @@ export const ROOT_TOKEN = '.';
  * reserved-name concept is explicit and extendable. `--mount`'s `/work` is a
  * CONTAINER path, not a name in this namespace, so it needs no reservation.
  */
-export const RESERVED_NAMES: readonly string[] = ['.', '..'];
+export const RESERVED_NAMES: readonly string[] = ['.', '..', 'pi'];
+// NOTE: `pi` is reserved so the `anon-pi pi <args…>` passthrough token
+// (PI_PASSTHROUGH_TOKEN) can never be shadowed by a project named `pi`.
 
 /** What a name names, for a clear validation error. */
 export type NameKind = 'machine' | 'project';
@@ -801,13 +803,19 @@ export interface ParsedLaunch {
 }
 
 /**
- * pi flags that SELECT/RESUME a session by id (not by cwd), so they work with NO
- * anon-pi project: pi finds the session file (in the always-mounted machine
- * home) and switches to its own project cwd. `anon-pi <flag> ...` forwards these
- * verbatim to pi at the projects root. Mirrors pi's own resume-hint grammar
- * (`pi --session <id>`), so pasting `anon-pi --session <id>` just works.
+ * pi flags that make sense with NO anon-pi project, so `anon-pi <flag> ...`
+ * launches pi (at the projects root) and forwards this flag + everything after
+ * it verbatim. Two families:
+ *  - SESSION selection (`--session <id>` etc.): pi finds the session file (in the
+ *    always-mounted machine home) and switches to its own project cwd, so no
+ *    project is needed. Mirrors pi's own resume hint (`pi --session <id>`), so
+ *    pasting `anon-pi --session <id>` just works.
+ *  - QUERY (`--list-models`/`--models`): pi prints + exits, no project relevant.
+ * For arbitrary pi flags with no project (e.g. `--model x`), use the explicit
+ * `anon-pi pi <args…>` passthrough instead.
  */
-const PI_SESSION_FLAGS: ReadonlySet<string> = new Set([
+const PI_NO_PROJECT_FLAGS: ReadonlySet<string> = new Set([
+	// session selection
 	'--session',
 	'--session-id',
 	'--resume',
@@ -815,12 +823,22 @@ const PI_SESSION_FLAGS: ReadonlySet<string> = new Set([
 	'--continue',
 	'-c',
 	'--fork',
+	// query-and-exit
+	'--list-models',
+	'--models',
 ]);
 
-/** True iff `a` is a pi session-resume flag (see PI_SESSION_FLAGS). */
-function isPiSessionFlag(a: string): boolean {
-	return PI_SESSION_FLAGS.has(a);
+/** True iff `a` is a pi flag anon-pi accepts with no project (see PI_NO_PROJECT_FLAGS). */
+function isPiNoProjectFlag(a: string): boolean {
+	return PI_NO_PROJECT_FLAGS.has(a);
 }
+
+/**
+ * The explicit pi-passthrough token: `anon-pi pi <args…>` runs pi with the given
+ * args and NO project (the general escape hatch for any pi flag). It is a
+ * RESERVED project name (see RESERVED_NAMES) so a project can never shadow it.
+ */
+export const PI_PASSTHROUGH_TOKEN = 'pi';
 
 /**
  * PURE: whether forwarded pi args request pi's NON-INTERACTIVE (print) mode,
@@ -836,11 +854,12 @@ export function isHeadlessPiArgs(
 }
 
 /**
- * Finish parsing a session-resume launch (`anon-pi --session <id> ...`): pi mode,
- * NO project (pi resolves the session + its cwd itself), the flag + rest
- * forwarded. `--shell` is incompatible (a shell has no session to resume).
+ * Finish parsing a NO-PROJECT pi launch (`anon-pi --session <id> ...`,
+ * `anon-pi --list-models`, or the explicit `anon-pi pi <args…>`): pi mode, NO
+ * project (pi picks its own cwd / prints + exits), the flag(s) + rest forwarded.
+ * `--shell` is incompatible (a shell forwards no pi args).
  */
-function finishPiSessionLaunch(args: {
+function finishPiNoProjectLaunch(args: {
 	machine: string;
 	machineExplicit: boolean;
 	mountParent?: string;
@@ -857,7 +876,7 @@ function finishPiSessionLaunch(args: {
 	}
 	if (args.shell) {
 		args.fail(
-			'--shell cannot resume a pi session (a shell has no session). Drop --shell.',
+			'--shell forwards no pi args (a shell has no session/query). Drop --shell.',
 		);
 	}
 	return {
@@ -937,18 +956,34 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 			i++;
 			break;
 		}
-		if (isPiSessionFlag(a)) {
-			// A pi session-resume flag (`--session <id>`, `--continue`, `--resume`,
-			// `--fork <id>`, ...) with NO anon-pi project. pi resolves the session by
-			// id and switches to ITS project cwd itself (session files live in the
-			// machine home, always mounted), so anon-pi launches pi at the projects
-			// root and forwards this flag + everything after it verbatim. This makes
-			// pi's own "To resume: pi --session <id>" hint usable as
-			// `anon-pi --session <id>`.
+		if (a === PI_PASSTHROUGH_TOKEN) {
+			// `anon-pi pi <args…>`: the explicit passthrough. Run pi with the
+			// following args and NO project (pi picks its own cwd, or prints + exits
+			// for a query). The general escape hatch for ANY pi flag with no project
+			// (`anon-pi pi --model x`, `anon-pi pi --export out.html --session <id>`).
+			return finishPiNoProjectLaunch({
+				machine,
+				machineExplicit: machineSet,
+				mountParent,
+				keep: keepSeen,
+				rm: rmSeen,
+				shell,
+				piArgs: args.slice(i + 1),
+				fail,
+			});
+		}
+		if (isPiNoProjectFlag(a)) {
+			// A pi flag that needs NO anon-pi project (`--session <id>`/`--continue`/
+			// `--fork` resume by id; `--list-models`/`--models` print + exit). pi
+			// resolves its own cwd (or just prints), so anon-pi launches pi at the
+			// projects root and forwards this flag + everything after it verbatim.
+			// This makes pi's own "To resume: pi --session <id>" hint usable as
+			// `anon-pi --session <id>`. (For ARBITRARY pi flags with no project, use
+			// the explicit `anon-pi pi <args…>` passthrough.)
 			piArgs = args.slice(i);
 			project = undefined;
 			i = args.length;
-			return finishPiSessionLaunch({
+			return finishPiNoProjectLaunch({
 				machine,
 				machineExplicit: machineSet,
 				mountParent,
@@ -2206,6 +2241,22 @@ function shippedFile(rel: string): string | undefined {
 	return undefined;
 }
 
+/**
+ * anon-pi's own version, read from the package.json shipped in the package root
+ * (resolved via shippedFile). Returns undefined if it cannot be found/parsed, so
+ * `--version` can fall back to a placeholder. Read-only.
+ */
+export function anonPiVersion(): string | undefined {
+	const pkg = shippedFile('package.json');
+	if (!pkg) return undefined;
+	try {
+		const parsed = JSON.parse(readFileSync(pkg, 'utf8')) as {version?: unknown};
+		return typeof parsed.version === 'string' ? parsed.version : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 // --- The `machine {create,list,set-image,rm}` verbs (pure parts) -------------
 //
 // Machines are first-class: an image + a persistent host home
@@ -2394,6 +2445,9 @@ USAGE
   anon-pi <project> <pi-args…>   forward args to pi (e.g. -p for a headless one-shot)
   anon-pi --session <id>         resume a pi session by id (forwarded to pi; no project needed)
   anon-pi --continue             continue your most recent pi session (also -r/--resume, --fork)
+  anon-pi --list-models          list the models pi sees (also --models; no project needed)
+  anon-pi pi <pi-args…>          run pi with ANY args and no project (the passthrough)
+  anon-pi --version              print anon-pi's version (also -V)
   anon-pi --shell [<project>]    a jailed bash (at ~, or cd'd into <project>) - the project-hopper
   anon-pi -m <machine> [<p>]     the same, on <machine> (its own image + home + conversations)
   anon-pi --mount <parent> [<p>] root at a HOST parent folder instead of the projects root

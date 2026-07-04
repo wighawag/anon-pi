@@ -13,6 +13,7 @@ import {
 	mergeModelSources,
 	parseModelsListing,
 	pickLocalProviderModels,
+	anonPiVersion,
 	resolveHostModelsPath,
 	resolveModelsSeedPath,
 	resolveSettingsSeedPath,
@@ -503,6 +504,14 @@ describe('resolveHostModelsPath', () => {
 		expect(resolveHostModelsPath({...base, piAgentDir: '/opt/pi'})).toBe(
 			'/opt/pi/models.json',
 		);
+	});
+});
+
+describe('anonPiVersion', () => {
+	it('reads a semver-ish version string from the package.json', () => {
+		const v = anonPiVersion();
+		expect(typeof v).toBe('string');
+		expect(v).toMatch(/^\d+\.\d+\.\d+/);
 	});
 });
 

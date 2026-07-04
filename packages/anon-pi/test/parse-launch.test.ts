@@ -232,6 +232,52 @@ describe('parseLaunchArgs — pi session resume (no project)', () => {
 			AnonPiError,
 		);
 	});
+
+	it('--list-models / --models are no-project pi query launches', () => {
+		for (const flag of ['--list-models', '--models']) {
+			const p = parseLaunchArgs([flag]);
+			expect(p.mode).toBe('pi');
+			expect(p.project).toBeUndefined();
+			expect(p.piArgs).toEqual([flag]);
+		}
+	});
+});
+
+describe('parseLaunchArgs — the `pi` passthrough (any pi flags, no project)', () => {
+	it('`pi <args…>` forwards everything to pi with no project', () => {
+		const p = parseLaunchArgs(['pi', '--model', 'qwen', '--thinking', 'high']);
+		expect(p.mode).toBe('pi');
+		expect(p.project).toBeUndefined();
+		expect(p.piArgs).toEqual(['--model', 'qwen', '--thinking', 'high']);
+	});
+
+	it('bare `pi` is a no-arg pi launch at the root', () => {
+		const p = parseLaunchArgs(['pi']);
+		expect(p.mode).toBe('pi');
+		expect(p.project).toBeUndefined();
+		expect(p.piArgs).toEqual([]);
+	});
+
+	it('honours -m before the pi token', () => {
+		const p = parseLaunchArgs(['-m', 'webveil', 'pi', '--version']);
+		expect(p.machine).toBe('webveil');
+		expect(p.piArgs).toEqual(['--version']);
+	});
+
+	it('is the escape hatch for flags anon-pi would otherwise reject', () => {
+		// `anon-pi --model x` (no project) is an unknown option; `anon-pi pi
+		// --model x` is the explicit passthrough.
+		expect(() => parseLaunchArgs(['--model', 'x'])).toThrow(AnonPiError);
+		expect(parseLaunchArgs(['pi', '--model', 'x']).piArgs).toEqual([
+			'--model',
+			'x',
+		]);
+	});
+
+	it('`pi` is reserved as a project name (cannot shadow the passthrough)', () => {
+		// `pi` in the project position is the passthrough, never a project.
+		expect(() => parseLaunchArgs(['--shell', 'pi'])).toThrow(AnonPiError);
+	});
 });
 
 describe('isHeadlessPiArgs (only -p/--print is headless)', () => {
