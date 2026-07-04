@@ -1,15 +1,27 @@
 # anon-pi
 
-Launch [pi](https://github.com/earendil-works/pi-mono) inside a [netcage](https://github.com/wighawag/netcage): all of pi's web and DNS egress is forced through a socks5h proxy (fail-closed, leak-proof), while ONE direct hole is opened to a local model on your LAN. Your pi config is seeded, per-workdir, onto the host; your canonical config is never touched by the container.
+Run [pi](https://github.com/earendil-works/pi-mono) on anonymized, jailed **machines**: all of pi's web and DNS egress is forced through a socks5h proxy (fail-closed, leak-proof) by [netcage](https://github.com/wighawag/netcage), while ONE direct hole is opened to a local model on your LAN. Your machines and their conversations live in a browsable host workspace (`~/.anon-pi/`); the container itself is disposable.
 
-anon-pi is a thin, opinionated launcher over `netcage run`. It is a separate package on purpose: netcage wraps any tool and stays tool-agnostic; anon-pi holds the pi-specific opinion.
+anon-pi is a thin, opinionated launcher over `netcage run`. It is a separate package on purpose: netcage wraps any tool and stays tool-agnostic; anon-pi holds the pi-specific opinion. netcage owns the jail (network namespaces, firewall, DNS); anon-pi never touches Podman directly and never weakens the forced-egress invariant.
+
+> **Upgrading from 0.4.0?** The model changed: a bare positional is now a
+> **project**, not a host path, and `import` / `--fresh` / `--ephemeral` are
+> gone. See [Migrating from 0.4.0](#migrating-from-040).
+
+## The model: machines + projects
+
+- A **machine** is an **image + a persistent host home**. The home (`machines/<name>/home`) is bind-mounted into the jail at `/root`, so it holds your shell config, pi config + extensions, and your pi conversations. A machine is a named, durable, anonymized workstation. The container is disposable; the home survives.
+- A **project** is a work folder under the **projects root**, mounted into the jail at `/projects/<name>` (pi's cwd). It is just files, image-agnostic. Because pi keys a conversation by its launch cwd, `/projects/<name>` is the conversation key: the same project used from two machines has a separate conversation in each machine's home.
+- The **projects root** is global by default (`~/.anon-pi/projects/`, shared across machines). Override it per-launch with `--mount <host-parent>`, or persistently via `config.json` / `ANON_PI_PROJECTS`.
+- The **proxy** is a `socks5h://` endpoint that anonymizes all egress. It is REQUIRED and never guessed: no proxy, no launch (fail-closed).
+- The **local model** is the one non-proxied path: an RFC1918/link-local `host:port` reached directly, so pi can call a LAN model while everything else stays proxied.
 
 ## Requirements
 
 - **Linux.** anon-pi inherits netcage's platform reality (network namespaces + nftables + rootless Podman). See [Platform](#platform).
 - **[`netcage`](https://github.com/wighawag/netcage)** on your `PATH`.
-- A running **socks5h proxy** (local Tor, `ssh -D`, ...).
-- A **container image with `pi` on its `PATH`** (you provide it via `ANON_PI_IMAGE`; see [Providing a pi image](#providing-a-pi-image)).
+- A running **socks5h proxy** (local Tor, `ssh -D`, wireproxy, ...).
+- A **container image with `pi` on its `PATH`**. `anon-pi init` can build one for you from a shipped `Dockerfile.pi`; see [Providing a pi image](#providing-a-pi-image).
 
 ## Install
 
@@ -19,83 +31,163 @@ npm i -g anon-pi
 npx anon-pi
 ```
 
+## Quick start
+
+```sh
+anon-pi init          # one-time: verify your proxy, capture your local model, pick/build an image
+anon-pi               # bare: pick a project (or a shell, or a new project) from the menu
+anon-pi recon         # or launch straight into a project
+```
+
+`init` is interactive and re-runnable. It:
+
+1. **Proxy** — probes common SOCKS ports, confirms SOCKS5 with a real handshake, shows the findings (evidence only, it never labels the exit provider), then runs `netcage verify` and shows the real EXIT IP as proof it is not your host IP. You confirm on that evidence.
+2. **Local model** — captures the `host:port` of your model, probes reachability, and generates the machine's `models.json`.
+3. **Image** — pick a shipped `Dockerfile` (built via `podman build`), an existing image ref, or skip.
+
+It then writes `~/.anon-pi/config.json` + the `default` machine. It **never destroys** an existing home; it pre-fills your current values and only adds/updates config + the default machine.
+
 ## Usage
 
-```sh
-anon-pi [WORKDIR]
+```
+anon-pi                        MENU: pick a project (pi), a shell, or a new project
+anon-pi <project>              pi in the project (/projects/<project>); exit pi -> host
+anon-pi <project> <pi-args…>   forward args to pi (headless/one-shot; no TTY needed)
+anon-pi --shell [<project>]    a jailed bash (at ~, or cd'd into <project>) - the project-hopper
+anon-pi -m <machine> [<p>]     the same, on <machine> (its own image + home + conversations)
+anon-pi --mount <parent> [<p>] root at a HOST parent folder instead of the projects root
+anon-pi init                   onboard: verify your proxy, capture your local model, pick an image
+anon-pi machine …              manage machines (create / list / set-image / rm)
+anon-pi --delete-home [<m>]    delete a machine's home (config + convos); keep its image pin + files
+anon-pi --delete-project <p>   delete a project's files + its per-machine sessions; keep the homes
 ```
 
-- `WORKDIR` is the host folder pi works in (mounted at `/work`; pi's cwd). Defaults to the current directory. Files pi writes to `/work` land in this folder on the host.
-- The session config+state is keyed to this folder: re-running `anon-pi` on the same folder **resumes** the same pi config and history.
+A `<project>` is a folder under the projects root (mounted at `/projects`; pi's cwd). The token `.` means the root itself (a scratch pi at `/projects`, at `/work` under `--mount`, or at `~` for a shell). A named project is created on the host if it does not exist yet.
+
+### The bare menu
+
+Run `anon-pi` with no project and you get an interactive, arrow-key menu (up/down or `k`/`j` to move, Enter to select, Ctrl-C to quit). It lists the projects under the active root and marks which the current machine has already worked on ("used" vs "new here"), plus a `.` here entry, a shell entry, and a "new project" entry. Picking a project launches it **byte-for-byte identically** to typing the equivalent command. `-m <machine>` and `--mount <parent>` with no project also open the menu (scoped to that machine / root).
+
+The menu needs a TTY. Without one it refuses and tells you to name a project directly (`anon-pi <project>`).
+
+### `--shell`: the project-hopper
+
+pi cannot `cd` into a different project mid-session (a conversation is keyed to its launch cwd). So when you want to move between projects, or poke around the machine, use a jailed shell:
 
 ```sh
-export ANON_PI_IMAGE=your/pi-image:tag
-export ANON_PI_LLM=192.168.1.150:8080     # your local model, reached directly
-export ANON_PI_PROXY=socks5h://127.0.0.1:9050
-
-anon-pi import       # one-time: generate the seed models.json from your model
-anon-pi ./recon      # launch
+anon-pi --shell            # bash at ~ (the machine home), inside the jail
+anon-pi --shell recon      # bash cd'd into /projects/recon
 ```
 
-You land in pi, inside the jail, cwd `/work` = `./recon`. pi's web/tool egress is anonymized through the proxy; the local model at `ANON_PI_LLM` is reachable directly; everything else is dropped if the proxy is down (fail-closed).
+From inside the shell you can `cd` between `/projects/*` and run `pi` yourself in whichever one you want. The shell forwards no arguments (`anon-pi --shell recon extra` is an error); run pi from inside it instead. Same forced-egress jail as a pi launch.
+
+### Headless / one-shot
+
+Any tokens after the project are forwarded to pi verbatim, and this path does **not** need a TTY (so it fits scripts and pipes):
+
+```sh
+anon-pi recon -p "summarize the findings in ./notes"
+```
+
+### `--mount`: root at a host parent (the caveat)
+
+`--mount <parent>` re-roots this launch at a HOST parent folder instead of the projects root: the parent is mounted at `/work`, and a `<project>` positional then names a subfolder under it (`/work/<project>`).
+
+The caveat: `<parent>` is a **host parent directory**, not a single project path. anon-pi mounts the parent and treats the positional as a name under it; it does not mount an arbitrary host folder as the project itself. Use `--mount` when you want a whole host tree available at `/work` (for example your real code checkout's parent), and pick the subfolder as the project.
+
+### Kept vs throwaway (`--rm` / `--keep`)
+
+The container is **throwaway by default** (`--rm`): it is deleted the moment pi exits. Your machine home and project files persist regardless (they are host mounts); only the container's own scratch filesystem is discarded.
+
+Pass `--keep` for an exploratory flow where the container's filesystem should survive across exits (for example you `apt install` something, quit, and re-enter the same container):
+
+```sh
+anon-pi --keep recon       # keep this container; re-entering resumes it
+```
+
+anon-pi finds a kept container by netcage's managed label and `netcage start`s it on re-entry. `--keep` and `--rm` together is an error (pick one; `--rm` is the default).
+
+## Managing machines
+
+```
+anon-pi machine create <name> [--image <ref>]   create a machine, pin its image
+anon-pi machine list                            list machines and their images
+anon-pi machine set-image <name> <ref>          re-pin the image (WARNS; no reseed)
+anon-pi machine rm <name> [--yes]               delete the machine + its home
+```
+
+A machine's home is seeded on FIRST LAUNCH, not at create. `set-image` re-pins the image only and **warns**: it does not reseed or touch the home, so the home's extensions were built for the old image. `rm` confirms on a TTY, skips the prompt with `--yes`, and aborts non-interactively without it (it never deletes unprompted in a script). `create` with no `--image` and no TTY is an error (a machine needs an image to launch).
+
+If you never create a machine explicitly, launches use the `default` machine (which `init` creates). Give a machine its own image + home + conversations by naming it with `-m`.
+
+## Deleting data
+
+The destructive verbs replace the old `--fresh`. Each confirms on a TTY, skips with `--yes`, and aborts non-interactively without it.
+
+- `anon-pi --delete-home [<machine>]` deletes ONE machine's home (its config, conversations, shell env), but **keeps its image pin** (relaunch to seed a fresh home) and **keeps all project files** (they live under the projects root, not in the home). The machine defaults to `config.defaultMachine` (else `default`) when omitted.
+- `anon-pi --delete-project <project>` deletes that project's files (its folder under the projects root) AND that project's per-machine session dir in every machine home. The machine homes are otherwise kept. The project name is required.
 
 ## Environment
 
+Environment variables are **overrides**: env wins over `config.json`, which wins over a machine's `machine.json`, which wins over the built-in defaults.
+
 | Var | Required | Default | Meaning |
 | --- | --- | --- | --- |
-| `ANON_PI_IMAGE` | for run | | container image with `pi` on `PATH` |
-| `ANON_PI_LLM` | yes | | RFC1918/link-local `IP[:port]` of the local model (the one direct hole) |
-| `ANON_PI_PROXY` | yes | | the socks5h proxy (Tor/wireproxy/ssh -D). No default: it is what anonymizes |
-| `ANON_PI_EPHEMERAL` | no | (off) | set to `1` for a throwaway, non-persistent session |
-| `ANON_PI_HOME` | no | `$XDG_CONFIG_HOME/anon-pi` or `~/.config/anon-pi` | anon-pi home |
-| `ANON_PI_CONFIG` | no | `<ANON_PI_HOME>/agent` | canonical seed dir (holds the imported `models.json`) |
-| `ANON_PI_SOURCE_MODELS` | no | `~/.pi/agent/models.json` | (`import`) the host `models.json` to read from |
+| `ANON_PI_PROXY` | yes | (none) | the socks5h proxy URL (Tor/wireproxy/`ssh -D`). No default: it is what anonymizes, so it is never guessed (fail-closed). |
+| `ANON_PI_LLM` | yes | (none) | RFC1918/link-local `IP[:port]` of the local model (the one direct hole). |
+| `ANON_PI_IMAGE` | fallback | (none) | container image with `pi` on `PATH`, used when a machine has no image pinned. |
+| `ANON_PI_HOME` | no | `~/.anon-pi` | the anon-pi workspace dir (holds `config.json`, `machines/`, `projects/`). NOT under `~/.config`. |
+| `ANON_PI_PROJECTS` | no | `<ANON_PI_HOME>/projects` | projects-root override (the host dir mounted at `/projects`). |
 
-## How it works
+`config.json` (written by `init`) holds the persistent `proxy`, `llm`, `defaultMachine`, and optional `projects` root; a machine's `machine.json` holds its pinned `image` and optional per-machine `projects` override. Env vars override all of these per-launch.
 
-**Stateful by default.** anon-pi mounts a persistent per-workdir host dir at the container's `~/.pi/agent`, so pi's **sessions, history, settings (your model choice), and any extensions you `pi install`** all persist across launches. Re-running in the same folder resumes it. The state dir is `<ANON_PI_HOME>/state/<workdir>/agent`, named with pi's own readable path convention (e.g. `--home-me-proj--`), not a hash, so you can see which folder it belongs to and delete it to reset.
+## Forced egress: honesty by evidence
 
-1. **Mount the persistent home.** `-v <ANON_PI_HOME>/state/<workdir>/agent:/root/.pi/agent`. Everything pi writes there survives.
-2. **First-launch seed (only when the home is fresh).** anon-pi mounts the image's staged defaults and your imported `models.json`, and the container promotes them into the fresh home, then stamps a `.anon-pi-seed` marker. On later launches the marker is present, so nothing is re-copied and **your changes (added models, installed extensions) are never clobbered**.
-3. **Run.** `netcage run --proxy <proxy> --allow-direct <ANON_PI_LLM> -it -v <workdir> -v <state>:/root/.pi/agent [-v <models.json>:...:ro] <image> sh -c '<seed-if-fresh> && exec pi'`.
+anon-pi does not tell you "you are anonymous". It composes a launch that **forces** every bit of pi's TCP egress through your `socks5h://` proxy (fail-closed, DNS resolved proxy-side so hostnames never hit your host resolver), with exactly one direct hole to your local model. That is the invariant netcage enforces; anon-pi never strips or adds an egress flag.
 
-pi auto-selects the first available model (your local one; it needs no real API key), so no default needs to be set. Services and default extensions live in the **image**; your state lives in the persistent home.
+For proof, it shows you **evidence**, never a label: `init` (and `netcage verify`) run a real request through the proxy and print the actual EXIT IP, so you can see it is not your host IP. It deliberately **never claims which exit provider** you are using (Tor, a VPN, an SSH tunnel): it can only observe the exit, not name the network behind it. A running `tor`/`wireproxy` process is surfaced as a WEAK local hint, clearly not a claim about the exit.
 
-### Ephemeral (throwaway) sessions
+## Layout on disk
 
-For a clean, no-local-trace session, pass `--ephemeral` (or `ANON_PI_EPHEMERAL=1`): anon-pi mounts **no writable state** at all. pi writes to the container's own filesystem, which netcage runs with `--rm`, so it is destroyed when the container exits. Nothing writable ever touches a host path (only the read-only `models.json` seed is mounted), there is no cleanup step, and nothing is left behind even if anon-pi is killed.
+Everything anon-pi keeps lives under `~/.anon-pi/` (override with `ANON_PI_HOME`):
 
-```sh
-anon-pi --ephemeral ./scratch
+```
+~/.anon-pi/
+  config.json                proxy, llm, defaultMachine, (optional) projects root
+  machines/
+    default/
+      machine.json           pinned image, (optional) per-machine projects override
+      home/                  the persistent $HOME bind-mounted at /root
+        .pi/agent/           pi config, extensions, sessions (your conversations)
+      models.json            the generated local-model seed (mounted read-only on a fresh home)
+  projects/                  the default global projects root (mounted at /projects)
+    recon/
+    ...
 ```
 
-### Reset a session
-
-Delete its state home; the next launch re-seeds:
-
-```sh
-rm -rf ~/.config/anon-pi/state/<workdir-slug>/agent
-```
+The home is the durable, inspectable store. On a FRESH machine home, the image's staged defaults (`/opt/anon-pi-seed/agent`) and the machine's `models.json` are promoted in once and a marker is stamped; after that pi owns the home and your changes (added models, installed extensions) are never clobbered.
 
 ## Providing a pi image
 
-anon-pi does not ship or default an image: you set `ANON_PI_IMAGE` to an image that has the `pi` CLI on its `PATH`. pi's maintainers do not publish an official prebuilt image, so the reputable path is to **build a small one from the upstream-documented recipe** (which installs the official [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) npm package, no third-party image to trust).
+anon-pi does not ship or default an image: a machine points at an image that has the `pi` CLI on its `PATH`. pi's maintainers do not publish an official prebuilt image, so the reputable path is to **build a small one from the upstream-documented recipe** (which installs the official [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) npm package, no third-party image to trust).
 
-A ready `Dockerfile.pi` ships in this package (adapted from pi's own [containerization docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/containerization.md)):
+`anon-pi init` can build it for you: pick the shipped `Dockerfile.pi` and it runs `podman build` and pins the result. You can also build it yourself:
 
 ```sh
 # from wherever this package's Dockerfile.pi is (e.g. node_modules/anon-pi)
 podman build -t localhost/anon-pi-pi:latest -f Dockerfile.pi .
 export ANON_PI_IMAGE=localhost/anon-pi-pi:latest
+# or pin it to a machine:
+anon-pi machine set-image default localhost/anon-pi-pi:latest
 ```
 
-The image only needs `pi` reachable on `PATH`. anon-pi passes `pi` as the run command (via a small copy-then-exec step) and never mounts over pi's config dir, so the image needs **no `ENTRYPOINT` and no config volume** (unlike pi's upstream `Dockerfile.pi`, which is written for running pi directly).
+The image only needs `pi` reachable on `PATH`. anon-pi bind-mounts the machine home over the container's `/root` and seeds a fresh home from the image's staging dir, so the image needs **no `ENTRYPOINT` and no config volume**.
 
 A community image also exists ([`gni/pi-coding-agent-container`](https://github.com/gni/pi-coding-agent-container)); it is third-party and unvetted, so review it yourself before trusting it with your (anonymized) credentials.
 
 ### Extensions, skills, and their services go in the image
 
-anon-pi deliberately imports **only your local model** (see below), never your extensions or skills. That is on purpose: your extension set is an identity fingerprint, extensions run code and can leak, and many need a runtime that a copied folder cannot carry (for example `pi-webveil` needs a running searxng). The right home for capabilities is the **image**, where they are installed once, reviewably, with clean config:
+anon-pi deliberately generates **only your local model's `models.json`**, never copies your extensions or skills. That is on purpose: your extension set is an identity fingerprint, extensions run code and can leak, and many need a runtime that a copied folder cannot carry (for example `pi-webveil` needs a running SearXNG). The right home for capabilities is the **image**, installed once, reviewably, into the STAGING dir so anon-pi promotes them into a fresh machine home:
 
 ```dockerfile
 FROM node:24-bookworm-slim
@@ -103,45 +195,46 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       bash ca-certificates git ripgrep && rm -rf /var/lib/apt/lists/*
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
-# Extensions are installed with `pi install` (which records them in settings),
-# NOT a global npm install:
-# RUN pi install npm:pi-webveil
-# ...and an extension that needs a service (pi-webveil -> searxng) also installs
+ENV ANON_PI_STAGE=/opt/anon-pi-seed/agent
+RUN mkdir -p "$ANON_PI_STAGE"
+# Trust the two cwd roots so pi never prompts on the mounted project:
+RUN printf '{"/projects": true, "/work": true}\n' > "$ANON_PI_STAGE/trust.json"
+
+# Extensions are installed with `pi install` into the STAGING dir (recorded
+# there, promoted into the fresh home), NOT a global npm install:
+#   RUN PI_CODING_AGENT_DIR="$ANON_PI_STAGE" pi install npm:pi-webveil
+# ...and an extension that needs a service (pi-webveil -> SearXNG) also installs
 # and configures that service in the image. Its egress is forced through the
 # socks proxy by netcage at runtime, so it must be happy with proxy-only,
 # DNS-through-proxy networking.
 
-WORKDIR /work
+WORKDIR /projects
 ```
 
-Install image defaults into the **staging dir** (`PI_CODING_AGENT_DIR=/opt/anon-pi-seed/agent pi install ...`), NOT `~/.pi/agent`: anon-pi mounts a persistent home over `~/.pi/agent`, and promotes the staging dir into it on a fresh launch. Anything you then `pi install` *inside* a session also persists (it is written to the mounted home). See the `Dockerfile.pi` comments for the exact `pi install` form.
+Install image defaults into the **staging dir** (`PI_CODING_AGENT_DIR=/opt/anon-pi-seed/agent pi install ...`), NOT `~/.pi/agent`: anon-pi mounts the persistent home over `/root` (so `~/.pi/agent` is the mount) and promotes the staging dir into it on a fresh launch. Anything you then `pi install` *inside* a session also persists (it is written to the mounted home). See the shipped `Dockerfile.pi` comments for the exact form.
 
-A worked example ships in this package: [`examples/Dockerfile.pi-webveil`](examples/Dockerfile.pi-webveil) builds pi + the `pi-webveil` extension (staged) + a local SearXNG (over a Unix socket, `http-socket` so webveil's `unix:` baseUrl can speak HTTP to it, JSON API on, limiter off), started by an entrypoint that then execs anon-pi's seed-then-pi command. Note the anonymity subtlety it documents: SearXNG's own crawl is anonymized here **because netcage forces every process's egress through the proxy**, so webveil's plain `egress: direct` is correct in-jail (the usual "local SearXNG leaks your IP" caveat does not apply).
+A worked example ships in this package: [`examples/Dockerfile.pi-webveil`](examples/Dockerfile.pi-webveil) builds pi + the `pi-webveil` extension (staged) + a local SearXNG. Note the anonymity subtlety it documents: SearXNG's own crawl is anonymized here **because netcage forces every process's egress through the proxy**, so webveil's plain `egress: direct` is correct in-jail (the usual "local SearXNG leaks your IP" caveat does not apply).
 
-## Generating the seed (`anon-pi import`)
+## Trusting the project
 
-anon-pi **never** copies your real pi config. Instead, `anon-pi import` synthesizes a minimal `models.json` from your local model:
+pi treats a mounted project as untrusted until approved. The shipped Dockerfiles stage a `trust.json` trusting `/projects` and `/work` (in `/opt/anon-pi-seed/agent`), which is promoted into the machine home on first launch, so you are not prompted. You can also approve once inside a session; it persists in the home.
 
-```sh
-export ANON_PI_LLM=192.168.1.150:8080
-anon-pi import
-```
+## Migrating from 0.4.0
 
-It reads your host `~/.pi/agent/models.json` (override with `ANON_PI_SOURCE_MODELS`), finds the provider whose `baseUrl` serves `ANON_PI_LLM` (matched on host:port, so `192.168.1.150:8080` matches `http://192.168.1.150:8080/v1`), and writes **just that provider** to `<ANON_PI_CONFIG>/models.json`. Everything else, your paid providers and their API keys, your sessions, your trust list, is left behind on the host.
+anon-pi 0.4.0 was a **per-workdir** launcher: a bare positional was a host folder mounted at `/work`, session state lived per-workdir under `~/.config/anon-pi/state/<slug>/`, and you seeded it with `anon-pi import`. That model is gone. What changed:
 
-That file **seeds a fresh session home** (it is copied in on first launch). Models you later add *inside* pi persist in the session home and are never clobbered by import. To change what a fresh home seeds, re-run `anon-pi import --force`; to apply it to an existing session, reset that session (delete its state home).
+- **A bare positional is now a PROJECT, not a host path.** `anon-pi ./recon` no longer mounts host `./recon`; it means the project `recon` under the projects root (`/projects/recon`). To make a host folder available, use `--mount <host-parent>` (mounted at `/work`) and select the subfolder as the project.
+- **`anon-pi import` is GONE.** Onboarding is now `anon-pi init`, which (among other things) generates the local-model `models.json` for the default machine. There is no separate import step.
+- **`--fresh` is GONE.** To reset, use the explicit data verbs: `anon-pi --delete-home [<machine>]` (wipe a machine's home, keep its image pin + project files) and `anon-pi --delete-project <project>` (wipe a project's files + its per-machine sessions).
+- **`--ephemeral` / `ANON_PI_EPHEMERAL` are GONE.** The container is **throwaway by default** now (`--rm`); use `--keep` when you want it to survive across exits. There is no separate ephemeral mode.
+- **The layout moved.** Everything now lives under `~/.anon-pi/` (`config.json` + `machines/` + `projects/`), **not** under `~/.config/anon-pi`. `ANON_PI_HOME` still overrides the root; the old `ANON_PI_CONFIG` / `ANON_PI_SOURCE_MODELS` variables are gone.
+- **Old state is NOT migrated.** anon-pi does not read or convert your old `~/.config/anon-pi/state/<slug>/` directories. Once you have moved to the new model you can delete the old tree:
 
-- If no provider matches `ANON_PI_LLM`, it errors and lists the providers it did find.
-- If the matched provider carries a real-looking `apiKey` (not `none`/`ollama`/empty), it warns but proceeds (for a local model this is usually fine).
-- It refuses to overwrite the canonical seed unless you pass `--force`.
+  ```sh
+  rm -rf ~/.config/anon-pi        # old 0.4.0 state; nothing new reads it
+  ```
 
-## Trusting `/work`
-
-pi treats a mounted project as untrusted until approved. The shipped Dockerfiles stage a `trust.json` trusting `/work` (in `/opt/anon-pi-seed/agent`), which is promoted into the session home on first launch, so you are not prompted. You can also approve once inside a session; it persists.
-
-## Overriding the config per workdir
-
-pi also supports a **project-local** config at `<cwd>/.pi/`, which layers on top of the image's global config. Since your workdir is pi's cwd (`/work`), you can drop a `/work/.pi/` (i.e. `<workdir>/.pi/`) into the folder to override settings for that folder only. anon-pi does nothing special for this; it is pi's normal project-over-global layering.
+Start fresh with `anon-pi init`, then `anon-pi` (the menu) or `anon-pi <project>`.
 
 ## Platform
 
