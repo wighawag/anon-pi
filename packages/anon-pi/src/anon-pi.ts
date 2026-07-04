@@ -237,6 +237,67 @@ export function machineJsonPath(env: AnonPiEnv, name: string): string {
 	return join(machineDir(env, name), 'machine.json');
 }
 
+/**
+ * The GLOBAL local-model models.json seed: `<home>/models.json`. The local model
+ * is a WORKSPACE-level thing (config.json holds ONE global `llm`, the single
+ * `--allow-direct` hole shared by every machine), so its generated models.json
+ * lives once at the workspace root and seeds EVERY machine's fresh home. A
+ * machine may override it with its own `machines/<M>/models.json` (see
+ * resolveModelsSeedPath) for the rare "this machine uses a different local
+ * model" case; by default all machines share this one.
+ */
+export function globalModelsSeedPath(env: AnonPiEnv): string {
+	return join(resolveAnonPiHome(env), MODELS_FILE);
+}
+
+/** The GLOBAL settings seed (the default-model selection): `<home>/settings-seed.json`. */
+export function globalSettingsSeedPath(env: AnonPiEnv): string {
+	return join(resolveAnonPiHome(env), SETTINGS_SEED_FILE);
+}
+
+/** A machine's OPTIONAL per-machine models.json override: `machines/<M>/models.json`. */
+export function machineModelsSeedPath(env: AnonPiEnv, name: string): string {
+	return join(machineDir(env, name), MODELS_FILE);
+}
+
+/** A machine's OPTIONAL per-machine settings seed override: `machines/<M>/settings-seed.json`. */
+export function machineSettingsSeedPath(env: AnonPiEnv, name: string): string {
+	return join(machineDir(env, name), SETTINGS_SEED_FILE);
+}
+
+/**
+ * PURE: resolve the models.json SEED path for a machine, per-machine override
+ * first, else the global one. `exists` is injected (the CLI passes existsSync)
+ * so this stays pure/testable. Returns the chosen path, or undefined when
+ * NEITHER exists (a machine with no local-model seed at all — pi starts with no
+ * models). The precedence is: `machines/<M>/models.json` (a deliberate
+ * per-machine override) > `<home>/models.json` (the global default).
+ */
+export function resolveModelsSeedPath(
+	env: AnonPiEnv,
+	machine: string,
+	exists: (p: string) => boolean,
+): string | undefined {
+	const perMachine = machineModelsSeedPath(env, machine);
+	if (exists(perMachine)) return perMachine;
+	const global = globalModelsSeedPath(env);
+	if (exists(global)) return global;
+	return undefined;
+}
+
+/** PURE: the settings-seed path for a machine (per-machine override > global), or undefined. */
+export function resolveSettingsSeedPath(
+	env: AnonPiEnv,
+	machine: string,
+	exists: (p: string) => boolean,
+): string | undefined {
+	const perMachine = machineSettingsSeedPath(env, machine);
+	if (exists(perMachine)) return perMachine;
+	const global = globalSettingsSeedPath(env);
+	if (exists(global)) return global;
+	return undefined;
+}
+
 /** The sessions dirname pi keeps its per-cwd conversation dirs under (in the agent dir). */
 export const SESSIONS_DIRNAME = 'sessions';
 

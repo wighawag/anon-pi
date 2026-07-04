@@ -26,6 +26,7 @@ import {
 	AnonPiError,
 	HELP,
 	MODELS_FILE,
+	SETTINGS_FILE,
 	SETTINGS_SEED_FILE,
 	SEED_MARKER,
 	DEFAULT_MACHINE,
@@ -34,10 +35,17 @@ import {
 	buildMenuEntries,
 	builtinProjectsRoot,
 	deriveProjectUsage,
+	globalModelsSeedPath,
+	globalSettingsSeedPath,
+	machineAgentDir,
 	machineDir,
 	machineHomeDir,
 	machineJsonPath,
+	machineModelsSeedPath,
 	machineSessionsDir,
+	mergeModelSelection,
+	resolveModelsSeedPath,
+	resolveSettingsSeedPath,
 	validateName,
 	resolveDeleteHome,
 	resolveDeleteProject,
@@ -83,6 +91,7 @@ import {
 	type AnonPiEnv,
 	type GeneratedModel,
 	type ModelCandidate,
+	type ModelSelection,
 	type KeptContainer,
 	type LaunchIntent,
 	type Machine,
@@ -244,10 +253,12 @@ function runLaunch(parsed: ParsedLaunch): number {
 		const home = machineHomeDir(env, machineName);
 		const machine: Machine = {name: machineName, home, image};
 
-		// The generated models.json + settings seed for this machine (mounted
-		// read-only for the first-launch seed) when present. Keyed per machine.
-		const modelsSeed = join(machineDir(env, machineName), MODELS_FILE);
-		const settingsSeed = join(machineDir(env, machineName), SETTINGS_SEED_FILE);
+		// The local-model models.json + settings seed for this machine's FRESH-home
+		// promotion. GLOBAL by default (<home>/models.json, shared across every
+		// machine because the `llm` endpoint is global), with an optional
+		// per-machine override (machines/<M>/models.json). Mounted read-only.
+		const modelsSeed = resolveModelsSeedPath(env, machineName, existsSync);
+		const settingsSeed = resolveSettingsSeedPath(env, machineName, existsSync);
 
 		intent = {
 			machine,
@@ -259,8 +270,8 @@ function runLaunch(parsed: ParsedLaunch): number {
 			keep: parsed.keep,
 			proxy,
 			llmDirect: llm,
-			modelsSeed: existsSync(modelsSeed) ? modelsSeed : undefined,
-			settingsSeed: existsSync(settingsSeed) ? settingsSeed : undefined,
+			modelsSeed,
+			settingsSeed,
 		};
 	} catch (e) {
 		return reportAnonPiError(e);
@@ -1052,43 +1063,73 @@ function runInit(args: string[]): number {
 	// pin/re-pin its image when one was chosen. Its home seeds on first launch.
 	initWriteDefaultMachine(env, image);
 
-	// The per-machine models.json + settings.json seed for the default machine,
-	// generated from the captured endpoint + the CHOSEN models (this is the
-	// `import` replacement). Written next to the machine so the first-launch seed
-	// promotes them into the fresh home.
+	// The GLOBAL local-model models.json + settings seed, generated from the
+	// captured endpoint + the CHOSEN models (this is the `import` replacement).
 	const endpoint = llm ?? current.llm;
 	if (endpoint !== undefined) {
-		const mdir = machineDir(env, DEFAULT_MACHINE);
-		mkdirSync(mdir, {recursive: true});
 		const models = generateModelsJson(
 			endpoint,
 			llmResult.models,
 			llmResult.apiKey,
 		);
-		writeFileSync(
-			join(mdir, MODELS_FILE),
-			JSON.stringify(models, null, '\t') + '\n',
-		);
+		const modelsBody = JSON.stringify(models, null, '\t') + '\n';
+		// GLOBAL seed: the local model is a workspace-level thing (config.llm is
+		// global), so its models.json lives once at the workspace root and seeds
+		// EVERY machine's fresh home. A machine may still override with its own
+		// machines/<M>/models.json.
+		mkdirSync(resolveAnonPiHome(env), {recursive: true});
+		writeFileSync(globalModelsSeedPath(env), modelsBody);
+
+		// Migration: earlier versions wrote this seed under machines/default/. Now
+		// that it is global, remove the old default-machine copy so `default`
+		// picks up the global seed like every other machine (leaving it would look
+		// like a deliberate per-machine override and shadow the global one). Only
+		// the `default` machine's init-generated copy is migrated; a per-machine
+		// override you created for ANY OTHER machine is left untouched.
+		for (const stale of [
+			machineModelsSeedPath(env, DEFAULT_MACHINE),
+			join(machineDir(env, DEFAULT_MACHINE), SETTINGS_SEED_FILE),
+		]) {
+			if (existsSync(stale)) rmSync(stale, {force: true});
+		}
 		process.stdout.write(
-			`anon-pi: wrote the local-model models.json for machine "${DEFAULT_MACHINE}" ` +
-				`(${llmResult.models.length} model${llmResult.models.length === 1 ? '' : 's'}).\n`,
+			`anon-pi: wrote the global local-model models.json ` +
+				`(${llmResult.models.length} model${llmResult.models.length === 1 ? '' : 's'}; shared by all machines).\n`,
 		);
 
-		// settings.json: set the default model + enabledModels for the imported
-		// set. Written as a SEED that the first-launch promotion merges into the
-		// home's settings (so image-staged packages/extensions survive). Only when
-		// the user picked at least one model + a default.
-		if (llmResult.defaultId !== undefined && llmResult.models.length > 0) {
-			const selection = generateModelSelection(
-				llmResult.models.map((m) => m.id),
-				llmResult.defaultId,
-			);
+		// settings.json seed: the default model + enabledModels for the imported
+		// set. The first-launch promotion merges it into each home's settings (so
+		// image-staged packages/extensions survive). Only when the user picked at
+		// least one model + a default.
+		const selection =
+			llmResult.defaultId !== undefined && llmResult.models.length > 0
+				? generateModelSelection(
+						llmResult.models.map((m) => m.id),
+						llmResult.defaultId,
+					)
+				: undefined;
+		if (selection) {
 			writeFileSync(
-				join(mdir, SETTINGS_SEED_FILE),
+				globalSettingsSeedPath(env),
 				JSON.stringify(selection, null, '\t') + '\n',
 			);
 			process.stdout.write(
 				`anon-pi: default model set to "${llmResult.defaultId}".\n`,
+			);
+		}
+
+		// Re-run reconfigure: the seed above only takes effect on a FRESH home
+		// (the first-launch promotion is marker-guarded). Apply the new
+		// models.json + settings selection DIRECTLY to EVERY already-seeded machine
+		// home now, so re-running `init` updates existing environments without
+		// wiping conversations (init runs on the host; homes are host dirs). Fresh
+		// (unseeded) homes are left to the launch-time seed. A machine with its OWN
+		// per-machine models.json override is skipped (its local model differs).
+		const updated = applyModelsToSeededHomes(env, modelsBody, selection);
+		if (updated.length > 0) {
+			process.stdout.write(
+				`anon-pi: updated ${updated.length} existing machine home${updated.length === 1 ? '' : 's'} ` +
+					`(${updated.join(', ')}); conversations untouched.\n`,
 			);
 		}
 	}
@@ -1098,6 +1139,42 @@ function runInit(args: string[]): number {
 			'`anon-pi --shell`.\n',
 	);
 	return 0;
+}
+
+/**
+ * Apply the freshly-generated GLOBAL local-model config to EVERY already-seeded
+ * machine home directly (init runs on the host; homes are host dirs). The
+ * launch-time seed only promotes on a FRESH home (marker-guarded), so without
+ * this a re-run of `init` would update the global seed but never reach existing
+ * homes. For each machine: skip a FRESH home (no marker — the launch seed will
+ * pick up the new global seed), skip a machine with its OWN per-machine
+ * models.json override (its local model differs on purpose), else overwrite the
+ * home's models.json and merge the settings selection. Conversations/sessions
+ * are untouched. Returns the machine names updated.
+ */
+function applyModelsToSeededHomes(
+	env: AnonPiEnv,
+	modelsBody: string,
+	selection: ModelSelection | undefined,
+): string[] {
+	const updated: string[] = [];
+	for (const machine of listMachineNames(env).sort()) {
+		const agentDir = machineAgentDir(env, machine);
+		// Only an already-seeded home (marker present).
+		if (!existsSync(join(agentDir, SEED_MARKER))) continue;
+		// A machine that deliberately overrides the global models.json keeps its
+		// own local model; do not clobber its home with the global one.
+		if (existsSync(machineModelsSeedPath(env, machine))) continue;
+
+		writeFileSync(join(agentDir, MODELS_FILE), modelsBody);
+		if (selection) {
+			const settingsPath = join(agentDir, SETTINGS_FILE);
+			const merged = mergeModelSelection(readJsonFile(settingsPath), selection);
+			writeFileSync(settingsPath, JSON.stringify(merged, null, '\t') + '\n');
+		}
+		updated.push(machine);
+	}
+	return updated;
 }
 
 /** A sentinel a step returns when the user aborted (distinct from "skipped"). */

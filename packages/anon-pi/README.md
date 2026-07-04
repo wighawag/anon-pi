@@ -44,7 +44,7 @@ The **first time** you launch anon-pi with no config yet, it welcomes you and ru
 `init` is interactive and re-runnable. It:
 
 1. **Proxy** — probes common SOCKS ports, confirms SOCKS5 with a real handshake, shows the findings (evidence only, it never labels the exit provider), then runs `netcage verify` and shows the real EXIT IP as proof it is not your host IP. You confirm on that evidence.
-2. **Local model** — captures the `host:port` of your model, probes it, then **imports models**. It merges two sources, both scoped to that endpoint: the provider in your own `~/.pi/agent/models.json` whose URL matches it (marked `[configured]` — your hand-tuned entries, with their `contextWindow`/`maxTokens`/etc.), and the endpoint's live `/v1/models` (marked `[server]`). You pick which to import (Enter/`c` = all configured, `a` = all, numbers, or `s` = skip) and which is the **default**. Because only the provider served by this endpoint (the one `--allow-direct` hole) is read, no other provider — and no other key — can ever enter the seed. It writes `models.json` + a settings seed that sets the default model. If the matching provider carries a real-looking apiKey, init **refuses** (it would put a host credential into the anon home) unless you pass `--force-allow-local-llm-api-key`.
+2. **Local model** — captures the `host:port` of your model, probes it, then **imports models**. It merges two sources, both scoped to that endpoint: the provider in your own `~/.pi/agent/models.json` whose URL matches it (marked `[configured]` — your hand-tuned entries, with their `contextWindow`/`maxTokens`/etc.), and the endpoint's live `/v1/models` (marked `[server]`). You pick which to import (Enter/`c` = all configured, `a` = all, numbers, or `s` = skip) and which is the **default**. Because only the provider served by this endpoint (the one `--allow-direct` hole) is read, no other provider — and no other key — can ever enter the seed. It writes a **global** `models.json` + settings seed (shared by every machine, since the `llm` endpoint is global) and updates any already-seeded machine homes in place (conversations untouched). If the matching provider carries a real-looking apiKey, init **refuses** (it would put a host credential into the anon home) unless you pass `--force-allow-local-llm-api-key`.
 3. **Image** — pick a shipped `Dockerfile` (built via `podman build`), an existing image ref, or skip.
 4. **Projects root** — the host folder mounted at `/projects` (where bare `anon-pi` looks for projects). Defaults to `~/.anon-pi/projects/`; point it at your own dev folder if you want to jail pi into files you edit with host tools (`--mount <parent>` still overrides it per-launch).
 
@@ -189,18 +189,22 @@ Everything anon-pi keeps lives under `~/.anon-pi/` (override with `ANON_PI_HOME`
 ```
 ~/.anon-pi/
   config.json                proxy, llm, defaultMachine, (optional) projects root
+  models.json                the GLOBAL local-model seed (shared by every machine)
+  settings-seed.json         the GLOBAL default-model selection seed
   machines/
     default/
       machine.json           pinned image, (optional) per-machine projects override
       home/                  the persistent $HOME bind-mounted at /root
         .pi/agent/           pi config, extensions, sessions (your conversations)
-      models.json            the generated local-model seed (mounted read-only on a fresh home)
+      models.json            OPTIONAL per-machine override of the global seed
   projects/                  the default global projects root (mounted at /projects)
     recon/
     ...
 ```
 
-The home is the durable, inspectable store. On a FRESH machine home, the image's staged defaults (`/opt/anon-pi-seed/agent`) and the machine's `models.json` are promoted in once and a marker is stamped; after that pi owns the home and your changes (added models, installed extensions) are never clobbered.
+**The local-model seed is GLOBAL.** Because `config.json` holds one `llm` endpoint (the single `--allow-direct` hole, shared by every machine), the `models.json` describing it lives once at the workspace root and seeds **every** machine's fresh home. `anon-pi init` writes it there (and updates any already-seeded machine homes in place, without touching conversations). A machine that needs a *different* local model can override it with its own `machines/<M>/models.json`.
+
+The home is the durable, inspectable store. On a FRESH machine home, the image's staged defaults (`/opt/anon-pi-seed/agent`) and the resolved `models.json` seed (per-machine override if present, else the global one) are promoted in once and a marker is stamped; after that pi owns the home and your changes (added models, installed extensions) are never clobbered.
 
 ## Providing a pi image
 

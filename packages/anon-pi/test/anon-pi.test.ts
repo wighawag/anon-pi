@@ -6,11 +6,16 @@ import {
 	builtinProjectsRoot,
 	generateModelsJson,
 	generateModelSelection,
+	globalModelsSeedPath,
+	globalSettingsSeedPath,
+	machineModelsSeedPath,
 	mergeModelSelection,
 	mergeModelSources,
 	parseModelsListing,
 	pickLocalProviderModels,
 	resolveHostModelsPath,
+	resolveModelsSeedPath,
+	resolveSettingsSeedPath,
 	hostPortKey,
 	machineDir,
 	machineHomeDir,
@@ -498,6 +503,52 @@ describe('resolveHostModelsPath', () => {
 		expect(resolveHostModelsPath({...base, piAgentDir: '/opt/pi'})).toBe(
 			'/opt/pi/models.json',
 		);
+	});
+});
+
+describe('GLOBAL model seed + per-machine override precedence', () => {
+	// the local model is a workspace-level thing (one global `llm`), so its seed
+	// is global and shared by every machine; a machine may override it.
+	it('global seed paths are at the workspace root', () => {
+		expect(globalModelsSeedPath(base)).toBe('/home/u/.anon-pi/models.json');
+		expect(globalSettingsSeedPath(base)).toBe(
+			'/home/u/.anon-pi/settings-seed.json',
+		);
+	});
+
+	it('every machine resolves the GLOBAL seed when it has no override', () => {
+		const onlyGlobal = new Set(['/home/u/.anon-pi/models.json']);
+		const exists = (p: string) => onlyGlobal.has(p);
+		expect(resolveModelsSeedPath(base, 'default', exists)).toBe(
+			'/home/u/.anon-pi/models.json',
+		);
+		// a DIFFERENT machine resolves the SAME global seed (the fix's whole point)
+		expect(resolveModelsSeedPath(base, 'webveil', exists)).toBe(
+			'/home/u/.anon-pi/models.json',
+		);
+	});
+
+	it('a per-machine models.json OVERRIDES the global for that machine only', () => {
+		const override = machineModelsSeedPath(base, 'webveil');
+		const present = new Set(['/home/u/.anon-pi/models.json', override]);
+		const exists = (p: string) => present.has(p);
+		// webveil wins with its own; default still gets the global
+		expect(resolveModelsSeedPath(base, 'webveil', exists)).toBe(override);
+		expect(resolveModelsSeedPath(base, 'default', exists)).toBe(
+			'/home/u/.anon-pi/models.json',
+		);
+	});
+
+	it('returns undefined when NEITHER a per-machine nor a global seed exists', () => {
+		expect(resolveModelsSeedPath(base, 'default', () => false)).toBeUndefined();
+		expect(
+			resolveSettingsSeedPath(base, 'default', () => false),
+		).toBeUndefined();
+	});
+
+	it('settings seed follows the same override > global precedence', () => {
+		const gl = '/home/u/.anon-pi/settings-seed.json';
+		expect(resolveSettingsSeedPath(base, 'm', (p) => p === gl)).toBe(gl);
 	});
 });
 
