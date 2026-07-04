@@ -26,6 +26,7 @@ import {
 	AnonPiError,
 	HELP,
 	MODELS_FILE,
+	SETTINGS_SEED_FILE,
 	SEED_MARKER,
 	DEFAULT_MACHINE,
 	envFromProcess,
@@ -61,6 +62,12 @@ import {
 	interpretSocks5Handshake,
 	initImageMenu,
 	generateModelsJson,
+	generateModelSelection,
+	pickLocalProviderModels,
+	parseModelsListing,
+	mergeModelSources,
+	resolveHostModelsPath,
+	LOCAL_PROVIDER_API_KEY,
 	parseVerifyExitIp,
 	processHint,
 	socks5hUrl,
@@ -74,12 +81,15 @@ import {
 	type InitImageChoice,
 	type AnonPiConfig,
 	type AnonPiEnv,
+	type GeneratedModel,
+	type ModelCandidate,
 	type KeptContainer,
 	type LaunchIntent,
 	type Machine,
 	type MachineConfig,
 	type MachineCommand,
 	type ParsedLaunch,
+	type PiModelsFile,
 } from './anon-pi.js';
 
 // The netcage label anon-pi stamps its launch-identity key onto (keptContainerKey)
@@ -234,9 +244,10 @@ function runLaunch(parsed: ParsedLaunch): number {
 		const home = machineHomeDir(env, machineName);
 		const machine: Machine = {name: machineName, home, image};
 
-		// The generated models.json for this machine (mounted read-only for the
-		// first-launch seed) when present. Keyed per machine, not per import.
+		// The generated models.json + settings seed for this machine (mounted
+		// read-only for the first-launch seed) when present. Keyed per machine.
 		const modelsSeed = join(machineDir(env, machineName), MODELS_FILE);
+		const settingsSeed = join(machineDir(env, machineName), SETTINGS_SEED_FILE);
 
 		intent = {
 			machine,
@@ -249,6 +260,7 @@ function runLaunch(parsed: ParsedLaunch): number {
 			proxy,
 			llmDirect: llm,
 			modelsSeed: existsSync(modelsSeed) ? modelsSeed : undefined,
+			settingsSeed: existsSync(settingsSeed) ? settingsSeed : undefined,
 		};
 	} catch (e) {
 		return reportAnonPiError(e);
@@ -949,13 +961,23 @@ WHAT IT DOES
   1. PROXY: probes common SOCKS ports, confirms SOCKS5 via a real handshake,
      shows the findings (EVIDENCE only, never a provider label), then runs
      \`netcage verify\` and shows the real EXIT IP as proof. You confirm.
-  2. LOCAL MODEL: captures host:port, probes reachability, generates models.json.
+  2. LOCAL MODEL: captures host:port, probes it, then IMPORTS models. It merges
+     your pi config's matching provider ([configured], well-tuned) with the
+     endpoint's live /v1/models ([server]); you pick which to import + the
+     default. Only the provider served by this endpoint (the one --allow-direct
+     hole) is ever read, so no other provider or key can enter the seed. Writes
+     models.json + a settings seed (the default-model selection).
   3. IMAGE: pick a shipped Dockerfile (built via podman), an existing ref, or skip.
   4. PROJECTS ROOT: the host folder mounted at /projects (default ~/.anon-pi/
      projects); point it at your own dev folder, or keep the default.
   Then writes ~/.anon-pi/config.json + the \`default\` machine. Never destroys homes.
 
   Runs AUTOMATICALLY the first time you launch anon-pi with no config yet.
+
+FLAGS
+  --force-allow-local-llm-api-key  carry a REAL apiKey from the matching host
+     provider into the seed (init refuses by default: a host credential should
+     not enter the anonymized machine home unless you say so).
 `;
 
 function runInit(args: string[]): number {
@@ -963,9 +985,12 @@ function runInit(args: string[]): number {
 		process.stdout.write(INIT_HELP);
 		return 0;
 	}
-	if (args.length > 0) {
+	const FORCE_KEY_FLAG = '--force-allow-local-llm-api-key';
+	const forceLocalApiKey = args.includes(FORCE_KEY_FLAG);
+	const extra = args.filter((a) => a !== FORCE_KEY_FLAG);
+	if (extra.length > 0) {
 		process.stderr.write(
-			`anon-pi: init takes no arguments, got: ${args.join(' ')}. Run \`anon-pi init --help\`.\n`,
+			`anon-pi: init takes no arguments (except ${FORCE_KEY_FLAG}), got: ${extra.join(' ')}. Run \`anon-pi init --help\`.\n`,
 		);
 		return 1;
 	}
@@ -993,10 +1018,13 @@ function runInit(args: string[]): number {
 	if (proxyHostPort === undefined) return 1;
 	const proxyUrl = socks5hUrl(proxyHostPort);
 
-	// 2) LOCAL MODEL endpoint: capture + probe + generate models.json.
-	const llm = initLlmStep(current.llm);
-	// llm may be undefined if the user skipped it (the launch path still errors
-	// without one, but init lets you set it later; we do not force it here).
+	// 2) LOCAL MODEL endpoint + model import: capture the endpoint, then merge the
+	//    host config's matching provider (well-tuned) with the endpoint's live
+	//    /v1/models, let the user pick which to import + the default. May ABORT
+	//    (a real host apiKey without --force-allow-local-llm-api-key).
+	const llmResult = initLlmStep(env, current.llm, forceLocalApiKey);
+	if (llmResult === ABORT) return 1;
+	const llm = llmResult.endpoint;
 
 	// 3) DEFAULT MACHINE IMAGE: menu (shipped Dockerfiles / existing ref / skip).
 	const image = initImageStep();
@@ -1024,20 +1052,45 @@ function runInit(args: string[]): number {
 	// pin/re-pin its image when one was chosen. Its home seeds on first launch.
 	initWriteDefaultMachine(env, image);
 
-	// The per-machine models.json seed for the default machine, generated from the
-	// captured endpoint (this is the `import` replacement). Only when we have an
-	// endpoint; written next to the machine so the first-launch seed mounts it.
-	if ((llm ?? current.llm) !== undefined) {
+	// The per-machine models.json + settings.json seed for the default machine,
+	// generated from the captured endpoint + the CHOSEN models (this is the
+	// `import` replacement). Written next to the machine so the first-launch seed
+	// promotes them into the fresh home.
+	const endpoint = llm ?? current.llm;
+	if (endpoint !== undefined) {
 		const mdir = machineDir(env, DEFAULT_MACHINE);
 		mkdirSync(mdir, {recursive: true});
-		const models = generateModelsJson((llm ?? current.llm) as string);
+		const models = generateModelsJson(
+			endpoint,
+			llmResult.models,
+			llmResult.apiKey,
+		);
 		writeFileSync(
 			join(mdir, MODELS_FILE),
 			JSON.stringify(models, null, '\t') + '\n',
 		);
 		process.stdout.write(
-			`anon-pi: wrote the local-model models.json for machine "${DEFAULT_MACHINE}".\n`,
+			`anon-pi: wrote the local-model models.json for machine "${DEFAULT_MACHINE}" ` +
+				`(${llmResult.models.length} model${llmResult.models.length === 1 ? '' : 's'}).\n`,
 		);
+
+		// settings.json: set the default model + enabledModels for the imported
+		// set. Written as a SEED that the first-launch promotion merges into the
+		// home's settings (so image-staged packages/extensions survive). Only when
+		// the user picked at least one model + a default.
+		if (llmResult.defaultId !== undefined && llmResult.models.length > 0) {
+			const selection = generateModelSelection(
+				llmResult.models.map((m) => m.id),
+				llmResult.defaultId,
+			);
+			writeFileSync(
+				join(mdir, SETTINGS_SEED_FILE),
+				JSON.stringify(selection, null, '\t') + '\n',
+			);
+			process.stdout.write(
+				`anon-pi: default model set to "${llmResult.defaultId}".\n`,
+			);
+		}
 	}
 
 	process.stdout.write(
@@ -1179,13 +1232,29 @@ function initProxyStep(currentProxy: string | undefined): string | undefined {
 	}
 }
 
+/** What initLlmStep resolves: the endpoint, the chosen model entries, the apiKey to seed, and the default id. */
+interface LlmStepResult {
+	endpoint: string | undefined;
+	models: GeneratedModel[];
+	apiKey: string;
+	defaultId: string | undefined;
+}
+
 /**
  * The LOCAL MODEL step: capture host:port (pre-filled from config), probe TCP
- * reachability (evidence, not a gate), and return the endpoint (undefined if the
- * user skips it). models.json is generated from it by runInit. The one direct
- * hole; all other egress stays proxied.
+ * reachability, then IMPORT models. It merges TWO sources, both scoped to the
+ * endpoint (the one `--allow-direct` hole, so no other provider can enter the
+ * seed): the host `~/.pi/agent/models.json` provider whose baseUrl matches the
+ * endpoint (well-tuned entries, marked [configured]) and the endpoint's live
+ * `/v1/models` (bare ids, marked [server]). The user picks which to import and
+ * the default. Returns the endpoint + chosen entries + apiKey + default, or
+ * ABORT (a real host apiKey without --force-allow-local-llm-api-key).
  */
-function initLlmStep(currentLlm: string | undefined): string | undefined {
+function initLlmStep(
+	env: AnonPiEnv,
+	currentLlm: string | undefined,
+	forceLocalApiKey: boolean,
+): LlmStepResult | typeof ABORT {
 	process.stdout.write(
 		'\nStep 2/4 - local model endpoint (the ONE direct hole)\n',
 	);
@@ -1196,10 +1265,17 @@ function initLlmStep(currentLlm: string | undefined): string | undefined {
 	const ans = promptLine(
 		`  Local model host:port, e.g. 192.168.1.150:8080${prefill}: `,
 	);
-	if (ans === undefined) return currentLlm;
-	const trimmed = ans.trim();
-	if (trimmed === '') return currentLlm;
-	const endpoint = trimmed;
+	const raw = ans === undefined ? '' : ans.trim();
+	const endpoint = raw === '' ? currentLlm : raw;
+	if (endpoint === undefined) {
+		// No endpoint at all: nothing to import.
+		return {
+			endpoint: undefined,
+			models: [],
+			apiKey: LOCAL_PROVIDER_API_KEY,
+			defaultId: undefined,
+		};
+	}
 
 	// Probe reachability: evidence only. A closed port is not fatal (the model may
 	// start later); we just report it.
@@ -1207,15 +1283,152 @@ function initLlmStep(currentLlm: string | undefined): string | undefined {
 	const colon = key.lastIndexOf(':');
 	const host = colon > 0 ? key.slice(0, colon) : key;
 	const port = colon > 0 ? Number(key.slice(colon + 1)) : 80;
-	if (Number.isFinite(port)) {
-		const reachable = probeTcp(host, port);
+	const reachable = Number.isFinite(port) ? probeTcp(host, port) : false;
+	process.stdout.write(
+		reachable
+			? `  reachable: ${host}:${port} accepted a TCP connection.\n`
+			: `  note: ${host}:${port} did not accept a connection now (the model may not be up yet).\n`,
+	);
+
+	// SOURCE A: the host models.json provider matching this endpoint (only that
+	// one — the anonymity scoping). Its apiKey is checked: a REAL key is refused
+	// unless --force-allow-local-llm-api-key.
+	const hostModels = readJsonFile(resolveHostModelsPath(env));
+	const match = pickLocalProviderModels(
+		(hostModels as PiModelsFile) ?? {},
+		endpoint,
+	);
+	let apiKey = LOCAL_PROVIDER_API_KEY;
+	if (match && match.apiKeyLooksReal) {
+		if (!forceLocalApiKey) {
+			process.stderr.write(
+				`\n  anon-pi: the matching provider in your pi config carries a real-looking\n` +
+					`  apiKey. Seeding it would put a host credential into the anonymized machine\n` +
+					`  home. Refusing. If this key is genuinely safe for the local model, re-run\n` +
+					`  \`anon-pi init --force-allow-local-llm-api-key\` to carry it through.\n`,
+			);
+			return ABORT;
+		}
+		apiKey = (match.apiKey ?? LOCAL_PROVIDER_API_KEY).trim();
 		process.stdout.write(
-			reachable
-				? `  reachable: ${host}:${port} accepted a TCP connection.\n`
-				: `  note: ${host}:${port} did not accept a connection now (the model may not be up yet).\n`,
+			'  WARNING: carrying the host provider apiKey into the seed (--force-allow-local-llm-api-key).\n',
 		);
 	}
-	return endpoint;
+	const hostModelEntries = match?.models ?? [];
+
+	// SOURCE B: the endpoint's live /v1/models (bare ids).
+	let serverIds: string[] = [];
+	if (Number.isFinite(port)) {
+		const listing = fetchModelsListing(host, port);
+		serverIds = parseModelsListing(listing);
+	}
+
+	if (hostModelEntries.length === 0 && serverIds.length === 0) {
+		process.stdout.write(
+			'  No models found (no matching provider in your pi config, and the server\n' +
+				'  returned none). The provider is still seeded; add models in pi later.\n',
+		);
+		return {endpoint, models: [], apiKey, defaultId: undefined};
+	}
+
+	const candidates = mergeModelSources(hostModelEntries, serverIds);
+	const chosen = initModelPicker(candidates);
+	if (chosen === undefined) {
+		// Skip: seed the provider with no models.
+		return {endpoint, models: [], apiKey, defaultId: undefined};
+	}
+	const defaultId = initDefaultModelPicker(chosen);
+	return {endpoint, models: chosen, apiKey, defaultId};
+}
+
+/**
+ * Present the merged candidate list and let the user choose which to import.
+ * Options: Enter/`c` = all CONFIGURED (host-tuned; the safe default), `a` = ALL
+ * (server + configured), space/comma-separated NUMBERS = those, `s` = skip.
+ * Returns the chosen entries, or undefined to skip (seed no models).
+ */
+function initModelPicker(
+	candidates: readonly ModelCandidate[],
+): GeneratedModel[] | undefined {
+	const configured = candidates.filter((c) => c.configured);
+	process.stdout.write('\n  Models served by this endpoint:\n');
+	candidates.forEach((c, i) => {
+		const tag = c.configured ? '[configured]' : '[server]';
+		process.stdout.write(`    [${i + 1}] ${c.id} ${tag}\n`);
+	});
+	process.stdout.write(
+		'  [configured] = from your pi config (well-tuned); [server] = the server\n' +
+			'  also reports it (a minimal entry is synthesized).\n',
+	);
+	const hasConfigured = configured.length > 0;
+	const defaultHint = hasConfigured
+		? 'Enter/c = all configured, a = all, numbers = pick, s = skip'
+		: 'Enter/a = all, numbers = pick, s = skip';
+	for (;;) {
+		const ans = promptLine(`  Import which? (${defaultHint}): `);
+		const v = (ans ?? '').trim().toLowerCase();
+		if (v === 's') return undefined;
+		if (v === '' && hasConfigured) return configured.map((c) => c.entry);
+		if (v === 'c') {
+			if (!hasConfigured) {
+				process.stdout.write(
+					'  No [configured] models; pick numbers or `a` for all.\n',
+				);
+				continue;
+			}
+			return configured.map((c) => c.entry);
+		}
+		if (v === 'a' || (v === '' && !hasConfigured)) {
+			return candidates.map((c) => c.entry);
+		}
+		// Numbers (space/comma separated).
+		const picks = v
+			.split(/[\s,]+/)
+			.filter((t) => t !== '')
+			.map((t) => Number(t) - 1);
+		if (
+			picks.length > 0 &&
+			picks.every((i) => i >= 0 && i < candidates.length)
+		) {
+			// De-dup, keep list order.
+			const seen = new Set<number>();
+			const out: GeneratedModel[] = [];
+			for (const i of picks) {
+				if (!seen.has(i)) {
+					seen.add(i);
+					out.push(candidates[i].entry);
+				}
+			}
+			return out;
+		}
+		process.stdout.write(
+			`  Please enter Enter/c/a/s or numbers 1-${candidates.length}.\n`,
+		);
+	}
+}
+
+/**
+ * Pick the DEFAULT model among the chosen ones. Defaults to the first (Enter);
+ * accepts a number. Returns the chosen id.
+ */
+function initDefaultModelPicker(chosen: readonly GeneratedModel[]): string {
+	if (chosen.length === 1) return chosen[0].id;
+	process.stdout.write('\n  Which is the DEFAULT model?\n');
+	chosen.forEach((m, i) => {
+		process.stdout.write(`    [${i + 1}] ${m.id}\n`);
+	});
+	for (;;) {
+		const ans = promptLine(
+			`  Default [1-${chosen.length}] (Enter = ${chosen[0].id}): `,
+		);
+		const v = (ans ?? '').trim();
+		if (v === '') return chosen[0].id;
+		const idx = Number(v) - 1;
+		if (Number.isInteger(idx) && idx >= 0 && idx < chosen.length) {
+			return chosen[idx].id;
+		}
+		process.stdout.write(`  Please pick a number 1-${chosen.length}.\n`);
+	}
 }
 
 /**
@@ -1427,6 +1640,37 @@ function socks5Handshake(
  */
 function probeTcp(host: string, port: number): boolean {
 	return socks5Handshake(host, port, [], 500) !== undefined;
+}
+
+/**
+ * Best-effort SYNCHRONOUS HTTP GET of `http://<host:port>/v1/models` (the
+ * OpenAI-compatible model listing llama.cpp / vLLM / LM Studio serve). Runs a
+ * tiny worker on the same node binary (node has no sync HTTP), which fetches +
+ * prints the body, so init stays synchronous. Returns the PARSED JSON body, or
+ * undefined on any failure (unreachable / timeout / non-JSON) — init then falls
+ * back to manual entry. This is a DIRECT LAN fetch on the operator's host at
+ * init time (not inside the jail); it only ever touches the local-model
+ * endpoint, the same host:port that becomes the one `--allow-direct` hole.
+ */
+function fetchModelsListing(host: string, port: number): unknown {
+	const timeoutMs = 3000;
+	const script =
+		`const http=require('http');` +
+		`const req=http.get({host:${JSON.stringify(host)},port:${port},path:'/v1/models',timeout:${timeoutMs}},(res)=>{` +
+		`let b='';res.on('data',(c)=>{b+=c;if(b.length>1_000_000)req.destroy()});` +
+		`res.on('end',()=>{process.stdout.write(b);process.exit(0)})});` +
+		`req.on('timeout',()=>{req.destroy();process.exit(1)});` +
+		`req.on('error',()=>process.exit(1));`;
+	try {
+		const out = execFileSync(process.execPath, ['-e', script], {
+			encoding: 'utf8',
+			timeout: timeoutMs + 1500,
+			maxBuffer: 4 * 1024 * 1024,
+		});
+		return JSON.parse(out);
+	} catch {
+		return undefined;
+	}
 }
 
 /**

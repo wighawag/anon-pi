@@ -44,7 +44,7 @@ The **first time** you launch anon-pi with no config yet, it welcomes you and ru
 `init` is interactive and re-runnable. It:
 
 1. **Proxy** — probes common SOCKS ports, confirms SOCKS5 with a real handshake, shows the findings (evidence only, it never labels the exit provider), then runs `netcage verify` and shows the real EXIT IP as proof it is not your host IP. You confirm on that evidence.
-2. **Local model** — captures the `host:port` of your model, probes reachability, and generates the machine's `models.json`.
+2. **Local model** — captures the `host:port` of your model, probes it, then **imports models**. It merges two sources, both scoped to that endpoint: the provider in your own `~/.pi/agent/models.json` whose URL matches it (marked `[configured]` — your hand-tuned entries, with their `contextWindow`/`maxTokens`/etc.), and the endpoint's live `/v1/models` (marked `[server]`). You pick which to import (Enter/`c` = all configured, `a` = all, numbers, or `s` = skip) and which is the **default**. Because only the provider served by this endpoint (the one `--allow-direct` hole) is read, no other provider — and no other key — can ever enter the seed. It writes `models.json` + a settings seed that sets the default model. If the matching provider carries a real-looking apiKey, init **refuses** (it would put a host credential into the anon home) unless you pass `--force-allow-local-llm-api-key`.
 3. **Image** — pick a shipped `Dockerfile` (built via `podman build`), an existing image ref, or skip.
 4. **Projects root** — the host folder mounted at `/projects` (where bare `anon-pi` looks for projects). Defaults to `~/.anon-pi/projects/`; point it at your own dev folder if you want to jail pi into files you edit with host tools (`--mount <parent>` still overrides it per-launch).
 
@@ -222,7 +222,7 @@ A community image also exists ([`gni/pi-coding-agent-container`](https://github.
 
 ### Extensions, skills, and their services go in the image
 
-anon-pi deliberately generates **only your local model's `models.json`**, never copies your extensions or skills. That is on purpose: your extension set is an identity fingerprint, extensions run code and can leak, and many need a runtime that a copied folder cannot carry (for example `pi-webveil` needs a running SearXNG). The right home for capabilities is the **image**, installed once, reviewably, into the STAGING dir so anon-pi promotes them into a fresh machine home:
+anon-pi deliberately seeds **only your local model** (the `models.json` provider for the one `--allow-direct` endpoint, plus the default-model selection) — never your extensions or skills, and never any other provider from your config. That is on purpose: your extension set is an identity fingerprint, extensions run code and can leak, and many need a runtime that a copied folder cannot carry (for example `pi-webveil` needs a running SearXNG). The right home for capabilities is the **image**, installed once, reviewably, into the STAGING dir so anon-pi promotes them into a fresh machine home:
 
 ```dockerfile
 FROM node:24-bookworm-slim

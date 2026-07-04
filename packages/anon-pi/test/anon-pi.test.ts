@@ -2,8 +2,15 @@ import {describe, it, expect} from 'vitest';
 import {resolve as pathResolve} from 'node:path';
 import {
 	AnonPiError,
+	apiKeyLooksReal,
 	builtinProjectsRoot,
 	generateModelsJson,
+	generateModelSelection,
+	mergeModelSelection,
+	mergeModelSources,
+	parseModelsListing,
+	pickLocalProviderModels,
+	resolveHostModelsPath,
 	hostPortKey,
 	machineDir,
 	machineHomeDir,
@@ -18,6 +25,7 @@ import {
 	type AnonPiConfig,
 	type AnonPiEnv,
 	type MachineConfig,
+	type PiModelsFile,
 } from '../src/index.js';
 
 const base: AnonPiEnv = {
@@ -289,6 +297,206 @@ describe('generateModelsJson (endpoint-driven, no host read)', () => {
 		// so two calls with the same endpoint are deep-equal (pure).
 		expect(generateModelsJson('192.168.1.150:8080')).toEqual(
 			generateModelsJson('192.168.1.150:8080'),
+		);
+	});
+});
+
+describe('model import: parseModelsListing (/v1/models shapes)', () => {
+	it('extracts ids from an OpenAI-style { data: [{ id }] } body', () => {
+		expect(
+			parseModelsListing({data: [{id: 'a'}, {id: 'b'}, {id: '  c '}]}),
+		).toEqual(['a', 'b', 'c']);
+	});
+	it('accepts a { models: [...] } body and a bare array', () => {
+		expect(parseModelsListing({models: [{id: 'x'}]})).toEqual(['x']);
+		expect(parseModelsListing(['p', 'q'])).toEqual(['p', 'q']);
+	});
+	it('tolerates garbage / missing (returns [])', () => {
+		expect(parseModelsListing(undefined)).toEqual([]);
+		expect(parseModelsListing({})).toEqual([]);
+		expect(parseModelsListing({data: 'nope'})).toEqual([]);
+		expect(parseModelsListing({data: [{}, {id: 3}, {id: ''}]})).toEqual([]);
+	});
+});
+
+describe('model import: apiKeyLooksReal (benign vs secret)', () => {
+	it('treats benign placeholders as NOT real', () => {
+		for (const k of [
+			'',
+			'none',
+			'NONE',
+			'ollama',
+			'no-key',
+			'local',
+			undefined,
+		]) {
+			expect(apiKeyLooksReal(k)).toBe(false);
+		}
+	});
+	it('treats anything else as a real secret', () => {
+		expect(apiKeyLooksReal('sk-abc123')).toBe(true);
+		expect(apiKeyLooksReal('hf_xxx')).toBe(true);
+	});
+});
+
+describe('model import: pickLocalProviderModels (endpoint-scoped)', () => {
+	const host: PiModelsFile = {
+		providers: {
+			etherplay: {
+				baseUrl: 'https://claude.etherplay.io',
+				apiKey: 'sk-REALSECRET',
+				models: [{id: 'claude-opus'}],
+			},
+			'llamacpp-router': {
+				baseUrl: 'http://192.168.1.150:8080/v1',
+				apiKey: 'none',
+				models: [
+					{id: 'Hermes-3-70B', name: 'Hermes 3 70B', contextWindow: 131072},
+					{id: 'qwen3-coder-30B'},
+				],
+			},
+		},
+	};
+
+	it('returns ONLY the provider matching the endpoint (anonymity scoping)', () => {
+		const m = pickLocalProviderModels(host, '192.168.1.150:8080');
+		expect(m).toBeDefined();
+		expect(m!.models.map((x) => x.id)).toEqual([
+			'Hermes-3-70B',
+			'qwen3-coder-30B',
+		]);
+		// the etherplay provider (a paid API + a REAL key) is NEVER considered.
+		expect(m!.apiKey).toBe('none');
+		expect(m!.apiKeyLooksReal).toBe(false);
+	});
+
+	it('preserves the matching entry config (contextWindow etc.)', () => {
+		const m = pickLocalProviderModels(host, 'http://192.168.1.150:8080/v1');
+		const hermes = m!.models.find((x) => x.id === 'Hermes-3-70B');
+		expect(hermes?.contextWindow).toBe(131072);
+		expect(hermes?.name).toBe('Hermes 3 70B');
+	});
+
+	it('flags a REAL apiKey on the matching provider', () => {
+		const withKey: PiModelsFile = {
+			providers: {
+				local: {
+					baseUrl: 'http://10.0.0.9:8080/v1',
+					apiKey: 'sk-real',
+					models: [],
+				},
+			},
+		};
+		const m = pickLocalProviderModels(withKey, '10.0.0.9:8080');
+		expect(m!.apiKeyLooksReal).toBe(true);
+	});
+
+	it('returns undefined when no provider matches the endpoint', () => {
+		expect(pickLocalProviderModels(host, '10.9.9.9:1234')).toBeUndefined();
+	});
+});
+
+describe('model import: mergeModelSources (configured + server)', () => {
+	const configured = [
+		{
+			id: 'Hermes-3-70B',
+			name: 'Hermes 3 70B',
+			cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0},
+		},
+	];
+	it('marks host entries [configured] and endpoint-only ids [server]', () => {
+		const merged = mergeModelSources(configured, [
+			'Hermes-3-70B',
+			'default',
+			'qwen',
+		]);
+		const byId = Object.fromEntries(merged.map((c) => [c.id, c.configured]));
+		expect(byId['Hermes-3-70B']).toBe(true); // host wins (configured)
+		expect(byId['default']).toBe(false); // server-only
+		expect(byId['qwen']).toBe(false);
+		// sorted (localeCompare, case-insensitive) + deduped
+		expect(merged.map((c) => c.id)).toEqual([
+			'default',
+			'Hermes-3-70B',
+			'qwen',
+		]);
+	});
+	it('keeps the rich entry for a configured id present in both', () => {
+		const merged = mergeModelSources(configured, ['Hermes-3-70B']);
+		const h = merged.find((c) => c.id === 'Hermes-3-70B');
+		expect((h!.entry as {name?: string}).name).toBe('Hermes 3 70B');
+	});
+});
+
+describe('model import: generateModelsJson with full entries + apiKey', () => {
+	it('carries full model entries and the passed apiKey', () => {
+		const models = [
+			{
+				id: 'B',
+				name: 'B',
+				contextWindow: 8192,
+				cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0},
+			},
+			{
+				id: 'A',
+				name: 'A',
+				cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0},
+			},
+		];
+		const m = generateModelsJson('192.168.1.150:8080', models, 'none');
+		const p = m.providers!.local;
+		// sorted by id, deduped, verbatim config preserved
+		expect((p.models as {id: string}[]).map((x) => x.id)).toEqual(['A', 'B']);
+		expect((p.models as {contextWindow?: number}[])[1].contextWindow).toBe(
+			8192,
+		);
+		expect(p.apiKey).toBe('none');
+		expect(p.baseUrl).toBe('http://192.168.1.150:8080/v1');
+	});
+	it('still accepts bare id strings (server-only path)', () => {
+		const m = generateModelsJson('10.0.0.1:1', ['m1', 'm2']);
+		expect(
+			(m.providers!.local.models as {id: string}[]).map((x) => x.id),
+		).toEqual(['m1', 'm2']);
+	});
+});
+
+describe('model import: settings selection + merge', () => {
+	it('generateModelSelection sets defaultProvider/defaultModel/enabledModels', () => {
+		const sel = generateModelSelection(['B', 'A'], 'A');
+		expect(sel.defaultProvider).toBe('local');
+		expect(sel.defaultModel).toBe('A');
+		expect(sel.enabledModels).toEqual(['local/A', 'local/B']); // sorted, prefixed
+	});
+	it('mergeModelSelection overwrites ONLY the 3 keys, preserving the rest', () => {
+		const existing = {
+			packages: ['npm:pi-subagents'],
+			defaultModel: 'old',
+			defaultProvider: 'etherplay',
+			hideThinkingBlock: true,
+		};
+		const sel = generateModelSelection(['A'], 'A');
+		const merged = mergeModelSelection(existing, sel);
+		expect(merged.packages).toEqual(['npm:pi-subagents']); // preserved
+		expect(merged.hideThinkingBlock).toBe(true); // preserved
+		expect(merged.defaultProvider).toBe('local'); // overwritten
+		expect(merged.defaultModel).toBe('A'); // overwritten
+		expect(merged.enabledModels).toEqual(['local/A']);
+	});
+	it('mergeModelSelection tolerates a missing/garbage base', () => {
+		const sel = generateModelSelection(['A'], 'A');
+		expect(mergeModelSelection(undefined, sel).defaultModel).toBe('A');
+		expect(mergeModelSelection('nope', sel).defaultProvider).toBe('local');
+	});
+});
+
+describe('resolveHostModelsPath', () => {
+	it('defaults to ~/.pi/agent/models.json', () => {
+		expect(resolveHostModelsPath(base)).toBe('/home/u/.pi/agent/models.json');
+	});
+	it('honours PI_CODING_AGENT_DIR (piAgentDir)', () => {
+		expect(resolveHostModelsPath({...base, piAgentDir: '/opt/pi'})).toBe(
+			'/opt/pi/models.json',
 		);
 	});
 });

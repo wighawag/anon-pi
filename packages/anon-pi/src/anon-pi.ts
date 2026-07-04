@@ -90,11 +90,29 @@ export const CONTAINER_STAGE_DIR = '/opt/anon-pi-seed/agent';
  */
 export const CONTAINER_MODELS_SEED = '/anon-pi-seed/models.json';
 
+/**
+ * Where anon-pi mounts the generated settings SEED (the local-model default
+ * selection: defaultProvider/defaultModel/enabledModels) read-only, so the
+ * first-launch seed can MERGE it into the fresh home's settings.json (never
+ * clobbering image-staged packages/extensions).
+ */
+export const CONTAINER_SETTINGS_SEED = '/anon-pi-seed/settings.json';
+
 /** Marker file written into the agent dir after seeding; holds the seed version. */
 export const SEED_MARKER = '.anon-pi-seed';
 
-/** The single file the host-side seed carries: pi's model/provider registry. */
+/** The file the host-side seed carries: pi's model/provider registry. */
 export const MODELS_FILE = 'models.json';
+
+/** pi's settings file (holds defaultModel/defaultProvider/enabledModels + more). */
+export const SETTINGS_FILE = 'settings.json';
+
+/**
+ * The settings SEED file anon-pi writes next to a machine (the local-model
+ * selection fragment). Distinct name so it never collides with a real
+ * settings.json; the seed MERGES it into the home's settings on first launch.
+ */
+export const SETTINGS_SEED_FILE = 'settings-seed.json';
 
 /**
  * containerRunCmd builds the container command: on a FRESH home (no seed
@@ -145,6 +163,12 @@ export interface AnonPiEnv {
 	llmDirect?: string;
 	/** XDG_CONFIG_HOME, if set (used to derive the default anon-pi home). */
 	xdgConfigHome?: string;
+	/**
+	 * The host pi agent dir (PI_CODING_AGENT_DIR), used ONLY to locate the host
+	 * `~/.pi/agent/models.json` that `init` reads the matching local provider
+	 * from. Defaults to ~/.pi/agent. Never written.
+	 */
+	piAgentDir?: string;
 	/**
 	 * Absolute path to the Dockerfile.pi that ships with anon-pi, used only to
 	 * make the missing-image error's build command concrete. cli.ts resolves it
@@ -628,6 +652,12 @@ export interface LaunchIntent {
 	 * starts with no models; you add them in-session).
 	 */
 	modelsSeed?: string;
+	/**
+	 * The settings SEED to mount read-only for the first-launch seed (the
+	 * local-model default selection, e.g. <machine-dir>/settings-seed.json).
+	 * Omitted => no settings seed (no default model is pre-selected).
+	 */
+	settingsSeed?: string;
 	/** The seed version stamped into a fresh home's marker. Default SEED_VERSION. */
 	seedVersion?: string;
 }
@@ -903,6 +933,12 @@ export function resolveRunPlan(
 	if (modelsSeed !== undefined) {
 		netcageArgs.push('-v', `${modelsSeed}:${CONTAINER_MODELS_SEED}:ro`);
 	}
+	// The generated settings SEED (the local-model default selection) read-only,
+	// when present; the seed-if-fresh MERGES it into the home's settings.json.
+	const settingsSeed = nonEmpty(intent.settingsSeed);
+	if (settingsSeed !== undefined) {
+		netcageArgs.push('-v', `${settingsSeed}:${CONTAINER_SETTINGS_SEED}:ro`);
+	}
 	// The jail cwd.
 	netcageArgs.push('-w', cwd);
 	// The image, then the command: a marker-guarded seed-if-fresh then the tool.
@@ -943,11 +979,25 @@ export function resolveRunPlan(
 function containerSeedThen(seedVersion: string, exec: string): string {
 	const agent = CONTAINER_AGENT_DIR;
 	const marker = `${agent}/${SEED_MARKER}`;
+	const settings = `${agent}/${SETTINGS_FILE}`;
+	// Merge the settings SEED (the local-model default selection) into the home's
+	// settings.json, overwriting ONLY the three selection keys so any staged
+	// packages/extensions survive. Done with a node one-liner (pi is a node app,
+	// so node is on PATH). The seed path + target are shell-quoted single args.
+	const mergeSettings =
+		`{ [ -f "${CONTAINER_SETTINGS_SEED}" ] && node -e '` +
+		`const fs=require("fs");` +
+		`const seed=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));` +
+		`let cur={};try{cur=JSON.parse(fs.readFileSync(process.argv[2],"utf8"))}catch(e){}` +
+		`cur.defaultProvider=seed.defaultProvider;cur.defaultModel=seed.defaultModel;cur.enabledModels=seed.enabledModels;` +
+		`fs.writeFileSync(process.argv[2],JSON.stringify(cur,null,"\\t")+"\\n")` +
+		`' "${CONTAINER_SETTINGS_SEED}" "${settings}" || true; }`;
 	return (
 		`mkdir -p "${agent}" && ` +
 		`if [ ! -f "${marker}" ]; then ` +
 		`{ [ -d "${CONTAINER_STAGE_DIR}" ] && cp -a "${CONTAINER_STAGE_DIR}/." "${agent}/" || true; } && ` +
 		`{ [ -f "${CONTAINER_MODELS_SEED}" ] && cp "${CONTAINER_MODELS_SEED}" "${agent}/${MODELS_FILE}" || true; } && ` +
+		`${mergeSettings} && ` +
 		`printf '%s\\n' "${seedVersion}" > "${marker}"; ` +
 		`fi && ` +
 		`${exec}`
@@ -1347,29 +1397,273 @@ export const LOCAL_PROVIDER_API = 'openai-completions';
 export const LOCAL_PROVIDER_API_KEY = 'none';
 
 /**
- * PURE: synthesize a barebones pi `models.json` from a single `llm` endpoint
- * (a URL, `ip:port`, or bare ip). It normalises the endpoint with `hostPortKey`
- * (drops scheme/path/user:pass@, lowercases) and returns a models.json carrying
- * exactly ONE local provider pointed at that endpoint.
- *
- * This REPLACES the old `import`-from-host-models.json flow: it reads NO host pi
- * config, so no other provider, no paid API key, no session identity can leak
- * into the seed. Endpoint in -> object out; `init` / seed-if-fresh write the
- * result into the machine home.
- *
- * The baseUrl is `http://<host[:port]>/v1` (the OpenAI-compatible convention the
- * completions api uses); the api dialect + benign apiKey are the LOCAL_PROVIDER_*
- * constants.
+ * apiKey values that are NOT real secrets (safe to carry into the anonymized
+ * seed verbatim). Anything else is treated as a REAL secret: `init` refuses to
+ * seed it (which would put a host credential into the anon home) unless the
+ * operator passes `--force-allow-local-llm-api-key`.
  */
-export function generateModelsJson(llmEndpoint: string): PiModelsFile {
+export const BENIGN_API_KEYS: ReadonlySet<string> = new Set([
+	'',
+	'none',
+	'ollama',
+	'no-key',
+	'nokey',
+	'local',
+	'dummy',
+	'sk-no-key-required',
+]);
+
+/** PURE: whether an apiKey looks like a REAL secret (i.e. not in the benign set). */
+export function apiKeyLooksReal(apiKey: string | undefined): boolean {
+	if (apiKey === undefined) return false;
+	return !BENIGN_API_KEYS.has(apiKey.trim().toLowerCase());
+}
+
+/**
+ * A pi model entry as anon-pi seeds it for the local provider. pi keys a model
+ * by `id`; `name` is the display label and `cost` is all-zero (a LAN model is
+ * free). A "server"-sourced entry is minimal (id/name/cost); a "configured"
+ * entry (imported from the host models.json) preserves whatever extra fields it
+ * carried (`contextWindow`, `maxTokens`, `reasoning`, `input`, ...) via the
+ * index signature.
+ */
+export interface GeneratedModel {
+	id: string;
+	name: string;
+	cost?: {input: number; output: number; cacheRead: number; cacheWrite: number};
+	[k: string]: unknown;
+}
+
+/**
+ * PURE: a candidate model for the `init` picker. `configured` means it came from
+ * the host `~/.pi/agent/models.json` provider that matches the endpoint (a
+ * well-tuned entry with its real config); otherwise it was only reported by the
+ * endpoint's `/v1/models` (a bare id we synthesize a minimal entry for). The
+ * picker marks configured ones so the user knows which are more likely correct.
+ */
+export interface ModelCandidate {
+	id: string;
+	configured: boolean;
+	/** The full pi model entry to seed (rich for configured, minimal otherwise). */
+	entry: GeneratedModel;
+}
+
+/**
+ * PURE: turn a discovered model `id` into a minimal-but-valid pi model entry.
+ * `name` defaults to the id; a LAN model is free, so every cost is 0.
+ */
+export function localModelEntry(id: string): GeneratedModel {
+	return {
+		id,
+		name: id,
+		cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0},
+	};
+}
+
+/**
+ * PURE: extract the model ids from a parsed OpenAI-compatible `/v1/models`
+ * response (`{ data: [{ id }, ...] }`, as llama.cpp / vLLM / LM Studio serve).
+ * Tolerates a bare array, a `models` key, missing/garbage input (returns []), so
+ * `init` can feed whatever the endpoint returned straight in.
+ */
+export function parseModelsListing(raw: unknown): string[] {
+	const rows: unknown[] = Array.isArray(raw)
+		? raw
+		: raw && typeof raw === 'object'
+			? (((raw as Record<string, unknown>).data as unknown[]) ??
+				((raw as Record<string, unknown>).models as unknown[]) ??
+				[])
+			: [];
+	if (!Array.isArray(rows)) return [];
+	const ids: string[] = [];
+	for (const r of rows) {
+		if (typeof r === 'string') {
+			if (r.trim() !== '') ids.push(r.trim());
+		} else if (r && typeof r === 'object') {
+			const id = (r as Record<string, unknown>).id;
+			if (typeof id === 'string' && id.trim() !== '') ids.push(id.trim());
+		}
+	}
+	return ids;
+}
+
+/** The result of scanning a host models.json for the endpoint's provider. */
+export interface HostProviderMatch {
+	/** The matching provider's models as full pi entries (verbatim host config). */
+	models: GeneratedModel[];
+	/** The matching provider's apiKey (verbatim), for the benign/real check. */
+	apiKey?: string;
+	/** True iff that apiKey looks like a REAL secret (init refuses without --force). */
+	apiKeyLooksReal: boolean;
+}
+
+/**
+ * PURE: find, in a parsed host `~/.pi/agent/models.json`, the provider whose
+ * `baseUrl` points at `llmEndpoint` (matched via hostPortKey), and return ONLY
+ * that provider's models + apiKey. This is the anonymity-critical scoping: the
+ * ONLY provider considered is the one served by the `--allow-direct` endpoint,
+ * so no other provider (etherplay/google/a paid API) — and no other provider's
+ * key — can ever enter the seed. Returns undefined when no provider matches.
+ *
+ * The `--allow-direct` target and this match both go through hostPortKey, so a
+ * URL / ip:port / bare-ip host config all match the same endpoint.
+ */
+export function pickLocalProviderModels(
+	hostModels: PiModelsFile,
+	llmEndpoint: string,
+): HostProviderMatch | undefined {
+	const providers = hostModels.providers ?? {};
+	const want = hostPortKey(llmEndpoint);
+	for (const p of Object.values(providers)) {
+		if (!p || typeof p !== 'object' || !p.baseUrl) continue;
+		if (hostPortKey(p.baseUrl) !== want) continue;
+		const models: GeneratedModel[] = [];
+		for (const m of p.models ?? []) {
+			if (m && typeof m === 'object') {
+				const id = (m as Record<string, unknown>).id;
+				if (typeof id === 'string' && id.trim() !== '') {
+					models.push({...(m as GeneratedModel), id: id.trim()});
+				}
+			} else if (typeof m === 'string' && m.trim() !== '') {
+				models.push(localModelEntry(m.trim()));
+			}
+		}
+		return {
+			models,
+			apiKey: p.apiKey,
+			apiKeyLooksReal: apiKeyLooksReal(p.apiKey),
+		};
+	}
+	return undefined;
+}
+
+/**
+ * PURE: merge the host-config models (rich, `configured: true`) with the
+ * endpoint's live `/v1/models` ids (`configured: false` for any the host did not
+ * already carry), into ONE deduped, sorted candidate list. Host config wins on
+ * an id present in both (it has the real config). Every candidate here is served
+ * by the endpoint, so every one is `--allow-direct`-reachable; the merge just
+ * unions "what you already configured" with "what the server also offers".
+ */
+export function mergeModelSources(
+	hostModels: readonly GeneratedModel[],
+	serverIds: readonly string[],
+): ModelCandidate[] {
+	const byId = new Map<string, ModelCandidate>();
+	for (const m of hostModels) {
+		const id = m.id.trim();
+		if (id === '') continue;
+		byId.set(id, {id, configured: true, entry: {...m, id}});
+	}
+	for (const raw of serverIds) {
+		const id = raw.trim();
+		if (id === '' || byId.has(id)) continue;
+		byId.set(id, {id, configured: false, entry: localModelEntry(id)});
+	}
+	return Array.from(byId.values()).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
+ * PURE: synthesize a pi `models.json` for the local provider from an endpoint
+ * and the CHOSEN model entries. It normalises the endpoint with hostPortKey and
+ * returns a models.json carrying exactly ONE provider (named LOCAL_PROVIDER_NAME
+ * — a neutral name, no host fingerprint) pointed at that endpoint.
+ *
+ * `apiKey` defaults to the benign LOCAL_PROVIDER_API_KEY. A caller may pass the
+ * host provider's real key ONLY under an explicit force flag; the benign/real
+ * decision (and the refusal) lives in `init`, not here — this pure function just
+ * writes what it is given.
+ *
+ * Accepts either full model entries (from the host config) or bare id strings
+ * (which it turns into minimal entries). Empty models => a provider pointed at
+ * the endpoint with no pickable model (the degraded fallback).
+ */
+export function generateModelsJson(
+	llmEndpoint: string,
+	models: readonly (GeneratedModel | string)[] = [],
+	apiKey: string = LOCAL_PROVIDER_API_KEY,
+): PiModelsFile {
 	const hostPort = hostPortKey(llmEndpoint);
+	const entries: GeneratedModel[] = [];
+	const seen = new Set<string>();
+	for (const m of models) {
+		const entry = typeof m === 'string' ? localModelEntry(m.trim()) : m;
+		const id = entry.id.trim();
+		if (id === '' || seen.has(id)) continue;
+		seen.add(id);
+		entries.push({...entry, id});
+	}
+	entries.sort((a, b) => a.id.localeCompare(b.id));
 	const provider: PiProvider = {
 		api: LOCAL_PROVIDER_API,
-		apiKey: LOCAL_PROVIDER_API_KEY,
+		apiKey,
 		baseUrl: `http://${hostPort}/v1`,
-		models: [],
+		models: entries,
 	};
 	return {providers: {[LOCAL_PROVIDER_NAME]: provider}};
+}
+
+/** The pi settings.json keys anon-pi sets for the local-model default selection. */
+export interface ModelSelection {
+	defaultProvider: string;
+	defaultModel: string;
+	enabledModels: string[];
+}
+
+/**
+ * PURE: the model-selection settings.json fragment for the seeded local
+ * provider: `defaultProvider` = LOCAL_PROVIDER_NAME, `defaultModel` = the chosen
+ * default id, `enabledModels` = `local/<id>` for each imported model (pi's
+ * `<provider>/<id>` convention). The caller MERGES this into any existing
+ * settings so image-staged settings (packages/extensions) are preserved.
+ */
+export function generateModelSelection(
+	modelIds: readonly string[],
+	defaultId: string,
+): ModelSelection {
+	const ids = Array.from(
+		new Set(modelIds.map((m) => m.trim()).filter((m) => m !== '')),
+	).sort((a, b) => a.localeCompare(b));
+	return {
+		defaultProvider: LOCAL_PROVIDER_NAME,
+		defaultModel: defaultId.trim(),
+		enabledModels: ids.map((id) => `${LOCAL_PROVIDER_NAME}/${id}`),
+	};
+}
+
+/**
+ * PURE: shallow-merge the local-model selection into an existing (parsed)
+ * settings.json object, returning the merged object. Only the three selection
+ * keys are overwritten; every other key the user/image had (packages,
+ * extensions, thinking level, ...) is preserved. `existing` undefined/garbage is
+ * treated as `{}`.
+ */
+export function mergeModelSelection(
+	existing: unknown,
+	selection: ModelSelection,
+): Record<string, unknown> {
+	const base: Record<string, unknown> =
+		existing && typeof existing === 'object'
+			? {...(existing as Record<string, unknown>)}
+			: {};
+	base.defaultProvider = selection.defaultProvider;
+	base.defaultModel = selection.defaultModel;
+	base.enabledModels = selection.enabledModels;
+	return base;
+}
+
+/**
+ * The host `~/.pi/agent/models.json` path `init` reads the matching local
+ * provider from. Uses the container-less host HOME (or PI_CODING_AGENT_DIR when
+ * the user relocated pi's agent dir). This is READ-ONLY (init copies only the
+ * ONE matching provider's models); it is never written.
+ */
+export function resolveHostModelsPath(env: AnonPiEnv): string {
+	const agentDir =
+		env.piAgentDir && env.piAgentDir.trim() !== ''
+			? env.piAgentDir
+			: join(env.home, '.pi', 'agent');
+	return join(agentDir, MODELS_FILE);
 }
 
 /**
@@ -1914,6 +2208,7 @@ export function envFromProcess(
 		image: penv.ANON_PI_IMAGE,
 		llmDirect: penv.ANON_PI_LLM,
 		xdgConfigHome: penv.XDG_CONFIG_HOME,
+		piAgentDir: penv.PI_CODING_AGENT_DIR,
 		dockerfilePath: shippedDockerfilePath(),
 		webveilDockerfilePath: shippedWebveilDockerfilePath(),
 	};
