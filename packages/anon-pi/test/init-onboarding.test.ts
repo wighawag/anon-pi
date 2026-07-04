@@ -153,6 +153,37 @@ describe('formatProxyFindings', () => {
 		expect(out.toLowerCase()).toContain('host:port');
 	});
 
+	it('shows the HOST-WIDE process note ONCE, not glued onto every port', () => {
+		const out = formatProxyFindings(
+			[
+				{host: '127.0.0.1', port: 9050, open: false},
+				{host: '127.0.0.1', port: 9150, open: false},
+				{
+					host: '127.0.0.1',
+					port: 1080,
+					open: true,
+					handshake: {socks5: true, method: 0},
+					portHint: 'generic SOCKS (wireproxy / ssh -D)',
+				},
+			],
+			'a `tor` process is running -> likely Tor',
+		);
+		// the note appears exactly once (as a general Note line), not per port.
+		const occurrences = out.split('a `tor` process is running').length - 1;
+		expect(occurrences).toBe(1);
+		expect(out).toContain('Note: a `tor` process is running -> likely Tor');
+		// closed ports carry no process hint noise.
+		expect(out).toContain('127.0.0.1:9050: closed');
+	});
+
+	it('omits the host-wide process note when there is none', () => {
+		const out = formatProxyFindings(
+			[{host: '127.0.0.1', port: 1080, open: true}],
+			undefined,
+		);
+		expect(out).not.toContain('Note:');
+	});
+
 	// THE HARD HONESTY INVARIANT: no matter what a probe found (even a crafted
 	// process/hint containing a brand), the formatter NEVER emits an exit-provider
 	// label. This is the executable half of the never-label-the-provider rule.

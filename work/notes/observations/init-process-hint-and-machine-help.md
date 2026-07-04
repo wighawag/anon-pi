@@ -12,3 +12,14 @@ While building `cli-init-onboarding`:
   global `--help` check in `main()` fires first (I narrowly excepted only `init`
   to keep `machine`'s historical behaviour). So `MACHINE_HELP` (in `cli.ts`) is
   effectively dead for the `--help` path. Not touched here (out of scope).
+
+---
+
+RESOLVED (2026-07-04): both fixed.
+- `formatProxyFindings` now takes an optional host-wide `processNote`, shown ONCE
+  as a general note; `init` passes the hint there instead of per-finding. Tests
+  in `init-onboarding.test.ts` assert it appears once and closed ports carry no
+  hint noise.
+- The top-level `--help` intercept in `main()` now excepts BOTH `init` and
+  `machine`, so `anon-pi machine --help`/`-h` reach `MACHINE_HELP`. Tests added
+  in `cli-machine.test.ts`.

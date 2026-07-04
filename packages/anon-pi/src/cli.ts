@@ -92,10 +92,14 @@ function main(argv: string[]): number {
 
 	// The global `--help`/`-h` prints the top-level HELP, EXCEPT when the first
 	// token is a subcommand that owns its own `--help` (so `anon-pi init --help`
-	// shows init's help, not the global one). `machine` keeps its historical global
-	// help (its own MACHINE_HELP is reached only via a bare `machine --help` path
-	// there); `init` routes to runInit for its own INIT_HELP.
-	if ((args.includes('--help') || args.includes('-h')) && args[0] !== 'init') {
+	// and `anon-pi machine --help` show THEIR help, not the global one). Those
+	// subcommands route to runInit / runMachine, which print INIT_HELP /
+	// MACHINE_HELP respectively.
+	const OWN_HELP_SUBCOMMANDS = new Set(['init', 'machine']);
+	if (
+		(args.includes('--help') || args.includes('-h')) &&
+		!OWN_HELP_SUBCOMMANDS.has(args[0] ?? '')
+	) {
 		process.stdout.write(HELP);
 		return 0;
 	}
@@ -1006,25 +1010,28 @@ function initProxyStep(currentProxy: string | undefined): string | undefined {
 	}
 	process.stdout.write('  Probing common SOCKS ports (evidence only)...\n');
 
-	// Probe each default port: TCP-open + a real SOCKS5 handshake, plus the weak
-	// process hints (a running `tor`/`wireproxy` LOCAL process, never the exit
-	// provider). The findings display is the PURE formatter's job.
+	// Probe each default port: TCP-open + a real SOCKS5 handshake. The weak
+	// process hint (a running `tor`/`wireproxy` LOCAL process, never the exit
+	// provider) is HOST-WIDE, so gather it ONCE and pass it as the formatter's
+	// single general note rather than gluing it onto every port line. The display
+	// is the PURE formatter's job.
 	const runningProcesses = observeRunningProcesses();
+	const processNote = matchProcessHint(runningProcesses);
 	const findings: ProxyFinding[] = DEFAULT_SOCKS_PROBE_PORTS.map(
 		({port, hint}) => {
 			const {open, handshake} = probeSocks5('127.0.0.1', port);
-			const ph = matchProcessHint(runningProcesses);
 			return {
 				host: '127.0.0.1',
 				port,
 				open,
 				handshake,
 				portHint: hint,
-				processHint: ph,
 			};
 		},
 	);
-	process.stdout.write('\n' + formatProxyFindings(findings) + '\n\n');
+	process.stdout.write(
+		'\n' + formatProxyFindings(findings, processNote) + '\n\n',
+	);
 
 	// Offer the SOCKS5-confirmed candidates as quick picks; always allow a manual
 	// host:port entry (and pre-fill the current one).

@@ -64,6 +64,38 @@ anon-pi --delete-project <p>   delete a project's files + its per-machine sessio
 
 A `<project>` is a folder under the projects root (mounted at `/projects`; pi's cwd). The token `.` means the root itself (a scratch pi at `/projects`, at `/work` under `--mount`, or at `~` for a shell). A named project is created on the host if it does not exist yet.
 
+Every subcommand carries its own help: `anon-pi --help` (the launch surface), `anon-pi init --help`, and `anon-pi machine --help`.
+
+### Common tasks
+
+| I want to… | Command |
+| --- | --- |
+| Set up (first time / reconfigure) | `anon-pi init` |
+| Just pick something to work on | `anon-pi` (the menu) |
+| Work in a project | `anon-pi <project>` |
+| Resume a project's conversation | `anon-pi <project>` (same machine + project ⇒ same session) |
+| Run a one-shot prompt (scriptable) | `anon-pi <project> -p "…"` |
+| Hop between projects / poke the box | `anon-pi --shell` then `cd /projects/<p> && pi` |
+| A scratch pi not tied to a subfolder | `anon-pi .` |
+| Use a separate anonymized environment | `anon-pi -m <machine> <project>` |
+| Jail pi into a host folder you edit with host tools | `anon-pi --mount <host-parent> <subfolder>` |
+| Install system tools and keep them | `anon-pi --keep --shell` (then `apt install …`) |
+| Add a second machine | `anon-pi machine create <name> --image <ref>` |
+| Reset a machine's conversations | `anon-pi --delete-home [<machine>]` |
+| Delete a project (files + its sessions) | `anon-pi --delete-project <project>` |
+
+### A first session, end to end
+
+```sh
+anon-pi init                       # verify proxy (see the real exit IP), capture your model, build an image
+anon-pi recon                      # creates ~/.anon-pi/projects/recon, launches pi there
+# … work in pi; exit pi returns you to your host shell …
+anon-pi recon                      # later: same project, same machine ⇒ your conversation resumes
+anon-pi --shell                    # sit on the machine: cd /projects/recon && pi, run tmux, etc.
+```
+
+Nothing you care about lives in the container: your conversation, config, and files are all in `~/.anon-pi/`, so the throwaway container going away on exit loses nothing.
+
 ### The bare menu
 
 Run `anon-pi` with no project and you get an interactive, arrow-key menu (up/down or `k`/`j` to move, Enter to select, Ctrl-C to quit). It lists the projects under the active root and marks which the current machine has already worked on ("used" vs "new here"), plus a `.` here entry, a shell entry, and a "new project" entry. Picking a project launches it **byte-for-byte identically** to typing the equivalent command. `-m <machine>` and `--mount <parent>` with no project also open the menu (scoped to that machine / root).
@@ -235,6 +267,16 @@ anon-pi 0.4.0 was a **per-workdir** launcher: a bare positional was a host folde
   ```
 
 Start fresh with `anon-pi init`, then `anon-pi` (the menu) or `anon-pi <project>`.
+
+## Troubleshooting
+
+- **`netcage not found on PATH`** — anon-pi is a launcher for [netcage](https://github.com/wighawag/netcage); install netcage first (Linux only).
+- **`set ANON_PI_PROXY …` (fail-closed)** — no proxy is configured. Run `anon-pi init` to detect + verify one, or export `ANON_PI_PROXY=socks5h://<host:port>`. There is deliberately no default: the proxy is what anonymizes, so it is never guessed.
+- **A launch says the machine has no image** — pin one: `anon-pi machine set-image default <ref>`, or export `ANON_PI_IMAGE=<ref>`, or re-run `anon-pi init` and pick/build a `Dockerfile`. See [Providing a pi image](#providing-a-pi-image).
+- **`no TTY` on a bare `anon-pi`** — the menu and interactive pi need a terminal. In a script, name the project and forward args: `anon-pi <project> <pi-args…>` (that path needs no TTY).
+- **The exit IP looks like your home IP** — the proxy is not actually anonymizing. Re-run `anon-pi init`; its `netcage verify` step prints the real exit IP as proof. anon-pi never claims a provider, only shows you the exit.
+- **A destructive verb won't run in a script** — `machine rm` / `--delete-home` / `--delete-project` confirm on a TTY and abort non-interactively; pass `--yes` to proceed unattended.
+- **`--keep` re-entry started a fresh container** — a kept container is matched by its `(machine, projects-root, project)` identity; changing any of those (a different `-m`, a different `--mount` parent, a different project) is a different launch and gets its own container.
 
 ## Platform
 

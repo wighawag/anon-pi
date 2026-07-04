@@ -206,3 +206,22 @@ describe('isolation: the real ~/.anon-pi is never touched', () => {
 		expect(existsSync(join(realHome, 'machines', 'recon'))).toBe(false);
 	});
 });
+
+describe('machine --help', () => {
+	// `machine --help` must reach MACHINE_HELP, not the global HELP: the top-level
+	// --help intercept excepts the subcommands that own their own help.
+	it('`machine --help` prints the machine help (not the global one)', () => {
+		const r = run(['machine', '--help'], {home: tempHome()});
+		expect(r.status).toBe(0);
+		expect(r.stdout).toContain('anon-pi machine - manage machines');
+		expect(r.stdout).toContain('set-image');
+		// NOT the global top-level help header.
+		expect(r.stdout).not.toContain('launch pi inside a netcage');
+	});
+
+	it('`machine -h` also prints the machine help', () => {
+		const r = run(['machine', '-h'], {home: tempHome()});
+		expect(r.status).toBe(0);
+		expect(r.stdout).toContain('anon-pi machine - manage machines');
+	});
+});

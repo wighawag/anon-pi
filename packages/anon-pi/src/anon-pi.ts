@@ -1,36 +1,45 @@
 // anon-pi: the PURE logic (no process spawning, no interactive I/O) so every
 // decision is unit-testable. cli.ts wires this to the real filesystem + spawn.
 //
-// What anon-pi does (settled design):
-//   - ALWAYS seed a per-workdir writable copy of the canonical anon-pi config
-//     (~/.config/anon-pi/agent) into a per-session dir keyed by the workdir, and
-//     mount THAT as the container's pi global (PI_CODING_AGENT_DIR). The
-//     canonical config is only ever READ (at seed time), never mounted, so the
-//     container cannot mutate it.
-//   - Mount the workdir separately at /work (pi's cwd; the user's files land on
-//     the host). A user-supplied /work/.pi/ override is just pi's own
-//     project-over-global layering; anon-pi neither creates nor requires it.
-//   - Open exactly ONE direct hole (--allow-direct <ANON_PI_LLM>) so pi can reach
-//     a local model while all other egress stays forced through the proxy.
-//   - NEVER auto-populate the canonical seed: if it is absent, error and tell the
-//     user to populate it (their anon accounts / chosen skills / a valid
-//     trust.json that trusts /work). anon-pi does not synthesize pi's trust.json.
-//   - Session identity = the ABSOLUTE workdir path (hashed). Same folder resumes
-//     the same session config+state; reseed is manual (delete the session dir).
+// The model (machines + projects; see CONTEXT.md + docs/adr/0001):
+//   - A MACHINE is an image + a persistent HOST home (`machines/<M>/home`),
+//     bind-mounted into the jail at /root. It holds shell config, pi config +
+//     extensions, and pi conversations (`~/.pi/agent/sessions/`). The container
+//     is disposable; ALL valuable state is in this host home.
+//   - A PROJECT is a folder under the PROJECTS ROOT, bind-mounted at /projects,
+//     so a project's cwd is /projects/<name>. pi keys a conversation by its
+//     launch cwd, so /projects/<name> is the conversation key (per-machine,
+//     since it lives in that machine's home).
+//   - TWO invariant container mounts, always: /root (the machine home) and
+//     /projects (the projects root). `--mount <parent>` adds EXACTLY one more
+//     mount at the DISTINCT /work and re-roots cwd there; nothing else changes,
+//     so we never remount a running container.
+//   - Throwaway (`--rm`) is the DEFAULT; `--keep` leaves the container kept so
+//     its filesystem survives (found + resumed by netcage's `netcage.managed`
+//     label via `netcage start`). The machine home persists either way.
+//   - Open exactly ONE direct hole (--allow-direct <llm>) so pi can reach a
+//     local model while ALL other egress stays forced through the socks5h proxy
+//     (fail-closed; the proxy is REQUIRED and never guessed).
+//   - Seed-if-fresh (marker-guarded, per MACHINE home): on a fresh home, promote
+//     the image's /root defaults + pi staging + the generated models.json into
+//     the home once, then stamp the marker and never clobber it again.
+//
+// This module holds every DECISION as a pure function (config load + precedence,
+// machine/project resolvers, name validation, the RunPlan argv, the menu
+// choice-list, project usage, the run-vs-start rule, models.json generation,
+// init's proxy detect/verify decisions). cli.ts owns only the impure edges (fs,
+// the interactive TUI, the netcage query, the spawn).
 
 import {existsSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-/** The container path the workdir is mounted at (pi's cwd). */
-export const CONTAINER_WORKDIR = '/work';
-
 /**
  * The jail cwd root for the projects-root launch: the projects root is mounted
  * here and a project `<name>` is `/projects/<name>` (pi keys a conversation by
  * its launch cwd, so `/projects/<name>` is the conversation key). This is the
- * new machines+projects mount, distinct from the legacy CONTAINER_WORKDIR.
+ * machines + projects mount (distinct from `--mount`'s /work).
  */
 export const CONTAINER_PROJECTS_ROOT = '/projects';
 
@@ -1552,14 +1561,24 @@ export const FORBIDDEN_PROVIDER_LABELS: readonly string[] = [
  * PURE: format the probe findings into the human-readable block `init` shows
  * before asking the user to CHOOSE a proxy. It renders EVIDENCE ONLY: for each
  * candidate, the `host:port`, whether it is open, the SOCKS5 handshake verdict,
- * the structural port hint, and any WEAK local process hint. It NEVER emits an
- * exit-provider label (a SOCKS proxy does not announce its provider; a false
- * label is a dangerous lie). The `## Decisions` note + a test assert the output
- * never contains a FORBIDDEN_PROVIDER_LABELS substring for any input.
+ * and the structural PORT hint. It NEVER emits an exit-provider label (a SOCKS
+ * proxy does not announce its provider; a false label is a dangerous lie). The
+ * `## Decisions` note + a test assert the output never contains a
+ * FORBIDDEN_PROVIDER_LABELS substring for any input.
+ *
+ * `processNote` is the HOST-WIDE weak process hint (a running `tor`/`wireproxy`
+ * LOCAL process), shown ONCE as a general note rather than glued onto every port
+ * line: the observation is host-wide, not per-port, so repeating it on each
+ * candidate (including closed ports the process is unrelated to) reads as noise.
+ * A per-finding `processHint`, if still set, is also honoured inline for
+ * backward compatibility, but `init` now passes the host-wide note instead.
  *
  * Findings in -> display string out; the socket probes are cli.ts's job.
  */
-export function formatProxyFindings(findings: readonly ProxyFinding[]): string {
+export function formatProxyFindings(
+	findings: readonly ProxyFinding[],
+	processNote?: string,
+): string {
 	if (findings.length === 0) {
 		return 'No SOCKS ports responded on the probed set. Enter your proxy as host:port.';
 	}
@@ -1581,6 +1600,11 @@ export function formatProxyFindings(findings: readonly ProxyFinding[]): string {
 		if (f.processHint) hints.push(f.processHint);
 		const hintStr = hints.length > 0 ? ` [${hints.join('; ')}]` : '';
 		lines.push(`${where}: ${status}${hintStr}`);
+	}
+	// The host-wide process observation, shown ONCE (not per port). It is a weak
+	// LOCAL hint, never an exit-provider label.
+	if (processNote && processNote.trim() !== '') {
+		lines.push(`Note: ${processNote.trim()}`);
 	}
 	lines.push(
 		'These are EVIDENCE only (open ports + a real SOCKS5 handshake). A SOCKS ' +

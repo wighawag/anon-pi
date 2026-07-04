@@ -9,3 +9,11 @@ machines + projects model (two invariant mounts `/root` + `/projects`, per-machi
 home, `~/.anon-pi/`). Noticed while retiring the legacy pure surface; left
 untouched (a doc rewrite is outside that deletion task's scope). Worth a targeted
 header refresh so the module's own narrative reflects the new model.
+
+---
+
+RESOLVED (2026-07-04): the top-of-file docblock was rewritten to describe the
+machines + projects model (machine home at `/root`, projects root at `/projects`,
+the two-mount invariant, `--mount`/`/work`, `--rm` default + `--keep`, the one
+`--allow-direct` hole, per-machine seed-if-fresh). The now-dead `CONTAINER_WORKDIR`
+constant was also removed (only self-referenced).
