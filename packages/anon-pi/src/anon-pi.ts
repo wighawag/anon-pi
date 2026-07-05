@@ -428,16 +428,33 @@ export function resolveDeleteProject(args: {
 export const ROOT_TOKEN = '.';
 
 /**
- * Reserved names that a machine/project may NOT take (case-sensitive). Kept
- * DELIBERATELY minimal: only the two structural path tokens. `.` is the root
- * token (see ROOT_TOKEN); `..` is parent-traversal. Both are also rejected by
- * the leading-dot / `..` structural checks below, but are listed here so the
- * reserved-name concept is explicit and extendable. `--mount`'s `/work` is a
- * CONTAINER path, not a name in this namespace, so it needs no reservation.
+ * Reserved names that a machine/project/image may NOT take (case-sensitive).
+ * `.` is the root token (see ROOT_TOKEN); `..` is parent-traversal (both are
+ * also rejected by the structural checks below, but listed here so the
+ * reserved-name concept is explicit). `pi` is the passthrough token. The
+ * SUBCOMMAND NOUN words (`machine`, `image`, `init`, `forward`, `ports`) are
+ * reserved too: each is dispatched BEFORE the launch grammar, so a folder so
+ * named would be UNREACHABLE by bare name (a latent trap). Reserving them makes
+ * validateName refuse such a name up front with a clear error, closing the
+ * trap. `--mount`'s `/work` is a CONTAINER path, not a name here, so it needs no
+ * reservation. The reservation is GLOBAL (validateName is the one validator);
+ * the menu tolerates a pre-existing folder now reserved by FILTERING it out via
+ * the try/catch isProjectName, so a now-reserved folder is skipped, not a crash.
  */
-export const RESERVED_NAMES: readonly string[] = ['.', '..', 'pi'];
+export const RESERVED_NAMES: readonly string[] = [
+	'.',
+	'..',
+	'pi',
+	'machine',
+	'image',
+	'init',
+	'forward',
+	'ports',
+];
 // NOTE: `pi` is reserved so the `anon-pi pi <args…>` passthrough token
-// (PI_PASSTHROUGH_TOKEN) can never be shadowed by a project named `pi`.
+// (PI_PASSTHROUGH_TOKEN) can never be shadowed by a project named `pi`; the
+// subcommand nouns are reserved so a same-named folder is never an unreachable
+// shadow of a dispatched verb.
 
 /** What a name names, for a clear validation error. */
 export type NameKind = 'machine' | 'project';
@@ -1014,8 +1031,8 @@ export function retiredKeepRmMessage(flag: string): string {
 		`${flag} is gone: every launch is throwaway now (the container is always ` +
 		`removed on exit). To persist system state you set up in a session (e.g. after ` +
 		`\`apt install\`), snapshot the RUNNING container into a named image and use it:\n` +
-		`  anon-pi machine snapshot <name>        (freeze the running container -> a named machine + image)\n` +
-		`  anon-pi machine create <m> --image <name>   (a durable machine pinned to that image)\n` +
+		`  anon-pi image snapshot <name>        (freeze the running container -> anon-pi/<name>:latest)\n` +
+		`  anon-pi machine create <m> --image anon-pi/<name>:latest   (a durable machine pinned to it)\n` +
 		`Your pi config + conversations live in the machine home (a host mount) and persist regardless.`
 	);
 }
@@ -1966,7 +1983,7 @@ export function deriveProjectUsage(args: {
 }
 
 /**
- * ONE session group a `machine snapshot` can carry over: a `sessions/<slug>/`
+ * ONE session group a snapshot's `--create-machine` carry-over can offer: a `sessions/<slug>/`
  * dir in the source home. `project` is the project name when the slug matches a
  * known project's `projectSessionSlug` (else undefined: an ORPHAN slug with no
  * matching project, still offered, labelled by its raw slug so nothing hides).
@@ -2905,18 +2922,15 @@ export function anonPiVersion(): string | undefined {
  *   - `set-image <name> <ref>`: name validated; the new image ref (non-empty).
  *   - `rm <name> [--yes]`: name validated; `yes` skips the confirm (the CLI
  *     still enforces the non-TTY abort when `yes` is false).
- *   - `snapshot <new-name> [-m <machine>] [--image-tag <ref>]`: the sole
- *     positional is the NEW machine name (validated); `-m <machine>` is an
- *     OPTIONAL filter (which running container to commit when several are up),
- *     NOT a required source. The CLI auto-detects the running container (picker
- *     when several match), commits it, and creates <new-name> pinned to it.
+ *
+ * Snapshot moved OFF the `machine` noun to the `image` noun (ADR-0003): see
+ * `parseImageArgs` / ImageCommand.
  */
 export type MachineCommand =
 	| {verb: 'create'; name: string; image?: string}
 	| {verb: 'list'}
 	| {verb: 'set-image'; name: string; image: string}
-	| {verb: 'rm'; name: string; yes: boolean}
-	| {verb: 'snapshot'; name: string; machine?: string; imageTag?: string};
+	| {verb: 'rm'; name: string; yes: boolean};
 
 /**
  * PURE: parse the tokens AFTER `machine` into a MachineCommand. Validates the
@@ -2938,9 +2952,7 @@ export function parseMachineArgs(args: readonly string[]): MachineCommand {
 
 	const verb = args[0];
 	if (verb === undefined) {
-		fail(
-			'`machine` needs a subcommand: create | list | set-image | rm | snapshot',
-		);
+		fail('`machine` needs a subcommand: create | list | set-image | rm');
 	}
 
 	const rest = args.slice(1);
@@ -3012,15 +3024,67 @@ export function parseMachineArgs(args: readonly string[]): MachineCommand {
 		return {verb: 'rm', name: name as string, yes};
 	}
 
+	return fail(
+		`unknown machine subcommand: ${verb} (create | list | set-image | rm)`,
+	);
+}
+
+// --- the `image` noun (ADR-0003): snapshot a running container into a clean
+// image tag with provenance labels, and a read-only list of anon-pi images. The
+// grammar parse, the clean tag derivation, the provenance-label build, and the
+// label read-back parse are all PURE here; the CLI does the netcage commit /
+// images / inspect I/O.
+
+/**
+ * A parsed `image <verb> …` command (ADR-0003 §1). A discriminated union so the
+ * CLI dispatches on `verb` with already-validated fields:
+ *   - `snapshot <name> [-m <machine>] [--create-machine <m>]`: commit the
+ *     RUNNING container into `anon-pi/<name>:latest`. `name` is a validated
+ *     image name (a safe tag segment). `-m <machine>` is an OPTIONAL filter
+ *     (which running container to commit when several are up), NOT a required
+ *     source. `--create-machine <m>` ALSO creates machine <m> from the fresh
+ *     snapshot (running the home-copy + session carry-over).
+ *   - `list`: no args (read-only; zero stored state).
+ */
+export type ImageCommand =
+	| {verb: 'snapshot'; name: string; machine?: string; createMachine?: string}
+	| {verb: 'list'};
+
+/**
+ * PURE: parse the tokens AFTER `image` into an ImageCommand. Validates the image
+ * name + the `-m` / `--create-machine` machine names via validateName (the
+ * reserved-name / traversal guard), so the CLI only ever joins safe segments.
+ * Throws AnonPiError (printed verbatim, exit 1) for an unknown/missing verb, a
+ * missing or extra positional, an unknown flag, or a bad name.
+ *
+ * `<name>` is validated with the `machine` kind: it shares the same
+ * folder-safe / reserved-name rules, and a snapshot name is an image-tag
+ * segment (`anon-pi/<name>:latest`), so the same guard applies.
+ */
+export function parseImageArgs(args: readonly string[]): ImageCommand {
+	const fail = (msg: string): never => {
+		throw new AnonPiError(
+			`anon-pi: ${msg}\nRun \`anon-pi image --help\` or \`anon-pi --help\`.`,
+		);
+	};
+
+	const verb = args[0];
+	if (verb === undefined) {
+		fail('`image` needs a subcommand: snapshot | list');
+	}
+
+	const rest = args.slice(1);
+
+	if (verb === 'list') {
+		if (rest.length > 0)
+			fail(`image list takes no arguments, got: ${rest.join(' ')}`);
+		return {verb: 'list'};
+	}
+
 	if (verb === 'snapshot') {
-		// snapshot <new-name> [-m <machine>] [--image-tag <ref>]: commit a RUNNING
-		// container into a new image and create <new-name> pinned to it. The sole
-		// positional is the new machine name; `-m` is an OPTIONAL filter (which
-		// container when several are up), not a required source. The CLI auto-detects
-		// the container (picker when several match).
 		let name: string | undefined;
 		let machine: string | undefined;
-		let imageTag: string | undefined;
+		let createMachine: string | undefined;
 		for (let i = 0; i < rest.length; i++) {
 			const a = rest[i];
 			if (a === '-m' || a === '--machine') {
@@ -3029,43 +3093,95 @@ export function parseMachineArgs(args: readonly string[]): MachineCommand {
 				machine = validateName(v as string, 'machine');
 				continue;
 			}
-			if (a === '--image-tag') {
+			if (a === '--create-machine') {
 				const v = rest[++i];
-				if (v === undefined) fail('--image-tag needs an image ref');
-				imageTag = v as string;
+				if (v === undefined) fail('--create-machine needs a machine name');
+				createMachine = validateName(v as string, 'machine');
 				continue;
 			}
 			if (a.startsWith('-')) fail(`unknown option: ${a}`);
 			if (name !== undefined)
-				fail(`machine snapshot takes one <new-name>, got extra: ${a}`);
+				fail(`image snapshot takes one <name>, got extra: ${a}`);
 			name = validateName(a, 'machine');
 		}
-		if (name === undefined) fail('machine snapshot needs a <new-name>');
+		if (name === undefined) fail('image snapshot needs a <name>');
 		return {
 			verb: 'snapshot',
 			name: name as string,
 			machine: nonEmpty(machine),
-			imageTag: nonEmpty(imageTag),
+			createMachine: nonEmpty(createMachine),
 		};
 	}
 
-	return fail(
-		`unknown machine subcommand: ${verb} (create | list | set-image | rm | snapshot)`,
-	);
+	return fail(`unknown image subcommand: ${verb} (snapshot | list)`);
 }
 
 /**
- * PURE: the default image ref a `machine snapshot` writes when `--image-tag` is
- * not given: `anon-pi/<name>:snapshot-<ts>`, where <ts> is a compact UTC stamp
- * (YYYYMMDDHHMMSS) derived from `now`. Deterministic in `now` so it is unit
- * testable. The name is a validated machine name (a safe image-path segment).
+ * PURE: the clean image tag a `image snapshot <name>` writes:
+ * `anon-pi/<name>:latest`. A same-name re-snapshot OVERWRITES this tag (that is
+ * what `:latest` means); the previous image becomes dangling but keeps its
+ * provenance label. The name is a validated image/machine name (a safe
+ * image-path segment).
  */
-export function snapshotImageRef(name: string, now: Date): string {
-	const p = (n: number, w = 2): string => String(n).padStart(w, '0');
-	const ts =
-		`${now.getUTCFullYear()}${p(now.getUTCMonth() + 1)}${p(now.getUTCDate())}` +
-		`${p(now.getUTCHours())}${p(now.getUTCMinutes())}${p(now.getUTCSeconds())}`;
-	return `anon-pi/${name}:snapshot-${ts}`;
+export function snapshotImageTag(name: string): string {
+	return `anon-pi/${validateName(name, 'machine')}:latest`;
+}
+
+/** The podman/anon-pi provenance label keys baked into a snapshot image. */
+export const PROVENANCE_LABEL_SOURCE_MACHINE = 'anon-pi.source-machine';
+export const PROVENANCE_LABEL_SOURCE_IMAGE = 'anon-pi.source-image';
+export const PROVENANCE_LABEL_SNAPSHOT_AT = 'anon-pi.snapshot-at';
+
+/**
+ * PURE: build the `LABEL k=v` change instructions a `netcage commit -c '…'`
+ * bakes into a snapshot image (ADR-0003 §2). Provenance is best-effort HISTORY:
+ * a label whose value is undefined/empty is OMITTED (a missing label beats a
+ * wrong one). `at` is required (the snapshot time is always known). Each string
+ * is ONE `LABEL key=value` instruction (the CLI passes each as a `-c` argv
+ * element; podman round-trips `/` and `:` in the value un-quoted, verified).
+ */
+export function snapshotProvenanceLabels(args: {
+	sourceMachine?: string;
+	sourceImage?: string;
+	at: string;
+}): string[] {
+	const labels: string[] = [];
+	const push = (key: string, value: string | undefined): void => {
+		const v = nonEmpty(value);
+		if (v !== undefined) labels.push(`LABEL ${key}=${v}`);
+	};
+	push(PROVENANCE_LABEL_SOURCE_MACHINE, args.sourceMachine);
+	push(PROVENANCE_LABEL_SOURCE_IMAGE, args.sourceImage);
+	push(PROVENANCE_LABEL_SNAPSHOT_AT, args.at);
+	return labels;
+}
+
+/** Provenance read back from a snapshot image's labels (any field may be absent). */
+export interface ImageProvenance {
+	sourceMachine?: string;
+	sourceImage?: string;
+	snapshotAt?: string;
+}
+
+/**
+ * PURE: parse the anon-pi provenance labels read back off an image (the CLI
+ * supplies the label map from `inspect --format '{{json .Config.Labels}}'`).
+ * Returns only the anon-pi provenance fields (a missing/empty label => an
+ * undefined field). Tolerant: any non-string / absent value is dropped, so a
+ * hand-edited or partial label set never throws.
+ */
+export function parseImageProvenance(
+	labels: Record<string, unknown> | null | undefined,
+): ImageProvenance {
+	const get = (key: string): string | undefined => {
+		const v = labels?.[key];
+		return typeof v === 'string' ? nonEmpty(v) : undefined;
+	};
+	return {
+		sourceMachine: get(PROVENANCE_LABEL_SOURCE_MACHINE),
+		sourceImage: get(PROVENANCE_LABEL_SOURCE_IMAGE),
+		snapshotAt: get(PROVENANCE_LABEL_SNAPSHOT_AT),
+	};
 }
 
 /**
@@ -3143,7 +3259,8 @@ USAGE
   anon-pi -m <machine> [<p>]     the same, on <machine> (its own image + home + conversations)
   anon-pi --mount <parent> [<p>] root at a HOST parent folder instead of the projects root
   anon-pi init                   onboard: verify your proxy, capture your local model, pick an image
-  anon-pi machine …              manage machines (create / list / set-image / rm / snapshot)
+  anon-pi machine …              manage machines (create / list / set-image / rm)
+  anon-pi image …                snapshot a running container into an image; list anon-pi images
   anon-pi --delete-home [<m>]    delete a machine's home (config + convos); keep its image pin + files
   anon-pi --delete-project <p>   delete a project's files + its per-machine sessions; keep the homes
 
@@ -3152,9 +3269,9 @@ USAGE
 
   Every launch is THROWAWAY: the container is removed on exit. To persist system
   state you built in a session, snapshot the running container into a named image
-  (\`anon-pi machine snapshot <name>\`) and pin a machine to it (\`anon-pi machine
-  create <m> --image <name>\`). Your pi config + conversations live in the machine
-  home (a host mount) and persist regardless.
+  (\`anon-pi image snapshot <name>\`) and pin a machine to it (\`anon-pi machine
+  create <m> --image anon-pi/<name>:latest\`). Your pi config + conversations live
+  in the machine home (a host mount) and persist regardless.
 
 WHAT IT DOES
   Runs pi inside netcage with all web/DNS egress forced through the socks5h proxy

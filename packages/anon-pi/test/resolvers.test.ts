@@ -87,6 +87,22 @@ describe('validateName (machines + projects)', () => {
 		expect(() => validateName('pi', 'machine')).toThrow(AnonPiError);
 	});
 
+	it('rejects the subcommand NOUN words (machine/image/init/forward/ports)', () => {
+		// Each is dispatched before the launch grammar; a same-named folder would be
+		// UNREACHABLE by bare name, so validateName refuses it up front (closing the
+		// trap) with a clear "reserved name" error.
+		for (const word of ['machine', 'image', 'init', 'forward', 'ports']) {
+			let msg = '';
+			try {
+				validateName(word, 'project');
+			} catch (e) {
+				msg = (e as Error).message;
+			}
+			expect(msg.toLowerCase()).toContain('reserved name');
+			expect(() => validateName(word, 'machine')).toThrow(AnonPiError);
+		}
+	});
+
 	it('names the kind in the error (machine vs project)', () => {
 		let msg = '';
 		try {

@@ -79,10 +79,16 @@ import {
 	resolveProxy,
 	resolveRunPlan,
 	serializeMachineJson,
-	snapshotImageRef,
+	parseImageArgs,
+	snapshotImageTag,
+	snapshotProvenanceLabels,
+	parseImageProvenance,
+	PROVENANCE_LABEL_SOURCE_MACHINE,
 	snapshotSessionGroups,
 	copyIncludesForHomeMinusSessions,
 	type SnapshotSessionGroup,
+	type ImageCommand,
+	type ImageProvenance,
 	serializeConfigJson,
 	setImageWarning,
 	launchIdentityKey,
@@ -148,7 +154,13 @@ function main(argv: string[]): number {
 	// and `anon-pi machine --help` show THEIR help, not the global one). Those
 	// subcommands route to runInit / runMachine, which print INIT_HELP /
 	// MACHINE_HELP respectively.
-	const OWN_HELP_SUBCOMMANDS = new Set(['init', 'machine', 'forward', 'ports']);
+	const OWN_HELP_SUBCOMMANDS = new Set([
+		'init',
+		'machine',
+		'image',
+		'forward',
+		'ports',
+	]);
 	if (
 		(args.includes('--help') || args.includes('-h')) &&
 		!OWN_HELP_SUBCOMMANDS.has(args[0] ?? '')
@@ -162,6 +174,13 @@ function main(argv: string[]): number {
 	// a project named "machine". Everything else is a launch.
 	if (args[0] === 'machine') {
 		return runMachine(args.slice(1));
+	}
+
+	// `image …` is the image-management surface (snapshot/list), dispatched BEFORE
+	// the launch grammar so a bare `image` is never parsed as a project named
+	// "image" (ADR-0003 §1: snapshot moved off `machine` onto this new noun).
+	if (args[0] === 'image') {
+		return runImage(args.slice(1));
 	}
 
 	// The destructive cleanup verbs (replacing the old `--fresh`). Dispatched
@@ -668,8 +687,6 @@ function runMachine(machineArgs: string[]): number {
 				return machineSetImage(env, cmd.name, cmd.image);
 			case 'rm':
 				return machineRm(env, cmd.name, cmd.yes);
-			case 'snapshot':
-				return machineSnapshot(env, cmd.name, cmd.machine, cmd.imageTag);
 		}
 	} catch (e) {
 		return reportAnonPiError(e);
@@ -725,6 +742,32 @@ function machineCreate(
 		`anon-pi: created machine ${JSON.stringify(name)} (image ${pinned.trim()}) at ${dir}.\n` +
 			`Its home is seeded on first launch, e.g. \`anon-pi -m ${name} --shell\`.\n`,
 	);
+
+	// PROVENANCE-AWARE (ADR-0003 §5): if the pinned image was produced by
+	// `image snapshot` (it carries `anon-pi.source-machine=<M>`) AND that source
+	// machine's home still exists on disk, OFFER the home-copy (minus sessions) +
+	// per-project session carry-over from it, so a machine built from a snapshot
+	// inherits the source's config + conversations (opt-in). Absent provenance /
+	// source home gone => a plain fresh create (today's behaviour) with a quiet
+	// note. Guarded no-TTY inside carryOverHomeFromMachine (copy nothing). This
+	// reads the image via netcage inspect; when netcage is absent it is skipped
+	// (a create must not require netcage), so provenance carry-over is best-effort.
+	if (hasNetcage()) {
+		const prov = inspectImageProvenance(pinned.trim());
+		const source = prov.sourceMachine;
+		if (source !== undefined && existsSync(machineHomeDir(env, source))) {
+			process.stderr.write(
+				`anon-pi: image ${pinned.trim()} was snapshotted from machine ${JSON.stringify(source)} ` +
+					'(whose home is present); offering to carry its home + conversations over.\n',
+			);
+			carryOverHomeFromMachine(env, source, name);
+		} else if (source !== undefined) {
+			process.stderr.write(
+				`anon-pi: image ${pinned.trim()} names source machine ${JSON.stringify(source)}, ` +
+					'but its home is gone; created a fresh home.\n',
+			);
+		}
+	}
 	return 0;
 }
 
@@ -817,36 +860,72 @@ function machineRm(env: AnonPiEnv, name: string, yes: boolean): number {
 	return 0;
 }
 
+// --- the `image` verbs (ADR-0003): snapshot a running container into a clean
+// image tag with provenance labels, and a read-only list. Thin I/O over the
+// pure parts (parseImageArgs / snapshotImageTag / snapshotProvenanceLabels /
+// parseImageProvenance); netcage does the commit / images / inspect.
+
 /**
- * `machine snapshot <new-name> [-m <machine>] [--image-tag <ref>]`: commit a
- * RUNNING jailed container into a new image and create <new-name> pinned to it.
- * The user does interactive system work in a session (e.g. `sudo apt install`),
- * then, WITHOUT having exited (every launch is throwaway, so an exit would have
- * removed the container), preserves that exact environment as a new machine. The container
- * to commit is AUTO-DETECTED from the running anon-pi containers (a picker when
- * several are up); `-m <machine>` is an OPTIONAL filter, not a required source.
- * podman pauses the container during commit and unpauses, so the live session
- * survives. The new machine gets a FRESH home (image and home are orthogonal;
- * snapshot keeps the SOFTWARE, not the conversations). Forced egress is
- * untouched: commit is a local podman op, and the snapshot machine relaunches
- * through the same forced-egress jail.
+ * Parse `image <verb> …` (pure parseImageArgs) and dispatch to the snapshot /
+ * list I/O. Prints IMAGE_HELP on `--help`/`-h`.
  */
-function machineSnapshot(
+function runImage(imageArgs: string[]): number {
+	if (imageArgs.includes('--help') || imageArgs.includes('-h')) {
+		process.stdout.write(IMAGE_HELP);
+		return 0;
+	}
+
+	const env = envFromProcess(process.env);
+	let cmd: ImageCommand;
+	try {
+		cmd = parseImageArgs(imageArgs);
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+
+	try {
+		switch (cmd.verb) {
+			case 'snapshot':
+				return imageSnapshot(env, cmd.name, cmd.machine, cmd.createMachine);
+			case 'list':
+				return imageList();
+		}
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+}
+
+/**
+ * `image snapshot <name> [-m <machine>] [--create-machine <m>]`: commit the
+ * RUNNING jailed container into the clean tag `anon-pi/<name>:latest`, baking
+ * provenance as podman LABELS via `netcage commit -c 'LABEL …'` (ADR-0003 §1+2).
+ * The container to commit is AUTO-DETECTED from the running anon-pi containers
+ * (a picker when several are up); `-m <machine>` is an OPTIONAL filter, not a
+ * required source. podman pauses the container during commit and unpauses, so
+ * the live session survives. A same-name re-snapshot OVERWRITES the `:latest`
+ * tag (the previous image becomes dangling but keeps its provenance label).
+ * `--create-machine <m>` ALSO creates machine <m> from the fresh snapshot,
+ * running the home-copy + per-project session carry-over. Forced egress is
+ * untouched (commit is a local podman op).
+ */
+function imageSnapshot(
 	env: AnonPiEnv,
 	name: string,
 	machine: string | undefined,
-	imageTag: string | undefined,
+	createMachine: string | undefined,
 ): number {
-	// Refuse to clobber an existing target machine FIRST (before netcage / any
-	// commit), so a name clash fails fast and never leaves an orphan image.
-	// Mirrors machine create.
-	const targetDir = machineDir(env, name);
-	if (existsSync(targetDir)) {
-		process.stderr.write(
-			`anon-pi: machine ${JSON.stringify(name)} already exists (${targetDir}). ` +
-				'Pick a different <new-name> or `anon-pi machine rm` it first.\n',
-		);
-		return 1;
+	// If --create-machine names an EXISTING machine, refuse FIRST (before netcage /
+	// any commit), so a name clash fails fast (mirrors machine create). The
+	// snapshot itself has no such clash: it overwrites its `:latest` tag by design.
+	if (createMachine !== undefined) {
+		const targetDir = machineDir(env, createMachine);
+		if (existsSync(targetDir)) {
+			process.stderr.write(
+				`anon-pi: machine ${JSON.stringify(createMachine)} already exists (${targetDir}). ` +
+					'Pick a different --create-machine name or `anon-pi machine rm` it first.\n',
+			);
+			return 1;
+		}
 	}
 
 	if (!hasNetcage()) return netcageMissing();
@@ -856,50 +935,127 @@ function machineSnapshot(
 	const target = resolveRunningContainer(machine, 'snapshot');
 	if (target === undefined) return 1;
 
-	const imageRef = imageTag ?? snapshotImageRef(name, new Date());
+	const tag = snapshotImageTag(name);
+
+	// Provenance (ADR-0003 §2), all best-effort HISTORY:
+	//  - source-machine: the committed container's machine, from its stamped key
+	//    (parseKeptKey.machine, authoritative).
+	//  - source-image: what the snapshot is ACTUALLY built on, read from the
+	//    RUNNING CONTAINER via inspect (NOT machine.json: `-i` makes the container's
+	//    image diverge from the machine's pin). Fall back to machine.json.image if
+	//    the inspect misses; OMIT the label if neither is known.
+	//  - snapshot-at: now, ISO 8601.
+	const sourceMachine = parseKeptKey(target.key).machine;
+	const sourceImage =
+		inspectContainerImage(target.ref) ??
+		(sourceMachine !== undefined
+			? readMachineJson(env, sourceMachine).image
+			: undefined);
+	const labels = snapshotProvenanceLabels({
+		sourceMachine,
+		sourceImage,
+		at: new Date().toISOString(),
+	});
+
 	process.stderr.write(
-		`anon-pi: committing ${target.name} -> image ${imageRef} (pausing the container briefly)\u2026\n`,
+		`anon-pi: committing ${target.name} -> image ${tag} (pausing the container briefly)\u2026\n`,
 	);
-	const committed = spawnNetcage(['commit', target.ref, imageRef]);
+	// One `-c 'LABEL k=v'` per provenance label (each is one argv element; podman
+	// round-trips `/` and `:` in the value un-quoted, verified).
+	const commitArgs = ['commit'];
+	for (const label of labels) commitArgs.push('-c', label);
+	commitArgs.push(target.ref, tag);
+	const committed = spawnNetcage(commitArgs);
 	if (committed !== 0) {
 		process.stderr.write(
-			`anon-pi: netcage commit failed; machine ${JSON.stringify(name)} NOT created.\n`,
+			`anon-pi: netcage commit failed; image ${tag} NOT written.\n`,
 		);
 		return committed;
 	}
 
-	// Create the machine pinned to the committed image.
-	mkdirSync(machineHomeDir(env, name), {recursive: true});
-	writeFileSync(
-		machineJsonPath(env, name),
-		serializeMachineJson({image: imageRef}),
-	);
-
-	// The source machine is the machine of the container we committed (its stamped
-	// key carries it). Copy its home into the new machine's home, EXCEPT the
-	// sessions subtree (conversations are handled separately below). Copying the
-	// config/extensions is safe + preferable to a fresh seed here: the new image IS
-	// the committed source filesystem, so the home's extensions/binaries are
-	// correct-for-the-new-image (and the copied seed marker means no reseed).
-	const sourceMachine = parseKeptKey(target.key).machine;
-	if (sourceMachine !== undefined) {
-		copyHomeMinusSessions(env, sourceMachine, name);
-	}
-
 	process.stdout.write(
-		`anon-pi: snapshotted ${target.name} into machine ${JSON.stringify(name)} ` +
-			`(image ${imageRef}) at ${targetDir}.\n` +
+		`anon-pi: snapshotted ${target.name} into image ${tag}` +
 			(sourceMachine !== undefined
-				? `Copied ${JSON.stringify(sourceMachine)}'s home (config + extensions) into it.\n`
-				: 'Its home seeds fresh on first launch.\n'),
+				? ` (from machine ${JSON.stringify(sourceMachine)}).\n`
+				: '.\n'),
 	);
 
-	// Offer the source's conversation history, grouped by project, opt-in per
-	// project (default none). TTY only; a non-TTY snapshot carries no sessions.
-	if (sourceMachine !== undefined) {
-		carryOverSessions(env, sourceMachine, name);
+	// --create-machine: create the machine from the fresh snapshot, running the
+	// same home-copy + per-project session carry-over the 0.15 snapshot did. The
+	// source machine is directly known (we just committed its container), so the
+	// shared helper is called with it.
+	if (createMachine !== undefined) {
+		mkdirSync(machineHomeDir(env, createMachine), {recursive: true});
+		writeFileSync(
+			machineJsonPath(env, createMachine),
+			serializeMachineJson({image: tag}),
+		);
+		process.stdout.write(
+			`anon-pi: created machine ${JSON.stringify(createMachine)} pinned to ${tag}.\n`,
+		);
+		if (sourceMachine !== undefined) {
+			carryOverHomeFromMachine(env, sourceMachine, createMachine);
+		} else {
+			process.stderr.write(
+				'anon-pi: the committed container has no source machine; the new home seeds fresh on first launch.\n',
+			);
+		}
 	}
 	return 0;
+}
+
+/**
+ * `image list`: read-only; list anon-pi images with their provenance. ZERO
+ * stored state. Includes an image if it is `anon-pi/*`-tagged OR (even when
+ * DANGLING/untagged) it carries an `anon-pi.source-machine` label, so an
+ * ORPHANED snapshot (its `:latest` tag overwritten by a re-snapshot) is still
+ * shown by its ID. Prints `<name-or-<none>>  from machine <M>  <when>  id:<short>`.
+ */
+function imageList(): number {
+	if (!hasNetcage()) return netcageMissing();
+	const images = queryAnonPiImages();
+	if (images.length === 0) {
+		process.stdout.write(
+			'anon-pi: no anon-pi images yet. Create one with `anon-pi image snapshot <name>`.\n',
+		);
+		return 0;
+	}
+	for (const img of images) {
+		const prov = parseImageProvenance(img.labels);
+		const nameCol = img.tag ?? '<none>';
+		const fromCol =
+			prov.sourceMachine !== undefined
+				? `from machine ${prov.sourceMachine}`
+				: 'from machine <unknown>';
+		const whenCol = prov.snapshotAt ?? '<unknown>';
+		const idCol = `id:${img.id.slice(0, 12)}`;
+		process.stdout.write(`${nameCol}  ${fromCol}  ${whenCol}  ${idCol}\n`);
+	}
+	return 0;
+}
+
+/**
+ * Shared home carry-over from a source machine to a dest machine (ADR-0003): the
+ * home-minus-sessions copy (copyHomeMinusSessions) + the interactive per-project
+ * session picker (carryOverSessions). Both the `image snapshot --create-machine`
+ * path and the provenance-aware `machine create --image` path call this; they
+ * differ ONLY in how they learn `sourceMachine`. Honors the no-TTY "copy
+ * nothing" rule already in carryOverSessions (a scripted create stays
+ * non-blocking). A no-op message-wise when the source home is absent.
+ */
+function carryOverHomeFromMachine(
+	env: AnonPiEnv,
+	sourceMachine: string,
+	destMachine: string,
+): void {
+	if (existsSync(machineHomeDir(env, sourceMachine))) {
+		copyHomeMinusSessions(env, sourceMachine, destMachine);
+		process.stderr.write(
+			`anon-pi: copied ${JSON.stringify(sourceMachine)}'s home (config + extensions) into ` +
+				`${JSON.stringify(destMachine)} (minus conversations).\n`,
+		);
+	}
+	carryOverSessions(env, sourceMachine, destMachine);
 }
 
 /**
@@ -2215,31 +2371,51 @@ USAGE
   anon-pi machine list                            list machines and their images
   anon-pi machine set-image <name> <ref>          re-pin the image (WARNS; no reseed)
   anon-pi machine rm <name> [--yes]               delete the machine + its home
-  anon-pi machine snapshot <new-name> [-m <machine>] [--image-tag <ref>]
-                                                  commit a RUNNING container into a
-                                                  new image + create <new-name>
 
 A machine is an image + a persistent host home (machines/<name>/{machine.json,home/}).
 The home is seeded on FIRST LAUNCH, not at create. \`set-image\` re-pins only and
 warns (the home was built for the old image); \`rm\` confirms on a TTY, skips with
 \`--yes\`, and aborts non-interactively without it.
 
-\`snapshot\` captures the CURRENT filesystem of a RUNNING jailed container (e.g.
-after \`sudo apt install\`) into a new image and creates <new-name> pinned to it,
-so you can preserve an environment you built interactively. This is how you keep
-container-level system changes (every launch is throwaway): freeze the running
-box into a named image, then relaunch on the machine pinned to it. The container
-is auto-detected from the running anon-pi
-containers (a picker when several are up); \`-m <machine>\` is an OPTIONAL filter,
-not a required source. The container must still be RUNNING (do not exit the
-session); podman pauses it briefly during the commit. Same forced-egress jail on
-relaunch.
+\`create --image <ref>\` is PROVENANCE-AWARE: if <ref> was produced by
+\`anon-pi image snapshot\` (it carries an \`anon-pi.source-machine\` label) AND
+that machine's home still exists, you are OFFERED its home + conversations to
+carry over (opt-in, no TTY => nothing copied). Otherwise a plain fresh create.
 
-The source machine's HOME is copied into the new machine (config + extensions +
-dotfiles), MINUS its conversations. Conversations are offered separately, grouped
-BY PROJECT, opt-in per project (default SKIP), COPY or SKIP each (no TTY => none
-copied). After copying, one confirmed step (default No) can DELETE the copied
-groups from the source machine (the only "move"); COPY never touches the source.
+To SNAPSHOT a running container into an image, use \`anon-pi image snapshot\`
+(the verb moved off \`machine\` onto the \`image\` noun).
+`;
+
+/** The `image` subcommand help. */
+const IMAGE_HELP = `anon-pi image - snapshot a running container into an image, and list anon-pi images
+
+USAGE
+  anon-pi image snapshot <name> [-m <machine>] [--create-machine <m>]
+                                 commit the RUNNING container into anon-pi/<name>:latest
+  anon-pi image list             list anon-pi images with their provenance (read-only)
+
+\`snapshot\` captures the CURRENT filesystem of a RUNNING jailed container (e.g.
+after \`sudo apt install\`) into the clean tag \`anon-pi/<name>:latest\`, baking
+provenance as podman labels (source machine, source image, snapshot time). This
+is how you keep container-level system changes (every launch is throwaway):
+freeze the running box into a named image, then pin a machine to it. The
+container is auto-detected from the running anon-pi containers (a picker when
+several are up); \`-m <machine>\` is an OPTIONAL filter, not a required source.
+The container must still be RUNNING (do not exit the session); podman pauses it
+briefly during the commit. A same-name re-snapshot OVERWRITES the \`:latest\` tag
+(the previous image becomes dangling but keeps its provenance, so \`image list\`
+still shows it by ID). To preserve a specific snapshot, snapshot it under a
+different name.
+
+\`--create-machine <m>\` ALSO creates machine <m> pinned to the fresh snapshot,
+copying the source machine's HOME (config + extensions + dotfiles) MINUS its
+conversations, then offering the conversations separately (grouped BY PROJECT,
+opt-in per project, default SKIP; no TTY => none copied). This is equivalent to
+\`image snapshot\` followed by a provenance-aware \`machine create --image\`.
+
+\`list\` reads the provenance labels straight off the images (ZERO stored state):
+it shows every \`anon-pi/*\` image plus any dangling image still carrying an
+\`anon-pi.source-machine\` label (an orphaned snapshot), by its ID.
 `;
 
 // --- impure helpers ---------------------------------------------------------
@@ -2334,6 +2510,152 @@ function queryNetcagePorts(ref: string): NetcageListener[] {
 	});
 	if (res.error || res.status !== 0 || !res.stdout) return [];
 	return parseNetcagePortsJson(res.stdout);
+}
+
+// --- `image`: read a container/image's provenance from netcage inspect --------
+
+/**
+ * Best-effort: the image ref a RUNNING container is ACTUALLY built on, via
+ * `netcage inspect <ref> --format '{{.ImageName}}'`. Used to bake the
+ * `anon-pi.source-image` label (the container's image can diverge from the
+ * machine's pin when `-i` was passed). undefined on any miss (older netcage, a
+ * parse/format hiccup): the caller falls back to machine.json.image, then omits
+ * the label. NEVER throws.
+ */
+function inspectContainerImage(ref: string): string | undefined {
+	const res = spawnSync(
+		'netcage',
+		['inspect', ref, '--format', '{{.ImageName}}'],
+		{encoding: 'utf8'},
+	);
+	if (res.error || res.status !== 0 || !res.stdout) return undefined;
+	const out = res.stdout.trim();
+	return out === '' || out === '<no value>' ? undefined : out;
+}
+
+/**
+ * Best-effort: the anon-pi provenance an IMAGE ref carries, via `netcage inspect
+ * <ref> --format '{{json .Config.Labels}}'` parsed through the pure
+ * parseImageProvenance. Used by provenance-aware `machine create`. Empty
+ * provenance (all fields undefined) on any miss (older netcage, no labels, a
+ * parse hiccup). NEVER throws.
+ */
+function inspectImageProvenance(ref: string): ImageProvenance {
+	const labels = inspectLabels(ref);
+	return parseImageProvenance(labels);
+}
+
+/**
+ * Best-effort: an image/container's label map via `netcage inspect <ref>
+ * --format '{{json .Config.Labels}}'`. null on any miss / unparseable output, so
+ * the pure parseImageProvenance sees an absent map (all fields undefined).
+ */
+function inspectLabels(ref: string): Record<string, unknown> | null {
+	const res = spawnSync(
+		'netcage',
+		['inspect', ref, '--format', '{{json .Config.Labels}}'],
+		{encoding: 'utf8'},
+	);
+	if (res.error || res.status !== 0 || !res.stdout) return null;
+	const text = res.stdout.trim();
+	if (text === '' || text === 'null' || text === '<no value>') return null;
+	try {
+		const parsed = JSON.parse(text);
+		return parsed !== null && typeof parsed === 'object'
+			? (parsed as Record<string, unknown>)
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+/** One anon-pi image `image list` surfaces: its id, its `anon-pi/*` tag (if any), its labels. */
+interface AnonPiImage {
+	id: string;
+	tag?: string;
+	labels: Record<string, unknown> | null;
+}
+
+/**
+ * Best-effort: the anon-pi images in netcage's store for `image list`. Reads
+ * `netcage images --format json`, keeps an image if it is `anon-pi/*`-tagged OR
+ * (even dangling/untagged) it carries an `anon-pi.source-machine` label (so an
+ * orphaned snapshot is still shown by its ID), reading each candidate's labels
+ * via inspect. ZERO stored state. [] on any failure (older netcage, a parse
+ * miss), so `image list` reports "no images" cleanly rather than crashing.
+ */
+function queryAnonPiImages(): AnonPiImage[] {
+	const res = spawnSync('netcage', ['images', '--format', 'json'], {
+		encoding: 'utf8',
+	});
+	if (res.error || res.status !== 0 || !res.stdout) return [];
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(res.stdout);
+	} catch {
+		return [];
+	}
+	if (!Array.isArray(parsed)) return [];
+
+	const out: AnonPiImage[] = [];
+	const seen = new Set<string>();
+	for (const raw of parsed) {
+		if (raw === null || typeof raw !== 'object') continue;
+		const rec = raw as Record<string, unknown>;
+		const id = firstString(rec['Id'], rec['ID'], rec['id']);
+		if (id === undefined || seen.has(id)) continue;
+		const tags = imageTags(rec);
+		const anonTag = tags.find((t) => t.startsWith('anon-pi/'));
+		// An anon-pi/*-tagged image always qualifies; else inspect it for the
+		// source-machine label (an orphaned/dangling snapshot still qualifies).
+		if (anonTag === undefined) {
+			if (tags.length > 0) continue; // a non-anon-pi tagged image is never ours.
+			const labels = inspectLabels(id);
+			if (
+				labels === null ||
+				typeof labels[PROVENANCE_LABEL_SOURCE_MACHINE] !== 'string'
+			)
+				continue;
+			seen.add(id);
+			out.push({id, labels});
+			continue;
+		}
+		seen.add(id);
+		out.push({id, tag: anonTag, labels: inspectLabels(id)});
+	}
+	return out;
+}
+
+/** First defined string among the candidates (tolerant field-name reader). */
+function firstString(...vals: unknown[]): string | undefined {
+	for (const v of vals) {
+		if (typeof v === 'string' && v.trim() !== '') return v;
+	}
+	return undefined;
+}
+
+/**
+ * The repository tags on an image record, tolerant of netcage/podman's field
+ * shapes: `Names`/`RepoTags`/`Tags` (an array of `repo:tag`), or a single
+ * `Repository`+`Tag` pair. `<none>:<none>` entries (dangling) are dropped.
+ */
+function imageTags(rec: Record<string, unknown>): string[] {
+	const tags: string[] = [];
+	for (const key of ['Names', 'RepoTags', 'Tags']) {
+		const v = rec[key];
+		if (Array.isArray(v)) {
+			for (const t of v) {
+				if (typeof t === 'string' && t !== '' && !t.startsWith('<none>'))
+					tags.push(t);
+			}
+		}
+	}
+	const repo = firstString(rec['Repository']);
+	const tag = firstString(rec['Tag']);
+	if (repo !== undefined && repo !== '<none>' && tag !== undefined) {
+		tags.push(`${repo}:${tag}`);
+	}
+	return tags;
 }
 
 /**
