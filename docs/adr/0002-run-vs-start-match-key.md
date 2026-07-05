@@ -1,6 +1,18 @@
 # Run-vs-start match key for kept (netcage.managed) containers
 
-> AMENDED by ADR-0003: the resolved IMAGE is now ALSO part of the key. This ADR
+> SUPERSEDED (for kept-container matching) by ADR-0004: `--keep`/`--rm` and the
+> run-vs-start inference are retired, so there are no kept containers to match
+> and this ADR's match-key decision (`keptContainerKey` /`resolveRunVsStart`) no
+> longer applies. What SURVIVES from this ADR is its (machine, project via cwd)
+> identity reasoning, which still underpins the `anon-pi.key` label anon-pi
+> stamps on EVERY (throwaway) launch so `forward`/`ports`/`snapshot` can resolve
+> a RUNNING container (now produced by `launchIdentityKey`, decoded by
+> `parseKeptKey`/`keyProject`). The ADR-0003 image-in-the-key amendment below is
+> moot (there is no kept-container key to extend). Kept for the retained
+> identity reasoning; not deleted.
+
+> AMENDED by ADR-0003 (now MOOT, see the SUPERSEDED note above): the resolved
+> IMAGE was to become part of the key. This ADR
 > originally excluded the image (it was fixed per machine); once `-i <image>`
 > makes the image variable per launch, two `--keep` launches differing only in
 > image are distinct kept containers, so the image joins the key below.
