@@ -946,8 +946,8 @@ function runImage(imageArgs: string[]): number {
 
 /**
  * Parse `container <verb> …` (pure parseContainerArgs) and dispatch. Prints
- * CONTAINER_HELP on `--help`/`-h`. `create`/`enter` land here; `list`/`rm` are
- * STUBBED (they land in the container-list-rm task).
+ * CONTAINER_HELP on `--help`/`-h`. All four verbs (create/enter/list/rm) land
+ * here.
  */
 function runContainer(containerArgs: string[]): number {
 	if (containerArgs.includes('--help') || containerArgs.includes('-h')) {
@@ -970,13 +970,9 @@ function runContainer(containerArgs: string[]): number {
 			case 'enter':
 				return containerEnter(env, cmd.name);
 			case 'list':
+				return containerList();
 			case 'rm':
-				// The housekeeping verbs land in the sibling task (container-list-rm).
-				throw new AnonPiError(
-					`anon-pi: \`container ${cmd.verb}\` is not implemented yet ` +
-						'(it lands in a follow-up). `container create`/`enter` and ' +
-						'`container --help` are live.',
-				);
+				return containerRm(cmd.name, cmd.yes);
 		}
 	} catch (e) {
 		return reportAnonPiError(e);
@@ -1246,6 +1242,94 @@ function containerEnter(env: AnonPiEnv, name: string): number {
 		box.ref,
 	];
 	return spawnNetcage(startArgs, {enteringJail: true});
+}
+
+/**
+ * `container list`: read-only readout of the durable boxes, ONE row each, with
+ * enough identity to tell them apart: the box NAME (the `anon-pi.container` label
+ * value, the record), its MACHINE + CWD/PROJECT (decoded off the `anon-pi.key`
+ * identity label via parseKeptKey/keyProject — the same label forward/ports read),
+ * its IMAGE (read back per box via `netcage inspect`, best-effort), and
+ * running-or-stopped. There is NO anon-pi-side registry file: the netcage
+ * container + its labels ARE the record (the container ADR), mirroring how
+ * `image list` reads provenance off image labels. Empty => a friendly hint. The
+ * columns are tab-separated (like `machine list`) so the readout is scriptable.
+ */
+function containerList(): number {
+	if (!hasNetcage()) return netcageMissing();
+	const boxes = queryContainerBoxes();
+	if (boxes.length === 0) {
+		process.stdout.write(
+			'anon-pi: no durable boxes yet. Create one with `anon-pi container create <name> -m <machine>`.\n',
+		);
+		return 0;
+	}
+	for (const box of boxes) {
+		// The `anon-pi.key` label is base64 (launchIdentityKey embeds newlines); decode
+		// it before parsing the machine + cwd fields, exactly as forward/ports do.
+		const decoded = box.key !== '' ? decodeKeyLabel(box.key) : undefined;
+		const fields = parseKeptKey(decoded ?? '');
+		const machine = fields.machine !== '' ? fields.machine : '<unknown>';
+		const project = decoded !== undefined ? keyProject(fields) : '<unknown>';
+		const cwd = project === '' ? '<shell>' : project;
+		const image = inspectContainerImage(box.ref) ?? '<unknown>';
+		const state = box.running ? 'running' : 'stopped';
+		process.stdout.write(
+			`${box.name}\tmachine:${machine}\timage:${image}\tcwd:${cwd}\t${state}\n`,
+		);
+	}
+	return 0;
+}
+
+/**
+ * `container rm <name> [--yes]`: remove a durable box, reading it back off the
+ * `anon-pi.container` label (no registry). An UNKNOWN name ERRORS (never a silent
+ * success). A STOPPED box is removed directly (`netcage rm <ref>`). A RUNNING box
+ * is a LIVE instance, so it is GUARDED: WITHOUT `--yes` it REFUSES with the "it is
+ * running, re-run with --yes" guidance (mirrors the delete verbs' non-interactive
+ * guard); WITH `--yes` it STOP-then-removes in ONE atomic call (`netcage rm -f
+ * <ref>`, force removal stops the container first), so the user never sees a
+ * half-removed box. The guard is on RUNNING (a live box is what you tear down by
+ * accident), distinct from `machine rm`'s TTY-confirm guard (that protects a
+ * durable HOME; here the box's home lives in the machine, untouched by rm).
+ */
+function containerRm(name: string, yes: boolean): number {
+	if (!hasNetcage()) return netcageMissing();
+	const box = queryContainerBoxes().find((b) => b.name === name);
+	if (box === undefined) {
+		process.stderr.write(
+			`anon-pi: no container named ${JSON.stringify(name)}. ` +
+				'List your boxes with `anon-pi container list`.\n',
+		);
+		return 1;
+	}
+
+	if (box.running && !yes) {
+		// A live instance: refuse to tear it down implicitly. Point at `--yes` (which
+		// stop-then-removes) so the user opts into stopping the running box.
+		process.stderr.write(
+			`anon-pi: container ${JSON.stringify(name)} is RUNNING (a live instance). ` +
+				`Re-run with \`anon-pi container rm ${name} --yes\` to STOP it and remove it, ` +
+				'or exit the session first and remove the stopped box.\n',
+		);
+		return 1;
+	}
+
+	// A stopped box removes directly; a running box with `--yes` force-removes
+	// (`-f` stops it first), so both are ONE call, atomic from the user's view.
+	const rmArgs = box.running ? ['rm', '-f', box.ref] : ['rm', box.ref];
+	const code = spawnNetcage(rmArgs);
+	if (code !== 0) {
+		process.stderr.write(
+			`anon-pi: netcage rm failed; container ${JSON.stringify(name)} NOT removed.\n`,
+		);
+		return code;
+	}
+	process.stdout.write(
+		`anon-pi: removed container ${JSON.stringify(name)}` +
+			(box.running ? ' (stopped then removed).\n' : '.\n'),
+	);
+	return 0;
 }
 
 /**

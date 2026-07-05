@@ -1914,6 +1914,15 @@ export interface ContainerBox {
 	ref: string;
 	/** True when the container's State is "running" (a live instance, not a stopped box). */
 	running: boolean;
+	/**
+	 * The RAW base64 `anon-pi.key` identity label (machine + cwd), or '' when a box
+	 * carries none (an older box, or one stamped before the key label existed).
+	 * `container list` DECODES it (Buffer + parseKeptKey) to show the box's machine
+	 * and cwd/project WITHOUT a separate query — the label IS the record (the
+	 * container ADR: no anon-pi-side registry file). Kept RAW here so the parser
+	 * stays pure (the base64 decode is the CLI's job, matching parseNetcagePsJson).
+	 */
+	key: string;
 }
 
 /**
@@ -1946,7 +1955,9 @@ export function parseContainerBoxesJson(stdout: string): ContainerBox[] {
 		if (typeof name !== 'string' || name === '') continue; // not a durable box
 		const ref = typeof entry.Id === 'string' ? entry.Id : '';
 		if (ref === '') continue;
-		out.push({name, ref, running: entry.State === 'running'});
+		const rawKey = labels[ANON_PI_KEY_LABEL];
+		const key = typeof rawKey === 'string' ? rawKey : '';
+		out.push({name, ref, running: entry.State === 'running', key});
 	}
 	return out;
 }
