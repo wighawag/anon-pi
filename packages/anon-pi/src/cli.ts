@@ -82,7 +82,10 @@ import {
 	serializeMachineJson,
 	parseImageArgs,
 	parseContainerArgs,
+	parseContainerBoxesJson,
+	ANON_PI_CONTAINER_LABEL,
 	type ContainerCommand,
+	type ContainerBox,
 	snapshotImageTag,
 	snapshotProvenanceLabels,
 	parseImageProvenance,
@@ -127,6 +130,7 @@ import {
 	type ManagedContainer,
 	type NetcageListener,
 	type LaunchIntent,
+	type LaunchMode,
 	type Machine,
 	type MachineConfig,
 	type MachineCommand,
@@ -942,9 +946,8 @@ function runImage(imageArgs: string[]): number {
 
 /**
  * Parse `container <verb> …` (pure parseContainerArgs) and dispatch. Prints
- * CONTAINER_HELP on `--help`/`-h`. The four verb bodies are STUBBED here (they
- * land in the create-enter and list-rm tasks); the parse + reserved word + help
- * are live so the grammar is reachable end-to-end.
+ * CONTAINER_HELP on `--help`/`-h`. `create`/`enter` land here; `list`/`rm` are
+ * STUBBED (they land in the container-list-rm task).
  */
 function runContainer(containerArgs: string[]): number {
 	if (containerArgs.includes('--help') || containerArgs.includes('-h')) {
@@ -952,6 +955,7 @@ function runContainer(containerArgs: string[]): number {
 		return 0;
 	}
 
+	const env = envFromProcess(process.env);
 	let cmd: ContainerCommand;
 	try {
 		cmd = parseContainerArgs(containerArgs);
@@ -959,19 +963,289 @@ function runContainer(containerArgs: string[]): number {
 		return reportAnonPiError(e);
 	}
 
-	// The impure verb bodies land in the sibling tasks (container-create-enter,
-	// container-list-rm). Until then the grammar parses + reports errors, but a
-	// well-formed verb is not yet implemented: say so clearly (exit 1) rather than
-	// pretend success.
 	try {
-		throw new AnonPiError(
-			`anon-pi: \`container ${cmd.verb}\` is not implemented yet ` +
-				'(the durable-box verb bodies land in a follow-up). The grammar + ' +
-				'`container --help` are live; the create/enter/list/rm bodies are next.',
-		);
+		switch (cmd.verb) {
+			case 'create':
+				return containerCreate(env, cmd);
+			case 'enter':
+				return containerEnter(env, cmd.name);
+			case 'list':
+			case 'rm':
+				// The housekeeping verbs land in the sibling task (container-list-rm).
+				throw new AnonPiError(
+					`anon-pi: \`container ${cmd.verb}\` is not implemented yet ` +
+						'(it lands in a follow-up). `container create`/`enter` and ' +
+						'`container --help` are live.',
+				);
+		}
 	} catch (e) {
 		return reportAnonPiError(e);
 	}
+}
+
+/**
+ * Best-effort: the DURABLE boxes netcage knows about (running AND stopped), read
+ * off the `anon-pi.container` label via `netcage ps -a --format json` and the
+ * pure parseContainerBoxesJson. The label IS the record (the container ADR: no
+ * anon-pi-side registry file). [] on any failure (older netcage, a parse miss),
+ * so a caller sees "no such box" rather than crashing. Passes `-a` so a STOPPED
+ * box (the normal state of a box you are about to `enter`) is included.
+ */
+function queryContainerBoxes(): ContainerBox[] {
+	const res = spawnSync(
+		'netcage',
+		[
+			'ps',
+			'-a',
+			'--filter',
+			`label=${ANON_PI_CONTAINER_LABEL}`,
+			'--format',
+			'json',
+		],
+		{encoding: 'utf8'},
+	);
+	if (res.error || res.status !== 0 || !res.stdout) return [];
+	return parseContainerBoxesJson(res.stdout);
+}
+
+/**
+ * Resolve a `container create` command into a durable LaunchIntent, mirroring
+ * runLaunch's resolution EXACTLY (proxy/llm/image/home/mount/projects-root/seed)
+ * so a durable box is composed identically to a throwaway launch except for the
+ * `durable` marker (which resolveRunPlan turns into the omitted `--rm` + the
+ * name + the `anon-pi.container` label). The image chain is the launch chain:
+ * `-i` > machine.json.image > ANON_PI_IMAGE. Throws AnonPiError on a bad input
+ * (missing proxy/llm, a fresh-home `-i`, an imageless machine) with the same
+ * messages the launch path uses. Kept beside runLaunch's logic on purpose: a
+ * durable box must never drift from a throwaway launch's egress + mounts.
+ */
+function resolveDurableLaunchIntent(
+	env: AnonPiEnv,
+	opts: {
+		name: string;
+		machineExplicit: boolean;
+		machine?: string;
+		image?: string;
+		mountParent?: string;
+		mode: LaunchMode;
+		project?: string;
+	},
+): LaunchIntent {
+	const config = readJsonConfig(env);
+
+	const machineName = opts.machineExplicit
+		? (opts.machine as string)
+		: (config.defaultMachine ?? DEFAULT_MACHINE);
+	const machineConf = readMachineJson(env, machineName);
+
+	const proxy = resolveProxy({env, config});
+	const llm = resolveLlm({env, config});
+	if (llm === undefined) {
+		throw new AnonPiError(
+			'anon-pi: set ANON_PI_LLM (or config.llm) to the RFC1918/link-local IP[:port]\n' +
+				'of your local model. It is the ONE direct hole; all other egress stays\n' +
+				'forced through the proxy.',
+		);
+	}
+
+	// The image chain, highest first: the ephemeral `-i` > machine.json.image >
+	// ANON_PI_IMAGE. FROZEN into the box (resolveRunPlan bakes machine.image). A
+	// fresh (unseeded) home cannot take an `-i` override (it would poison the seed),
+	// exactly as the launch path refuses; point at `machine create --image`.
+	const iSet = (opts.image ?? '').trim().length > 0;
+	const home = machineHomeDir(env, machineName);
+	if (iSet && homeFresh(home)) {
+		throw new AnonPiError(
+			`anon-pi: machine ${JSON.stringify(machineName)} has no home yet; \`-i\` is ` +
+				`ephemeral (it never seeds the home).\n` +
+				`Establish its image first with \`anon-pi machine create ${machineName} ` +
+				`--image ${opts.image}\` (or launch once normally to seed), then create the box.`,
+		);
+	}
+	const image =
+		resolveLaunchImage({
+			override: opts.image,
+			machineImage: machineConf.image,
+			envImage: env.image,
+		}) ?? '';
+
+	const mountParent =
+		opts.mountParent !== undefined
+			? resolve(expandTilde(opts.mountParent, env.home))
+			: undefined;
+	const projectsRoot = resolveProjectsRoot({
+		env,
+		config,
+		machine: machineConf,
+		mountParent,
+	});
+
+	const machine: Machine = {name: machineName, home, image};
+	const modelsSeed = resolveModelsSeedPath(env, machineName, existsSync);
+	const settingsSeed = resolveSettingsSeedPath(env, machineName, existsSync);
+
+	return {
+		machine,
+		mode: opts.mode,
+		projectsRoot,
+		project: opts.project,
+		mountParent,
+		proxy,
+		llmDirect: llm,
+		modelsSeed,
+		settingsSeed,
+		durable: {name: opts.name},
+	};
+}
+
+/**
+ * `container create <name> [-i <ref>] [-m <machine>] [--mount <p>]
+ * [<project>|--shell]`: instantiate a DURABLE jailed box (a `netcage run` WITHOUT
+ * `--rm`, so it survives exit) whose image + cwd are FROZEN at create. Resolves
+ * exactly like a normal launch (`-i` > machine.json > ANON_PI_IMAGE for the
+ * image, `-m` for the HOME, `--mount` for the parent), then threads
+ * intent.durable so resolveRunPlan omits `--rm`, `--name`s the container, and
+ * stamps the `anon-pi.container` label. FAILS FAST if a box named <name> already
+ * exists (never re-enters or clobbers). Forced egress is intact (the plan owns
+ * the proxy + the one --allow-direct); a durable box is still fully jailed.
+ */
+function containerCreate(
+	env: AnonPiEnv,
+	cmd: Extract<ContainerCommand, {verb: 'create'}>,
+): number {
+	const {name} = cmd;
+
+	// Fail loud if netcage is missing BEFORE we mutate anything (the dup-check and
+	// the launch both need it). Mirrors runLaunch's pre-spawn guard.
+	if (!hasNetcage()) {
+		process.stderr.write(
+			'anon-pi: `netcage` not found on PATH. anon-pi is a launcher for netcage; install it first\n' +
+				'(https://github.com/wighawag/netcage). Linux only.\n',
+		);
+		return 1;
+	}
+
+	// FAIL FAST on a duplicate: a box named <name> (running OR stopped) already
+	// exists. `create` NEVER silently re-enters or clobbers (story 6); the user
+	// enters an existing box explicitly with `container enter`, or removes it first
+	// with `container rm`. The `--name` collision would also make `netcage run`
+	// fail, but we refuse EARLY with a clear, box-aware message.
+	if (queryContainerBoxes().some((b) => b.name === name)) {
+		process.stderr.write(
+			`anon-pi: a container named ${JSON.stringify(name)} already exists. ` +
+				`Re-enter it with \`anon-pi container enter ${name}\`, or remove it first ` +
+				`with \`anon-pi container rm ${name}\` (create never re-enters or clobbers).\n`,
+		);
+		return 1;
+	}
+
+	const mode: LaunchMode = cmd.shell ? 'shell' : 'pi';
+	let intent: LaunchIntent;
+	try {
+		intent = resolveDurableLaunchIntent(env, {
+			name,
+			machineExplicit: cmd.machine !== undefined,
+			machine: cmd.machine,
+			image: cmd.image,
+			mountParent: cmd.mountParent,
+			mode,
+			project: cmd.project,
+		});
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+
+	let plan;
+	try {
+		plan = resolveRunPlan(intent, homeFresh);
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+	if (plan.kind !== 'launch') {
+		// Unreachable: a durable intent always has mode pi/shell (never menu), so the
+		// plan is always a launch. Guard defensively rather than assume.
+		throw new AnonPiError(
+			`anon-pi: internal: durable create for ${JSON.stringify(name)} did not compose a launch.`,
+		);
+	}
+
+	return executeLaunchPlan(intent, plan);
+}
+
+/**
+ * `container enter <name>`: re-enter a STOPPED durable box via `netcage start`,
+ * which re-stands the jail at the box's FROZEN cwd (baked in at create) and
+ * attaches. Re-supplies the forced-egress args (`netcage start` stands up the
+ * jail, so it needs --proxy + the one --allow-direct just like `run`); no `-i`
+ * and no re-cwd (the parser already refuses them: image + cwd are frozen). Three
+ * refusals: an UNKNOWN name errors (never a silent success), and an
+ * already-RUNNING box is REFUSED with guidance (it is a live instance; reach it
+ * via forward/ports or `container rm` to reset it), never a second attach.
+ */
+function containerEnter(env: AnonPiEnv, name: string): number {
+	if (!hasNetcage()) {
+		process.stderr.write(
+			'anon-pi: `netcage` not found on PATH. anon-pi is a launcher for netcage; install it first\n' +
+				'(https://github.com/wighawag/netcage). Linux only.\n',
+		);
+		return 1;
+	}
+
+	const box = queryContainerBoxes().find((b) => b.name === name);
+	if (box === undefined) {
+		process.stderr.write(
+			`anon-pi: no container named ${JSON.stringify(name)}. ` +
+				'List your boxes with `anon-pi container list`, or make one with ' +
+				`\`anon-pi container create ${name} …\`.\n`,
+		);
+		return 1;
+	}
+
+	if (box.running) {
+		// It is a LIVE instance, not a stopped box: a second attach would be a second
+		// jailed session against the same filesystem. Refuse and point at the right
+		// tools (story 2's "re-enter a STOPPED box" is the only enter path).
+		process.stderr.write(
+			`anon-pi: container ${JSON.stringify(name)} is already RUNNING (a live instance). ` +
+				'Reach its in-jail servers from the host with `anon-pi forward`/`ports`, or ' +
+				`reset it with \`anon-pi container rm ${name}\` and re-create it. ` +
+				'`enter` only resumes a STOPPED box.\n',
+		);
+		return 1;
+	}
+
+	// Re-establish the forced egress on the re-stand: `netcage start` stands the
+	// jail back up, so the proxy + the one direct hole are REQUIRED (fail-closed),
+	// exactly as on a `run`. The image + cwd are frozen in the container itself, so
+	// enter re-supplies NOTHING about them.
+	const config = readJsonConfig(env);
+	let proxy: string;
+	let llm: string | undefined;
+	try {
+		proxy = resolveProxy({env, config});
+		llm = resolveLlm({env, config});
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+	if (llm === undefined) {
+		process.stderr.write(
+			'anon-pi: set ANON_PI_LLM (or config.llm) to the RFC1918/link-local IP[:port]\n' +
+				'of your local model. It is the ONE direct hole; all other egress stays\n' +
+				'forced through the proxy.\n',
+		);
+		return 1;
+	}
+
+	const startArgs = [
+		'start',
+		'--proxy',
+		proxy,
+		'--allow-direct',
+		hostPortKey(llm),
+		'-it',
+		box.ref,
+	];
+	return spawnNetcage(startArgs, {enteringJail: true});
 }
 
 /**
