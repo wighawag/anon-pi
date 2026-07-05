@@ -67,6 +67,7 @@ import {
 	forwardablePorts,
 	formatPortsHint,
 	isHeadlessPiArgs,
+	formatWatchStreamLine,
 	resumeSessionId,
 	sessionHeaderCwd,
 	anonPiVersion,
@@ -438,7 +439,7 @@ function runLaunch(parsed: ParsedLaunch): number {
 		return runMenu(intent, plan.machine);
 	}
 
-	return executeLaunchPlan(intent, plan);
+	return executeLaunchPlan(intent, plan, {watch: parsed.watch === true});
 }
 
 /**
@@ -451,6 +452,7 @@ function runLaunch(parsed: ParsedLaunch): number {
 function executeLaunchPlan(
 	intent: LaunchIntent,
 	plan: Extract<ReturnType<typeof resolveRunPlan>, {kind: 'launch'}>,
+	opts: {watch?: boolean} = {},
 ): number {
 	// Create the host dirs the mounts need BEFORE spawn: the machine home and,
 	// for a named project (not the root token `.` / a bare shell), its folder
@@ -474,6 +476,13 @@ function executeLaunchPlan(
 	// find the RUNNING container while it is up (the label goes away with the
 	// container on exit). It touches NO egress flag (the RunPlan owns those).
 	const keyed = withKeyLabel(plan.netcageArgs, launchIdentityKey(intent));
+
+	// WATCH (`-p --mode text-stream`): capture pi's `--mode json` stream off
+	// netcage's stdout and render a readable per-turn view, instead of inheriting
+	// stdout raw. Everything else (the jail, forced egress, exit code) is identical.
+	if (opts.watch) {
+		return spawnNetcageWatch(keyed, {enteringJail: true});
+	}
 
 	// Every launch is a fresh throwaway `run` (the RunPlan always carries --rm).
 	return spawnNetcage(keyed, {enteringJail: true});
@@ -3526,6 +3535,71 @@ function spawnNetcage(
 		);
 		return 1;
 	}
+	return res.status ?? 1;
+}
+
+/**
+ * Spawn netcage for a WATCH run (`-p --mode text-stream`): pi runs with `--mode
+ * json` INSIDE the jail (the parser injected it), so netcage's STDOUT is pi's
+ * JSONL event stream. Instead of inheriting it raw, we PIPE stdout, split it into
+ * lines, and feed each to the pure formatWatchStreamLine, rendering the readable
+ * per-turn view (assistant text + `\u25b6 <tool>`) to STDERR while tracking the
+ * last assistant answer. On exit the final answer is printed to STDOUT (so the
+ * run stays pipeable, mirroring pi's own `--mode text`). stdin + stderr stay
+ * inherited; the exit code propagates. Colour follows the stderr TTY / NO_COLOR
+ * rule. This is the ONLY spawn path that does not inherit stdout.
+ */
+function spawnNetcageWatch(
+	netcageArgs: string[],
+	opts: {enteringJail?: boolean} = {},
+): number {
+	if (opts.enteringJail) {
+		process.stderr.write(
+			'anon-pi: entering the netcage jail (setting up forced-egress)\u2026\n',
+		);
+	}
+
+	const color =
+		process.stderr.isTTY === true && !nonEmptyEnv(process.env.NO_COLOR);
+	let pending = '';
+	let answer: string | undefined;
+
+	const surface = (line: string): void => {
+		const {lines, answer: turnAnswer} = formatWatchStreamLine(line, color);
+		for (const rendered of lines) process.stderr.write(`${rendered}\n`);
+		if (turnAnswer !== undefined) answer = turnAnswer;
+	};
+	const flush = (chunk: string): void => {
+		pending += chunk;
+		let nl = pending.indexOf('\n');
+		while (nl !== -1) {
+			surface(pending.slice(0, nl));
+			pending = pending.slice(nl + 1);
+			nl = pending.indexOf('\n');
+		}
+	};
+
+	const res = spawnSync('netcage', netcageArgs, {
+		// stdin + stderr inherited; stdout PIPED so we parse pi's JSONL stream.
+		stdio: ['inherit', 'pipe', 'inherit'],
+		encoding: 'utf8',
+		maxBuffer: 256 * 1024 * 1024,
+	});
+	if (res.error) {
+		process.stderr.write(
+			`anon-pi: failed to run netcage: ${res.error.message}\n`,
+		);
+		return 1;
+	}
+
+	// Feed the captured stream through the line splitter, then drain any trailing
+	// partial line (a final record without a newline).
+	if (typeof res.stdout === 'string') flush(res.stdout);
+	if (pending.trim() !== '') surface(pending);
+
+	// The final answer to STDOUT, so `anon-pi <p> -p --mode text-stream "..." | ...`
+	// still pipes pi's answer just like `--mode text` does.
+	if (answer !== undefined) process.stdout.write(`${answer}\n`);
 	return res.status ?? 1;
 }
 

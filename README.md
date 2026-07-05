@@ -167,6 +167,17 @@ Any tokens after the project are forwarded to pi verbatim. A run is headless (no
 anon-pi recon -p "summarize the findings in ./notes"
 ```
 
+#### Streaming the agent's progress
+
+A plain `-p` prints only pi's final answer, so a long run looks frozen while the agent works. Add anon-pi's `--mode text-stream` to watch it live: anon-pi runs pi with `--mode json` inside the jail, parses that event stream on the host, and renders a readable per-turn view (each assistant message, plus a `▶ <tool>` line per tool call) to **stderr**, while pi's final answer still goes to **stdout** so the run stays pipeable.
+
+```sh
+anon-pi recon -p --mode text-stream "summarize the findings in ./notes"
+anon-pi recon -p --mode text-stream "..." 2>/dev/null   # answer only (stderr is the progress view)
+```
+
+`text-stream` is an anon-pi-owned mode value: it requires `-p`, and it cannot be combined with another `--mode` (anon-pi owns the mode to drive the stream).
+
 ### Resuming a session
 
 `anon-pi <project>` already resumes that project's conversation (the session is keyed by its `/projects/<name>` cwd, so same machine + same project reopens it). To resume a **specific** session by id, forward pi's `--session`/`--resume` flag with no project: anon-pi looks the session up in the machine's store, reads the project (cwd) it belongs to, and launches pi **there**, so it resumes in place instead of asking to fork:

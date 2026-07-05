@@ -916,6 +916,14 @@ export interface ParsedLaunch {
 	 */
 	image?: string;
 	piArgs?: string[];
+	/**
+	 * True iff the launch requested the anon-pi WATCH stream (`-p --mode
+	 * text-stream`). When set, `piArgs` already carry `--mode json` (so pi emits
+	 * the event stream) and the CLI captures + renders that stream instead of
+	 * inheriting pi's stdout. Only ever true for a HEADLESS pi run (extractWatchMode
+	 * requires `-p`). Undefined/false => a normal launch.
+	 */
+	watch?: boolean;
 }
 
 /**
@@ -1105,6 +1113,214 @@ export function isHeadlessPiArgs(
 	return !!piArgs && piArgs.some((a) => a === '-p' || a === '--print');
 }
 
+// --- `--mode text-stream`: the anon-pi WATCH surface over a headless pi run ---
+//
+// pi's default `-p` (`--mode text`) prints ONLY the final answer, so a one-shot
+// run looks frozen while the agent works. pi CAN stream, but only as `--mode
+// json` (a raw JSONL event stream, unpleasant to read). anon-pi bridges the two
+// with the anon-pi-OWNED mode value `text-stream`: the user writes `-p --mode
+// text-stream`; anon-pi STRIPS that token, forwards `-p --mode json` to pi
+// inside the jail, then PARSES the JSONL stream on the host and renders a
+// readable, dorfl-style per-turn view (assistant text + `\u25b6 <tool>` lines)
+// to stderr, with pi's final answer still going to stdout so the run stays
+// pipeable. anon-pi OWNS `--mode`: combining `text-stream` with a second
+// `--mode` (or using it without `-p`) is refused in extractWatchMode.
+
+/** The pi `--mode` flag anon-pi intercepts to own the mode value. */
+export const MODE_FLAG = '--mode';
+
+/**
+ * The anon-pi-owned pseudo-mode. The user passes `--mode text-stream`; it never
+ * reaches pi (anon-pi rewrites it to `--mode json` and renders the stream).
+ */
+export const WATCH_MODE_TOKEN = 'text-stream';
+
+/** The real pi mode anon-pi forwards into the jail to GET the event stream. */
+export const WATCH_PI_MODE = 'json';
+
+/**
+ * PURE: interpret `--mode text-stream` in the forwarded pi args. Returns the
+ * args with any anon-pi-owned `--mode text-stream` REMOVED and a `watch` flag:
+ *
+ *   - no `--mode text-stream` present => `{watch:false, piArgs}` unchanged.
+ *   - `--mode text-stream` present => `{watch:true, piArgs}` with THAT flag+value
+ *     pair stripped (pi never sees it; the caller re-injects `--mode json`).
+ *
+ * REFUSALS (AnonPiError), because anon-pi owns `--mode` here:
+ *   - `--mode text-stream` WITHOUT `-p`/`--print` (watch only makes sense for a
+ *     headless run; an interactive pi already streams to its TUI);
+ *   - `--mode text-stream` alongside a SECOND `--mode <other>` (ambiguous: which
+ *     mode wins?).
+ *
+ * A NON-text-stream `--mode <x>` is left untouched and forwarded to pi verbatim
+ * (anon-pi only claims the `text-stream` value). A trailing bare `--mode` with
+ * no value is left for pi to reject.
+ */
+export function extractWatchMode(piArgs: readonly string[] | undefined): {
+	watch: boolean;
+	piArgs: string[];
+} {
+	const args = piArgs ? piArgs.slice() : [];
+	// Collect every `--mode <value>` pair so we can tell text-stream from others
+	// and catch a duplicate mode.
+	let watchAt = -1;
+	let otherMode = false;
+	for (let i = 0; i < args.length; i++) {
+		if (args[i] !== MODE_FLAG) continue;
+		const value = args[i + 1];
+		if (value === WATCH_MODE_TOKEN) {
+			if (watchAt !== -1) {
+				throw new AnonPiError(
+					`anon-pi: \`${MODE_FLAG} ${WATCH_MODE_TOKEN}\` was given more than once. ` +
+						'Pass it exactly once.\nRun `anon-pi --help`.',
+				);
+			}
+			watchAt = i;
+		} else if (value !== undefined) {
+			otherMode = true;
+		}
+		i++; // skip the value we just consumed.
+	}
+
+	if (watchAt === -1) {
+		return {watch: false, piArgs: args};
+	}
+
+	if (otherMode) {
+		throw new AnonPiError(
+			`anon-pi: \`${MODE_FLAG} ${WATCH_MODE_TOKEN}\` cannot be combined with another ` +
+				`\`${MODE_FLAG}\`; anon-pi owns the mode for the watch stream.\n` +
+				'Run `anon-pi --help`.',
+		);
+	}
+
+	if (!isHeadlessPiArgs(args)) {
+		throw new AnonPiError(
+			`anon-pi: \`${MODE_FLAG} ${WATCH_MODE_TOKEN}\` needs a headless run; add \`-p\`. ` +
+				'An interactive pi session already streams to its TUI.\nRun `anon-pi --help`.',
+		);
+	}
+
+	// Strip the `--mode text-stream` pair (flag + value) from the forwarded args.
+	args.splice(watchAt, 2);
+	return {watch: true, piArgs: args};
+}
+
+/**
+ * PURE: the pi args to forward INTO the jail for a watch run: the caller's args
+ * (already stripped of `--mode text-stream` by extractWatchMode) plus `--mode
+ * json`, so pi emits the JSONL event stream anon-pi parses on the host. `-p` is
+ * already present (extractWatchMode required it). A `--mode json` is never
+ * duplicated (extractWatchMode refuses a pre-existing `--mode`).
+ */
+export function piArgsForWatch(piArgs: readonly string[]): string[] {
+	return [...piArgs, MODE_FLAG, WATCH_PI_MODE];
+}
+
+// --- the WATCH stream renderer (pure classifier over pi's `--mode json`) ------
+//
+// pi's `--mode json` emits a JSONL event stream whose high-signal records are
+// `message_end` (a COMPLETED assistant turn) and its `content[]` parts. We render
+// at the dorfl `watch-session.ts` granularity: ONE line of assistant text per
+// turn, then `\u25b6 <tool>` per tool call. Deltas (`message_update`) and the
+// preamble/lifecycle records (`session`/`agent_start`/`turn_*`/`agent_end`) are
+// skipped. This is the STREAM vocabulary (`message_end`), distinct from dorfl's
+// SESSION-LOG vocabulary (`{type:'message'}`); everything else about the shape
+// (content-block walk, defensive parsing) mirrors dorfl.
+
+const WATCH_CYAN = '\u001b[36m';
+const WATCH_RESET = '\u001b[0m';
+
+/** Wrap `text` in `code`+reset when `color`, else return it unchanged. */
+function watchPaint(text: string, color: boolean, code: string): string {
+	return color ? `${code}${text}${WATCH_RESET}` : text;
+}
+
+/**
+ * PURE: classify ONE pi `--mode json` STREAM line into the high-signal lines to
+ * surface, plus (when the line is an assistant `message_end`) the turn's answer
+ * text so the caller can track the last one for stdout.
+ *
+ *   - a `{type:'message_end', message:{role:'assistant', content}}` record => its
+ *     `content[]` `text` parts concatenated into ONE line, then `\u25b6 <name>`
+ *     per `toolCall` part (name = `name` || `toolName` || `tool`);
+ *   - everything else (deltas, user/toolResult messages, lifecycle records,
+ *     blank/malformed lines) => no lines.
+ *
+ * Malformed JSON is skipped (never thrown): a half-written trailing line in a
+ * streamed pipe must not crash the renderer. `answer` is the assistant turn's
+ * text (or undefined for a non-answer line), so the caller keeps the LAST one.
+ */
+export function formatWatchStreamLine(
+	line: string,
+	color: boolean,
+): {lines: string[]; answer?: string} {
+	const trimmed = line.trim();
+	if (trimmed === '') return {lines: []};
+	let event: unknown;
+	try {
+		event = JSON.parse(trimmed);
+	} catch {
+		return {lines: []}; // half-written line in a live pipe: skip, never throw.
+	}
+	if (typeof event !== 'object' || event === null) return {lines: []};
+	const record = event as {
+		type?: unknown;
+		message?: {role?: unknown; content?: unknown};
+	};
+	if (record.type !== 'message_end') return {lines: []};
+	const message = record.message;
+	if (!message || message.role !== 'assistant') return {lines: []};
+	const text = watchAssistantText(message.content);
+	const lines = watchAssistantLines(message.content, text, color);
+	return text === '' ? {lines} : {lines, answer: text};
+}
+
+/**
+ * Walk an assistant `message.content` into the surfaced lines: the concatenated
+ * `text` as ONE leading line (already computed by watchAssistantText and passed
+ * in), then `\u25b6 <name>` per `toolCall` part. A plain-string content yields no
+ * tool lines. Mirrors dorfl's `assistantLines`.
+ */
+function watchAssistantLines(
+	content: unknown,
+	text: string,
+	color: boolean,
+): string[] {
+	const lines: string[] = [];
+	if (Array.isArray(content)) {
+		for (const part of content) {
+			if (typeof part !== 'object' || part === null) continue;
+			const p = part as Record<string, unknown>;
+			if (p.type === 'toolCall') {
+				const name =
+					(typeof p.name === 'string' && p.name !== '' && p.name) ||
+					(typeof p.toolName === 'string' && p.toolName !== '' && p.toolName) ||
+					'tool';
+				lines.push(watchPaint(`\u25b6 ${name}`, color, WATCH_CYAN));
+			}
+		}
+	}
+	return text === '' ? lines : [text, ...lines];
+}
+
+/**
+ * Concatenate the `text` parts of ONE assistant `message.content` (tool/thinking
+ * blocks dropped). A plain-string content is itself the text. `''` when there is
+ * no text. Mirrors dorfl's `assistantContentText`.
+ */
+function watchAssistantText(content: unknown): string {
+	if (typeof content === 'string') return content;
+	if (!Array.isArray(content)) return '';
+	const parts: string[] = [];
+	for (const part of content) {
+		if (typeof part !== 'object' || part === null) continue;
+		const p = part as Record<string, unknown>;
+		if (p.type === 'text' && typeof p.text === 'string') parts.push(p.text);
+	}
+	return parts.join('');
+}
+
 /**
  * Finish parsing a NO-PROJECT pi launch (`anon-pi --session <id> ...`,
  * `anon-pi --list-models`, or the explicit `anon-pi pi <args…>`): pi mode, NO
@@ -1125,6 +1341,11 @@ function finishPiNoProjectLaunch(args: {
 			'--shell forwards no pi args (a shell has no session/query). Drop --shell.',
 		);
 	}
+	// Claim `--mode text-stream` (the anon-pi WATCH surface): strip it, and when
+	// present rewrite the forwarded args to `--mode json` so pi emits the event
+	// stream the CLI renders. extractWatchMode throws (AnonPiError) on a misuse
+	// (no `-p`, or a second `--mode`); those propagate as the parse's own errors.
+	const {watch, piArgs: stripped} = extractWatchMode(args.piArgs);
 	return {
 		mode: 'pi',
 		machine: args.machine,
@@ -1132,7 +1353,8 @@ function finishPiNoProjectLaunch(args: {
 		project: undefined,
 		mountParent: args.mountParent,
 		image: args.image,
-		piArgs: args.piArgs,
+		piArgs: watch ? piArgsForWatch(stripped) : stripped,
+		watch,
 	};
 }
 
@@ -1331,8 +1553,12 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 		};
 	}
 
-	// pi mode: every token after the project is forwarded to pi verbatim.
+	// pi mode: every token after the project is forwarded to pi verbatim, EXCEPT
+	// the anon-pi-owned `--mode text-stream` (the WATCH surface), which is stripped
+	// here and turns into `--mode json` + the watch flag (extractWatchMode throws
+	// on a misuse: no `-p`, or a second `--mode`).
 	if (rest.length > 0) piArgs = rest.slice();
+	const {watch, piArgs: stripped} = extractWatchMode(piArgs);
 	return {
 		mode: 'pi',
 		machine,
@@ -1340,7 +1566,15 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 		project,
 		mountParent,
 		image,
-		piArgs,
+		// No piArgs => keep it undefined (a bare interactive launch). Watch =>
+		// inject `--mode json`. Otherwise forward the stripped args verbatim.
+		piArgs:
+			piArgs === undefined
+				? undefined
+				: watch
+					? piArgsForWatch(stripped)
+					: stripped,
+		watch,
 	};
 }
 
@@ -3653,6 +3887,10 @@ USAGE
   anon-pi                        MENU: pick a project (pi), a shell, or a new project
   anon-pi <project>              pi in the project (${CONTAINER_PROJECTS_ROOT}/<project>); exit pi -> host
   anon-pi <project> <pi-args…>   forward args to pi (e.g. -p for a headless one-shot)
+  anon-pi <project> -p --mode text-stream <q>  headless one-shot that STREAMS the
+                                 agent's progress live (assistant text + tool calls
+                                 to stderr; the final answer to stdout, so it pipes).
+                                 anon-pi-owned mode: needs -p; not with another --mode.
   anon-pi <pi-args…>             any leading pi flag with no project forwards to pi
                                  (e.g. \`anon-pi -p "hello world"\`, \`anon-pi --model x\`)
   anon-pi --session <id>         resume a pi session by id, in its own project (also -r/--resume)
