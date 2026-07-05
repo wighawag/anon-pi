@@ -1906,6 +1906,51 @@ export function parseNetcagePsJson(
 	return out;
 }
 
+/** A durable box (the `container` noun) as `container list`/`enter`/`rm` read it back off the `anon-pi.container` label. */
+export interface ContainerBox {
+	/** The box's user-chosen name (the `anon-pi.container` label VALUE). */
+	name: string;
+	/** The netcage container Id (what `netcage start`/`rm` take). */
+	ref: string;
+	/** True when the container's State is "running" (a live instance, not a stopped box). */
+	running: boolean;
+}
+
+/**
+ * PURE: parse `netcage ps -a --format json` into the anon-pi DURABLE BOXES:
+ * exactly the entries carrying an `anon-pi.container` label (its VALUE is the
+ * box's name), each as {name, ref: <Id>, running: State === "running"}. Unlike
+ * parseNetcagePsJson (which keys on `anon-pi.key`, the machine+cwd identity of
+ * EVERY launch), this keys on `anon-pi.container`, the label ONLY a durable box
+ * carries (see the container ADR: the label IS the record, no registry file). A
+ * throwaway launch, a sidecar, and a netcage-only container are all dropped. The
+ * caller passes `-a` so BOTH running and stopped boxes are seen (create's
+ * dup-check and enter's running-refusal both need the stopped ones). [] on bad
+ * JSON / a non-array.
+ */
+export function parseContainerBoxesJson(stdout: string): ContainerBox[] {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout);
+	} catch {
+		return [];
+	}
+	if (!Array.isArray(parsed)) return [];
+	const out: ContainerBox[] = [];
+	for (const e of parsed) {
+		if (!e || typeof e !== 'object') continue;
+		const entry = e as NetcagePsEntry;
+		const labels = entry.Labels;
+		if (!labels || typeof labels !== 'object') continue;
+		const name = labels[ANON_PI_CONTAINER_LABEL];
+		if (typeof name !== 'string' || name === '') continue; // not a durable box
+		const ref = typeof entry.Id === 'string' ? entry.Id : '';
+		if (ref === '') continue;
+		out.push({name, ref, running: entry.State === 'running'});
+	}
+	return out;
+}
+
 /** netcage's in-jail DNS forwarder always listens here; anon-pi hides it from the port hint. */
 export const NETCAGE_DNS_PORT = 53;
 
