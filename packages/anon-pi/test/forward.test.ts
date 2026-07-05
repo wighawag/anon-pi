@@ -14,6 +14,9 @@ import {
 	parseNetcagePortsJson,
 	forwardablePorts,
 	formatPortsHint,
+	launchIdentityKey,
+	type LaunchIntent,
+	type Machine,
 	type ManagedContainer,
 } from '../src/index.js';
 
@@ -120,6 +123,68 @@ describe('parseKeptKey + keyProject', () => {
 		expect(keyProject({...parseKeptKey(key), cwd: '/projects'})).toBe('.');
 		expect(keyProject({...parseKeptKey(key), cwd: '/work'})).toBe('.');
 		expect(keyProject({...parseKeptKey(key), cwd: '/root'})).toBe('');
+	});
+});
+
+describe('launchIdentityKey — the label stamped on EVERY (throwaway) launch', () => {
+	// The identity label survives the retirement of --keep/--rm: forward/ports
+	// resolve a RUNNING container by it (parseKeptKey -> keyProject). It is no
+	// longer a kept-container MATCH key, only a decodable identity for the live
+	// container. It must still encode enough for keyProject (the cwd/project) and
+	// the machine filter.
+	const machine: Machine = {
+		name: 'recon',
+		home: '/tmp/anon-pi-home/machines/recon/home',
+		image: 'my/pi:tag',
+	};
+	const baseIntent = (over: Partial<LaunchIntent> = {}): LaunchIntent => ({
+		machine,
+		mode: 'pi',
+		projectsRoot: '/tmp/anon-pi-home/projects',
+		project: 'recon',
+		proxy: 'socks5h://127.0.0.1:9050',
+		llmDirect: '192.168.1.150:8080',
+		...over,
+	});
+
+	it('round-trips through parseKeptKey: machine + the project (via cwd) survive', () => {
+		const f = parseKeptKey(launchIdentityKey(baseIntent()));
+		expect(f.machine).toBe('recon');
+		expect(keyProject(f)).toBe('recon');
+	});
+
+	it('names the machine so the forward/ports filter can scope by machine', () => {
+		const f = parseKeptKey(
+			launchIdentityKey(baseIntent({machine: {...machine, name: 'webveil'}})),
+		);
+		expect(f.machine).toBe('webveil');
+	});
+
+	it('encodes the `.` root and a --mount project so keyProject reads them', () => {
+		expect(
+			keyProject(parseKeptKey(launchIdentityKey(baseIntent({project: '.'})))),
+		).toBe('.');
+		expect(
+			keyProject(
+				parseKeptKey(
+					launchIdentityKey(
+						baseIntent({project: 'sub', mountParent: '/host/dev'}),
+					),
+				),
+			),
+		).toBe('sub');
+	});
+
+	it('is independent of the forced-egress inputs and forwarded pi args', () => {
+		const a = launchIdentityKey(baseIntent());
+		const b = launchIdentityKey(
+			baseIntent({
+				proxy: 'socks5h://127.0.0.1:1080',
+				llmDirect: '10.0.0.5:1234',
+				piArgs: ['-p', 'x'],
+			}),
+		);
+		expect(a).toBe(b);
 	});
 });
 

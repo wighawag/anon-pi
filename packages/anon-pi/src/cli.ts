@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // anon-pi CLI: the THIN impure launch path. Parses grammar A (pure
 // parseLaunchArgs), reads config.json / machine.json + resolves the machine,
-// composes the LaunchIntent, resolves the RunPlan (pure resolveRunPlan), decides
-// run-vs-start against real netcage for `--keep`, and spawns netcage with
-// inherited stdio (so -it is a real interactive TTY), propagating the exit code.
+// composes the LaunchIntent, resolves the RunPlan (pure resolveRunPlan; every
+// launch is throwaway), and spawns netcage with inherited stdio (so -it is a
+// real interactive TTY), propagating the exit code.
 //
 // All the DECISIONS live in the pure module (anon-pi.ts); this file only does
 // I/O: fs reads/mkdirs, the netcage query, the spawn, and the TTY discipline.
@@ -78,7 +78,6 @@ import {
 	resolveProjectsRoot,
 	resolveProxy,
 	resolveRunPlan,
-	resolveRunVsStart,
 	serializeMachineJson,
 	snapshotImageRef,
 	snapshotSessionGroups,
@@ -86,7 +85,7 @@ import {
 	type SnapshotSessionGroup,
 	serializeConfigJson,
 	setImageWarning,
-	keptContainerKey,
+	launchIdentityKey,
 	DEFAULT_SOCKS_PROBE_PORTS,
 	SOCKS5_METHOD_SELECTOR,
 	formatProxyFindings,
@@ -116,7 +115,6 @@ import {
 	type GeneratedModel,
 	type ModelCandidate,
 	type ModelSelection,
-	type KeptContainer,
 	type ManagedContainer,
 	type NetcageListener,
 	type LaunchIntent,
@@ -127,10 +125,11 @@ import {
 	type PiModelsFile,
 } from './anon-pi.js';
 
-// The netcage label anon-pi stamps its launch-identity key onto (keptContainerKey)
-// so a `--keep` re-entry can find and `netcage start` the same kept container.
-// netcage's `netcage.managed` label marks it a managed container; this adds the
-// anon-pi identity ON TOP (netcage's label IS the registry; anon-pi adds no file).
+// The netcage label anon-pi stamps its launch-identity key onto (launchIdentityKey)
+// so `forward`/`ports`/`snapshot` can find the RUNNING container by machine +
+// project while it is up. netcage's `netcage.managed` label marks it a managed
+// container; this adds the anon-pi identity ON TOP (netcage's label IS the
+// registry; anon-pi adds no file).
 const ANON_PI_KEY_LABEL = 'anon-pi.key';
 
 function main(argv: string[]): number {
@@ -317,7 +316,6 @@ function runLaunch(parsed: ParsedLaunch): number {
 			project: parsed.project,
 			mountParent,
 			piArgs: parsed.piArgs,
-			keep: parsed.keep,
 			proxy,
 			llmDirect: llm,
 			modelsSeed,
@@ -384,10 +382,10 @@ function runLaunch(parsed: ParsedLaunch): number {
 
 /**
  * Execute a RESOLVED non-menu LaunchPlan: create the host dirs the mounts need,
- * then run netcage (or `netcage start` a matching kept container under --keep).
- * Shared by the direct launch path (runLaunch) and the menu dispatch (runMenu),
- * so a menu-picked project/here/shell launches BYTE-FOR-BYTE identically to the
- * same command typed directly.
+ * then run netcage (always a fresh throwaway `run`; ADR-0004). Shared by the
+ * direct launch path (runLaunch) and the menu dispatch (runMenu), so a
+ * menu-picked project/here/shell launches BYTE-FOR-BYTE identically to the same
+ * command typed directly.
  */
 function executeLaunchPlan(
 	intent: LaunchIntent,
@@ -410,28 +408,13 @@ function executeLaunchPlan(
 		mkdirSync(intent.mountParent ?? intent.projectsRoot, {recursive: true});
 	}
 
-	// The anon-pi identity key, stamped on EVERY launch (not just --keep) as an
-	// additive netcage label. Under --keep it lets a re-entry find + `netcage
-	// start` the kept container; on a throwaway --rm run it lets `anon-pi forward`
+	// The anon-pi identity key, stamped on EVERY launch as an additive netcage
+	// label. On a throwaway `--rm` run it lets `anon-pi forward`/`ports`/`snapshot`
 	// find the RUNNING container while it is up (the label goes away with the
 	// container on exit). It touches NO egress flag (the RunPlan owns those).
-	const keyed = withKeyLabel(plan.netcageArgs, keptContainerKey(intent));
+	const keyed = withKeyLabel(plan.netcageArgs, launchIdentityKey(intent));
 
-	// Run-vs-start: under --keep, ask netcage for its kept managed containers and
-	// resume a matching one via `netcage start`; else run the composed argv. A
-	// throwaway (`--rm`) launch is always a fresh run (the pure rule never
-	// consults the listing for it).
-	if (intent.keep) {
-		const decision = resolveRunVsStart(intent, queryKeptContainers());
-		if (decision.action === 'start') {
-			return spawnNetcage(['start', '-a', '-i', decision.ref], {
-				enteringJail: true,
-			});
-		}
-		// A fresh `--keep` run: the RunPlan already omits --rm so it is left kept.
-		return spawnNetcage(keyed, {enteringJail: true});
-	}
-
+	// Every launch is a fresh throwaway `run` (the RunPlan always carries --rm).
 	return spawnNetcage(keyed, {enteringJail: true});
 }
 
@@ -838,8 +821,8 @@ function machineRm(env: AnonPiEnv, name: string, yes: boolean): number {
  * `machine snapshot <new-name> [-m <machine>] [--image-tag <ref>]`: commit a
  * RUNNING jailed container into a new image and create <new-name> pinned to it.
  * The user does interactive system work in a session (e.g. `sudo apt install`),
- * then, WITHOUT having exited (the default `--rm` would have destroyed the
- * container), preserves that exact environment as a new machine. The container
+ * then, WITHOUT having exited (every launch is throwaway, so an exit would have
+ * removed the container), preserves that exact environment as a new machine. The container
  * to commit is AUTO-DETECTED from the running anon-pi containers (a picker when
  * several are up); `-m <machine>` is an OPTIONAL filter, not a required source.
  * podman pauses the container during commit and unpauses, so the live session
@@ -2243,8 +2226,10 @@ warns (the home was built for the old image); \`rm\` confirms on a TTY, skips wi
 
 \`snapshot\` captures the CURRENT filesystem of a RUNNING jailed container (e.g.
 after \`sudo apt install\`) into a new image and creates <new-name> pinned to it,
-so you can preserve an environment you built interactively WITHOUT having
-pre-decided \`--keep\`. The container is auto-detected from the running anon-pi
+so you can preserve an environment you built interactively. This is how you keep
+container-level system changes (every launch is throwaway): freeze the running
+box into a named image, then relaunch on the machine pinned to it. The container
+is auto-detected from the running anon-pi
 containers (a picker when several are up); \`-m <machine>\` is an OPTIONAL filter,
 not a required source. The container must still be RUNNING (do not exit the
 session); podman pauses it briefly during the commit. Same forced-egress jail on
@@ -2291,23 +2276,8 @@ function homeFresh(machineHome: string): boolean {
 }
 
 /**
- * Query netcage for its KEPT managed containers, surfacing each one's stamped
- * anon-pi identity key so the pure run-vs-start decision can match it. Thin,
- * best-effort I/O: on any failure (netcage missing the query, no containers, a
- * parse error) it returns an EMPTY listing, so the decision falls back to a
- * fresh `run` (safe: it never wrongly resumes, it just creates a new container).
- */
-function queryKeptContainers(): KeptContainer[] {
-	// Ask netcage for ALL its managed containers as JSON (netcage >= 0.10.0
-	// forwards podman's --format json over its managed scope), then keep the ones
-	// carrying an anon-pi.key label (a sidecar has none) and decode it. -a so a
-	// STOPPED kept container is included (run-vs-start resumes it).
-	return queryManagedContainers({all: true}).map(({key, ref}) => ({key, ref}));
-}
-
-/**
  * Decode a base64 anon-pi.key label back to its identity key (the reverse of
- * withKeyLabel's encode; keptContainerKey embeds newlines, so it is base64'd to
+ * withKeyLabel's encode; launchIdentityKey embeds newlines, so it is base64'd to
  * stay a single safe label value). undefined on a decode error.
  */
 function decodeKeyLabel(raw: string): string | undefined {
@@ -2627,9 +2597,10 @@ function netcageMissing(): number {
 
 /**
  * Insert the anon-pi identity label into a `netcage run` argv (right after
- * `run`), so a kept container can be found on re-entry. The key is base64'd
- * (keptContainerKey embeds newlines) to keep it a single safe label value. This
- * is ADDITIVE and touches NO egress flag (the RunPlan owns --proxy/--allow-direct).
+ * `run`), so `forward`/`ports`/`snapshot` can find the RUNNING container by
+ * machine + project. The key is base64'd (launchIdentityKey embeds newlines) to
+ * keep it a single safe label value. This is ADDITIVE and touches NO egress flag
+ * (the RunPlan owns --proxy/--allow-direct).
  */
 function withKeyLabel(netcageArgs: string[], key: string): string[] {
 	const enc = Buffer.from(key, 'utf8').toString('base64');

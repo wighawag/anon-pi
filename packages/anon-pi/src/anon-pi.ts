@@ -14,9 +14,10 @@
 //     /projects (the projects root). `--mount <parent>` adds EXACTLY one more
 //     mount at the DISTINCT /work and re-roots cwd there; nothing else changes,
 //     so we never remount a running container.
-//   - Throwaway (`--rm`) is the DEFAULT; `--keep` leaves the container kept so
-//     its filesystem survives (found + resumed by netcage's `netcage.managed`
-//     label via `netcage start`). The machine home persists either way.
+//   - Every launch is THROWAWAY (the container is always `--rm`): it is removed
+//     on exit. Durable state is EXPLICIT and image-based (snapshot a running
+//     container into a named image, then a machine pinned to it); the machine
+//     home persists regardless (it is a host mount). See docs/adr/0004.
 //   - Open exactly ONE direct hole (--allow-direct <llm>) so pi can reach a
 //     local model while ALL other egress stays forced through the socks5h proxy
 //     (fail-closed; the proxy is REQUIRED and never guessed).
@@ -26,9 +27,9 @@
 //
 // This module holds every DECISION as a pure function (config load + precedence,
 // machine/project resolvers, name validation, the RunPlan argv, the menu
-// choice-list, project usage, the run-vs-start rule, models.json generation,
-// init's proxy detect/verify decisions). cli.ts owns only the impure edges (fs,
-// the interactive TUI, the netcage query, the spawn).
+// choice-list, project usage, models.json generation, init's proxy detect/verify
+// decisions). cli.ts owns only the impure edges (fs, the interactive TUI, the
+// netcage query, the spawn).
 
 import {existsSync, readFileSync} from 'node:fs';
 import {homedir} from 'node:os';
@@ -535,7 +536,7 @@ export function resolveCwd(kind: RootKind, token: string): string {
  * and files written under the home land in the machine's config home on the
  * host; a shell is the project-hopper, so `/projects` is the natural landing.
  * The machine home is one `cd ~` away for the rare case. `menu` never reaches
- * here (it is argv-less). Shared by resolveRunPlan + keptContainerKey so the run
+ * here (it is argv-less). Shared by resolveRunPlan + launchIdentityKey so the run
  * cwd and the container-identity key always agree.
  */
 export function launchCwd(
@@ -771,12 +772,6 @@ export interface LaunchIntent {
 	mountParent?: string;
 	/** Extra args forwarded to `pi` (headless/one-shot). Ignored for shell. */
 	piArgs?: string[];
-	/**
-	 * `--keep`: omit `--rm` so the container is left KEPT (its filesystem
-	 * survives the apt-install/re-enter flow). Default (false) => `--rm`
-	 * (throwaway); the machine home persists regardless (it is a host mount).
-	 */
-	keep?: boolean;
 	/** The resolved socks5h proxy (REQUIRED; the resolver fails closed without it). */
 	proxy: string;
 	/** The resolved local-model direct target (REQUIRED: the one --allow-direct hole). */
@@ -837,9 +832,9 @@ export const DEFAULT_MACHINE = 'default';
  * project): the CLI runs the host-side menu. `pi`/`shell` carry the chosen
  * target. `project` is a validated project name, the `.` root token, or
  * undefined (menu / bare shell, which lands at the active root). `mountParent` is the `--mount` HOST parent
- * (a path, NOT a name-namespaced token). `keep` is `--keep` (default false =>
- * throwaway `--rm`). `piArgs` are the trailing tokens forwarded to pi (pi mode
- * only; undefined otherwise).
+ * (a path, NOT a name-namespaced token). Every launch is throwaway (`--rm`
+ * always; the retired `--keep`/`--rm` flags now error). `piArgs` are the trailing
+ * tokens forwarded to pi (pi mode only; undefined otherwise).
  */
 export interface ParsedLaunch {
 	mode: LaunchMode;
@@ -852,7 +847,6 @@ export interface ParsedLaunch {
 	machineExplicit: boolean;
 	project?: string;
 	mountParent?: string;
-	keep: boolean;
 	piArgs?: string[];
 }
 
@@ -1005,6 +999,28 @@ export function sessionHeaderCwd(headerLine: string): string | undefined {
 export const PI_PASSTHROUGH_TOKEN = 'pi';
 
 /**
+ * The retired launch flags. `--keep`/`--rm` are GONE (ADR-0004): every launch is
+ * throwaway now, so there is no flag to toggle. `--keep`'s exploratory
+ * "apt install, quit, re-enter" use case is served, better, by snapshotting a
+ * running container into a named image and pinning a machine to it (explicit +
+ * named, no inference). The label a launch is passed one of these RETIRED flags
+ * gets a clear error pointing there.
+ */
+export const RETIRED_LAUNCH_FLAGS = ['--keep', '--rm'] as const;
+
+/** PURE: the error message for a retired `--keep`/`--rm` flag, pointing at the image-based replacement. */
+export function retiredKeepRmMessage(flag: string): string {
+	return (
+		`${flag} is gone: every launch is throwaway now (the container is always ` +
+		`removed on exit). To persist system state you set up in a session (e.g. after ` +
+		`\`apt install\`), snapshot the RUNNING container into a named image and use it:\n` +
+		`  anon-pi machine snapshot <name>        (freeze the running container -> a named machine + image)\n` +
+		`  anon-pi machine create <m> --image <name>   (a durable machine pinned to that image)\n` +
+		`Your pi config + conversations live in the machine home (a host mount) and persist regardless.`
+	);
+}
+
+/**
  * PURE: whether forwarded pi args request pi's NON-INTERACTIVE (print) mode,
  * i.e. contain `-p`/`--print`. This is the ONLY headless shape (it needs no
  * TTY): other forwarded args (`--session <id>`, `--model x`, ...) are still
@@ -1027,17 +1043,10 @@ function finishPiNoProjectLaunch(args: {
 	machine: string;
 	machineExplicit: boolean;
 	mountParent?: string;
-	keep: boolean;
-	rm: boolean;
 	shell: boolean;
 	piArgs: string[];
 	fail: (msg: string) => never;
 }): ParsedLaunch {
-	if (args.keep && args.rm) {
-		args.fail(
-			'--keep and --rm are contradictory (pick one; --rm is the default)',
-		);
-	}
 	if (args.shell) {
 		args.fail(
 			'--shell forwards no pi args (a shell has no session/query). Drop --shell.',
@@ -1049,14 +1058,13 @@ function finishPiNoProjectLaunch(args: {
 		machineExplicit: args.machineExplicit,
 		project: undefined,
 		mountParent: args.mountParent,
-		keep: args.keep,
 		piArgs: args.piArgs,
 	};
 }
 
 /**
  * PURE: parse grammar A into a ParsedLaunch. Consumes the anon-pi flags
- * (`-m <machine>`, `--shell`, `--mount <parent>`, `--keep`/`--rm`) LEFT of the
+ * (`-m <machine>`, `--shell`, `--mount <parent>`) LEFT of the
  * project positional; the FIRST bare positional is the project (`.` allowed as
  * the root token). In pi mode every token AFTER the project is forwarded to pi
  * verbatim (so `anon-pi recon -p '...'` works) — anon-pi flags must come before
@@ -1070,15 +1078,13 @@ function finishPiNoProjectLaunch(args: {
  * reserved-name guard); `--mount <parent>` is a HOST path in its own namespace,
  * distinct from the project-name namespace (NAME vs `--mount` exclusivity), so
  * it is NOT name-validated here. Throws AnonPiError for an unknown option, a
- * missing `-m`/`--mount` argument, a contradictory `--keep --rm`, or a bad name.
+ * missing `-m`/`--mount` argument, a RETIRED `--keep`/`--rm` flag, or a bad name.
  */
 export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 	let machine = DEFAULT_MACHINE;
 	let machineSet = false;
 	let shell = false;
 	let mountParent: string | undefined;
-	let keepSeen = false;
-	let rmSeen = false;
 	let project: string | undefined;
 	let piArgs: string[] | undefined;
 
@@ -1106,13 +1112,10 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 			mountParent = v as string;
 			continue;
 		}
-		if (a === '--keep') {
-			keepSeen = true;
-			continue;
-		}
-		if (a === '--rm') {
-			rmSeen = true;
-			continue;
+		if ((RETIRED_LAUNCH_FLAGS as readonly string[]).includes(a)) {
+			// `--keep`/`--rm` are retired (ADR-0004): throwaway is the only
+			// behaviour now. Point at the image-based replacement.
+			fail(retiredKeepRmMessage(a));
 		}
 		if (a === '.') {
 			// the root token is a valid project positional (not a name).
@@ -1129,8 +1132,6 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 				machine,
 				machineExplicit: machineSet,
 				mountParent,
-				keep: keepSeen,
-				rm: rmSeen,
 				shell,
 				piArgs: args.slice(i + 1),
 				fail,
@@ -1172,8 +1173,6 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 				machine,
 				machineExplicit: machineSet,
 				mountParent,
-				keep: keepSeen,
-				rm: rmSeen,
 				shell,
 				piArgs,
 				fail,
@@ -1186,10 +1185,6 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 		project = validateName(a, 'project');
 		i++;
 		break;
-	}
-
-	if (keepSeen && rmSeen) {
-		fail('--keep and --rm are contradictory (pick one; --rm is the default)');
 	}
 
 	// tokens remaining after the project.
@@ -1207,7 +1202,6 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 			machineExplicit: machineSet,
 			project,
 			mountParent,
-			keep: keepSeen,
 		};
 	}
 
@@ -1220,7 +1214,6 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 			machineExplicit: machineSet,
 			project: undefined,
 			mountParent,
-			keep: keepSeen,
 		};
 	}
 
@@ -1232,7 +1225,6 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 		machineExplicit: machineSet,
 		project,
 		mountParent,
-		keep: keepSeen,
 		piArgs,
 	};
 }
@@ -1247,7 +1239,7 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
  *   - the two mounts <home>:/root and <projectsRoot>:/projects, always;
  *   - --mount adds EXACTLY <parent>:/work and re-roots cwd, nothing else;
  *   - --proxy <p> + exactly one --allow-direct <llm> (forced egress, fail-closed);
- *   - --rm by default, omitted only under --keep.
+ *   - --rm on EVERY launch (throwaway always; ADR-0004).
  *
  * Throws AnonPiError (a plan is NEVER produced) when the image, the machine
  * home, the proxy, or the direct-hole llm is missing.
@@ -1316,8 +1308,9 @@ export function resolveRunPlan(
 	const headless = mode === 'pi' && isHeadlessPiArgs(intent.piArgs);
 
 	const netcageArgs: string[] = ['run'];
-	// --rm by DEFAULT (throwaway); --keep leaves the container kept.
-	if (intent.keep !== true) netcageArgs.push('--rm');
+	// Throwaway ALWAYS: every launch is `--rm` (ADR-0004). Durable state is
+	// image-based (snapshot + a pinned machine), never an accreting container.
+	netcageArgs.push('--rm');
 	// Forced egress: the proxy + the ONE direct hole. Never omitted.
 	netcageArgs.push('--proxy', proxy, '--allow-direct', directTarget);
 	if (!headless) netcageArgs.push('-it');
@@ -1404,81 +1397,46 @@ function containerSeedThen(seedVersion: string, exec: string): string {
 	);
 }
 
-// --- The run-vs-start decision for kept (netcage.managed) containers ---------
+// --- The per-launch identity label (for `forward`/`ports`/`snapshot`) --------
 //
-// The exploratory `--keep` flow: run a container, tweak the system (apt install
-// ...), quit, then re-enter with the SAME launch and RESUME it via `netcage
-// start` (the container filesystem survives). Throwaway (`--rm`) is the default
-// and is ALWAYS a fresh `run`.
-//
-// This module owns only the PURE decision: given a resolved LaunchIntent and a
-// SUPPLIED listing of kept containers, decide `start` (a matching kept container
-// is present) vs `run` without `--rm` (absent). The netcage QUERY (how to ask
-// netcage for its labelled containers, e.g. `netcage ps` filtered by the
-// `netcage.managed` label) is the CLI's impure job; the pure rule receives its
-// RESULT (the listing) so the decision stays unit-testable. anon-pi invents NO
-// registry file: netcage's `netcage.managed` label IS the record.
+// anon-pi stamps an identity key onto EVERY launch's container (an additive
+// netcage label; see withKeyLabel in cli.ts). It is NOT a kept-container match
+// key (there are no kept containers: every launch is throwaway, ADR-0004). Its
+// sole job is to let `forward`/`ports`/`snapshot` find a RUNNING container and
+// read back which machine + project it hosts (parseKeptKey -> keyProject),
+// while the container is up (the label goes away with the `--rm` container on
+// exit). netcage's `netcage.managed` label marks the container managed; this
+// adds anon-pi's own identity on top. anon-pi invents NO registry file.
 
 /**
- * A kept `netcage.managed` container, as the CLI's netcage query surfaces it to
- * the pure decision. Only the two fields the DECISION needs are typed:
- *   - `key`: the anon-pi launch-identity key (keptContainerKey) the CLI stamped
- *     onto the container at `run` time (a netcage label / container name) and
- *     reads back from the label; this is what a launch matches against.
- *   - `ref`: how to address the container for `netcage start` (its id or name).
- * The CLI is free to carry more; the pure rule reads only these.
- */
-export interface KeptContainer {
-	/** The anon-pi launch-identity key stamped on the container (keptContainerKey). */
-	key: string;
-	/** The container ref (id or name) to pass to `netcage start`. */
-	ref: string;
-}
-
-/**
- * The run-vs-start decision. `run` = `netcage run` a fresh container (WITHOUT
- * `--rm` under `--keep`, so it is left kept; the run argv itself is
- * resolveRunPlan's job). `start` = `netcage start <ref>` an existing kept
- * container whose identity matches this launch.
- */
-export type RunVsStart = {action: 'run'} | {action: 'start'; ref: string};
-
-/**
- * PURE: the launch-identity match key for a kept container, derived ENTIRELY
- * from the (machine, projects-root, project) identity (ADR-0002). It is what
- * decides whether an existing kept `netcage.managed` container IS the one a
- * `--keep` launch should resume.
+ * PURE: the anon-pi launch-identity key stamped on EVERY (throwaway) launch,
+ * derived from the (machine, projects-root, project) identity (ADR-0002's
+ * cwd/project reasoning still underpins it). It is NOT a kept-container MATCH
+ * key (every launch is throwaway; nothing is ever resumed). It exists ONLY so
+ * `forward`/`ports`/`snapshot` can resolve a RUNNING container by machine +
+ * project: the CLI stamps it onto a netcage label and reads it back with
+ * parseKeptKey -> keyProject.
  *
- * The fields, and why each is load-bearing:
- *   - `machine.name`: a kept container mounts THIS machine's home at /root; a
- *     same-project container on another machine is a different environment.
- *   - `projectsRoot`: the host dir mounted at /projects; two launches with the
- *     same project name but different roots are different working trees.
- *   - `mountParent` (or '' when absent): `--mount` re-roots into a DIFFERENT
- *     host parent at /work, so a `--mount` launch is a distinct identity from
- *     the projects-root launch of the same name.
- *   - the resolved container `cwd`: this already encodes the project token
- *     (`/projects/<p>`, `/work/<p>`, or a root `/projects`/`/work`; legacy kept
- *     containers may still carry /root from the pre-0.12 bare-shell-at-home)
- *     AND which root it sits under, so it is pi's conversation key too. Using
- *     the cwd keeps the container identity aligned with the conversation the
- *     kept container hosts.
+ * The fields, and why each is retained:
+ *   - `machine.name`: the forward/ports filter scopes by machine.
+ *   - `cwd` (the resolved container cwd, via launchCwd): encodes the project
+ *     token (`/projects/<p>`, `/work/<p>`, or a root), so keyProject can name
+ *     the project a running container hosts.
+ *   - `projectsRoot` + `mountParent`: kept in the record for stability of the
+ *     decode shape (parseKeptKey reads them best-effort); no consumer filters on
+ *     them today, but they cost nothing and keep the label self-describing.
  *
- * DELIBERATELY EXCLUDED (not part of identity): `--keep`/`--rm` (the throwaway
- * choice for THIS run), the proxy + the direct-hole llm (forced-egress inputs),
- * forwarded pi args, and the seed. Two launches that differ only in those must
- * resolve to the SAME kept container.
- *
- * The key is a single opaque string (a `\n`-joined, field-tagged record) so the
- * CLI can stamp it verbatim onto a netcage label and match on string equality;
- * its internal shape is not a contract (compare only keys this function makes).
+ * Independent of the forced-egress inputs and forwarded pi args (identity only).
+ * The key is a single opaque string (a `\n`-joined, field-tagged record) the CLI
+ * stamps verbatim onto a netcage label; its internal shape is not a contract
+ * (decode only with parseKeptKey).
  */
-export function keptContainerKey(intent: LaunchIntent): string {
+export function launchIdentityKey(intent: LaunchIntent): string {
 	const {machine, mode, projectsRoot, project, mountParent} = intent;
 	const mounted = nonEmpty(mountParent) !== undefined;
 	const rootKind: RootKind = mounted ? 'mount' : 'projects';
-	// The same cwd resolution resolveRunPlan uses, so the key names the exact
-	// container a matching launch would run in (its conversation key).
+	// The same cwd resolution resolveRunPlan uses, so keyProject names the exact
+	// project the running container hosts (its conversation key).
 	const cwd = launchCwd(mode, rootKind, project);
 	return [
 		`machine=${machine.name}`,
@@ -1486,32 +1444,6 @@ export function keptContainerKey(intent: LaunchIntent): string {
 		`mountParent=${nonEmpty(mountParent) ?? ''}`,
 		`cwd=${cwd}`,
 	].join('\n');
-}
-
-/**
- * PURE: decide run-vs-start for a launch given a SUPPLIED listing of kept
- * `netcage.managed` containers (the CLI's netcage query result).
- *
- *   - `--rm` (throwaway, `intent.keep !== true`): ALWAYS a fresh `run`. The
- *     listing is NOT consulted (a throwaway launch never resumes a kept box).
- *   - `--keep`: a kept container whose `key` equals this launch's
- *     keptContainerKey is present -> `start` it (by its `ref`); else -> `run`
- *     (resolveRunPlan leaves it kept because `--keep` omits `--rm`).
- *
- * Never spawns, never queries netcage: the listing is injected, so the whole
- * decision is a pure function of (intent, listing).
- */
-export function resolveRunVsStart(
-	intent: LaunchIntent,
-	kept: readonly KeptContainer[],
-): RunVsStart {
-	// Throwaway short-circuit: a `--rm` launch is always a fresh run and never
-	// consults the listing (it must not resume a kept container).
-	if (intent.keep !== true) return {action: 'run'};
-
-	const want = keptContainerKey(intent);
-	const match = kept.find((c) => c.key === want);
-	return match ? {action: 'start', ref: match.ref} : {action: 'run'};
 }
 
 // --- `forward` / `ports`: reach an in-jail server from the host --------------
@@ -1522,14 +1454,14 @@ export function resolveRunVsStart(
 // (it reads the sidecar's /proc/net/tcp*, so a minimal image with no ss/netstat/nc
 // still works). anon-pi wraps them so the user never handles the raw netcage
 // container name: it resolves the RUNNING anon-pi container(s) by the identity key
-// it now stamps on EVERY launch (withKeyLabel, not just --keep), disambiguates with
+// it stamps on EVERY launch (withKeyLabel + launchIdentityKey), disambiguates with
 // a picker annotated by the open listeners, and shells out to `netcage forward`.
 // The forced-egress invariant is untouched: `forward` adds no OUTPUT rule (ADR-0014)
 // and `ports` only reads /proc; anon-pi composes neither egress flag here.
 
 /**
- * PURE: the decoded fields of a stamped keptContainerKey (the reverse of
- * keptContainerKey's `k=v\n` record). Used by `forward`/`ports` to filter the
+ * PURE: the decoded fields of a stamped launchIdentityKey (the reverse of
+ * launchIdentityKey's `k=v\n` record). Used by `forward`/`ports` to filter the
  * running managed containers by machine + project WITHOUT reconstructing the
  * exact key (which would couple to launchCwd). Unknown/missing fields are ''.
  */
@@ -1540,7 +1472,7 @@ export interface KeptKeyFields {
 	cwd: string;
 }
 
-/** PURE: parse a stamped keptContainerKey back into its fields (best-effort). */
+/** PURE: parse a stamped launchIdentityKey back into its fields (best-effort). */
 export function parseKeptKey(key: string): KeptKeyFields {
 	const out: KeptKeyFields = {
 		machine: '',
@@ -1604,7 +1536,7 @@ export function resolveManagedMatches(args: {
  * A RUNNING netcage-managed container the CLI surfaces to the pure forward/ports
  * resolution: its anon-pi identity `key` (stamped label, decoded), the `ref` to
  * pass to `netcage forward`/`ports` (id or name), and a human `name` for the
- * picker. Mirrors KeptContainer with the display name added.
+ * picker.
  */
 export interface ManagedContainer {
 	key: string;
@@ -1821,7 +1753,7 @@ export interface NetcagePsEntry {
  * ref: <Id>, name: <first Names entry or Id>}. When `runningOnly`, entries whose
  * State is not "running" are dropped (forward/ports can only reach a live jail).
  * The base64 DECODE of `key` is the CLI's job (Buffer), so this stays pure; the
- * caller decodes before matching against a keptContainerKey. [] on bad JSON.
+ * caller decodes before matching against a launchIdentityKey. [] on bad JSON.
  */
 export function parseNetcagePsJson(
 	stdout: string,
@@ -3218,17 +3150,18 @@ USAGE
   <project>   a folder under the projects root (mounted at ${CONTAINER_PROJECTS_ROOT}; pi's cwd). \`.\` means
               the root itself (a scratch pi at ${CONTAINER_PROJECTS_ROOT}, ${CONTAINER_MOUNT_ROOT} for --mount, or ~).
 
-  [--rm]      throwaway container this run (the DEFAULT; deleted on exit).
-  [--keep]    leave the container KEPT so its filesystem survives (apt install,
-              quit, re-enter). anon-pi finds it by netcage's managed label and
-              \`netcage start\`s it on re-entry.
+  Every launch is THROWAWAY: the container is removed on exit. To persist system
+  state you built in a session, snapshot the running container into a named image
+  (\`anon-pi machine snapshot <name>\`) and pin a machine to it (\`anon-pi machine
+  create <m> --image <name>\`). Your pi config + conversations live in the machine
+  home (a host mount) and persist regardless.
 
 WHAT IT DOES
   Runs pi inside netcage with all web/DNS egress forced through the socks5h proxy
   (fail-closed) and ONE direct hole to your local model (ANON_PI_LLM). A MACHINE
   is an image + a persistent HOST home (bind-mounted at ${CONTAINER_HOME_ROOT}) holding your pi
-  config, extensions, and conversations; the container is disposable, so \`--rm\`
-  loses nothing. Files (projects) are global by default; conversations are
+  config, extensions, and conversations; the container is disposable (throwaway),
+  so it loses nothing. Files (projects) are global by default; conversations are
   per-machine. On a FRESH machine home the image's staged defaults + your
   models.json are seeded in once; after that pi owns the home. Requires \`netcage\`.
 

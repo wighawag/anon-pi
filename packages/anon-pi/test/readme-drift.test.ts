@@ -33,12 +33,25 @@ describe('README documents the shipped machines + projects model', () => {
 		expect(readme).toMatch(/\bmenu\b/i);
 	});
 
-	it('documents throwaway-default + --keep and the machine/data verbs', () => {
-		expect(readme).toContain('--keep');
-		expect(readme).toContain('--rm');
+	it('documents throwaway-always and the machine/data verbs', () => {
+		// throwaway is the ONLY behaviour now; --keep/--rm are retired.
+		expect(readme).toMatch(/throwaway/i);
 		expect(readme).toContain('--delete-home');
 		expect(readme).toContain('--delete-project');
 		expect(readme).toContain('anon-pi machine');
+	});
+
+	it('does NOT present the retired --keep/--rm as a live launch flag', () => {
+		// They may appear in the migration note as REMOVED, but never as a runnable
+		// launch flag in a code example (which would read as current).
+		for (const gone of ['--keep', '--rm']) {
+			expect(
+				fencedCode.some((b) =>
+					new RegExp(`\\banon-pi\\b[^\\n]*\\s${escape(gone)}\\b`).test(b),
+				),
+				`retired \`${gone}\` must not appear as a launch flag in a code example`,
+			).toBe(false);
+		}
 	});
 
 	it('documents the ~/.anon-pi/ layout, not the ~/.config one', () => {
@@ -66,7 +79,7 @@ describe('README carries a 0.4.0 migration note', () => {
 
 	it('documents the removed verbs/flags and their replacements', () => {
 		// The retired surface is named (as REMOVED) in the migration note.
-		for (const gone of ['import', '--fresh', '--ephemeral']) {
+		for (const gone of ['import', '--fresh', '--ephemeral', '--keep', '--rm']) {
 			expect(readme, `migration note should mention ${gone}`).toContain(gone);
 		}
 		// old per-workdir state directory shape, documented as not-migrated.

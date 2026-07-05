@@ -199,12 +199,29 @@ describe('resolution + errors', () => {
 		const r = run(['--help'], {home});
 		expect(r.status).toBe(0);
 		expect(r.stdout).toContain('--shell');
-		expect(r.stdout).toContain('--keep');
 		expect(r.stdout).toContain('machine');
 		// the retired surface must be gone from HELP
 		expect(r.stdout).not.toContain('--ephemeral');
 		expect(r.stdout).not.toContain('--fresh');
 		expect(r.stdout).not.toMatch(/\bimport\b/);
+		// --keep/--rm are retired: throwaway is the only behaviour now.
+		expect(r.stdout).not.toContain('--keep');
+		expect(r.stdout).not.toMatch(/--rm/);
+	});
+
+	it('--keep errors (retired) with guidance toward snapshot / machine --image', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		const r = run(['--keep', 'recon', '-p', 'x'], {home});
+		expect(r.status).toBe(1);
+		expect(r.stderr).toContain('--keep');
+		expect(r.stderr).toContain('snapshot');
+	});
+
+	it('--rm errors (retired): throwaway is always on, no flag toggles it', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		const r = run(['--rm', 'recon', '-p', 'x'], {home});
+		expect(r.status).toBe(1);
+		expect(r.stderr).toContain('--rm');
 	});
 });
 

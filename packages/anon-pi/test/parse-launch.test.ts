@@ -1,8 +1,9 @@
 // Grammar A parsing: the pure argv->ParsedLaunch seam the launch CLI is built
 // on (bare positional = PROJECT; `-m` = machine; `--shell [p]`;
-// `--mount <parent> [p]`; `--keep`/`--rm` default; `.` root token; trailing
-// `<pi-args…>` after the project forwarded to pi). Enforces the reserved-name
-// guard (via validateName) and NAME vs `--mount` exclusivity.
+// `--mount <parent> [p]`; `.` root token; trailing `<pi-args…>` after the
+// project forwarded to pi). Every launch is throwaway (`--rm` always); the
+// retired `--keep`/`--rm` flags now ERROR. Enforces the reserved-name guard (via
+// validateName) and NAME vs `--mount` exclusivity.
 //
 // PURE (no spawn/fs): argv in -> ParsedLaunch out (or an AnonPiError). The CLI
 // combines the result with config/machine reads + the RunPlan resolver.
@@ -21,7 +22,6 @@ describe('parseLaunchArgs — modes + the bare menu', () => {
 		expect(p.mode).toBe('menu');
 		expect(p.machine).toBe(DEFAULT_MACHINE);
 		expect(p.project).toBeUndefined();
-		expect(p.keep).toBe(false);
 	});
 
 	it('a bare positional is a PROJECT (pi mode) on the default machine', () => {
@@ -110,19 +110,25 @@ describe('parseLaunchArgs — --mount', () => {
 	});
 });
 
-describe('parseLaunchArgs — --keep / --rm (throwaway default)', () => {
-	it('defaults to --rm (keep=false)', () => {
-		expect(parseLaunchArgs(['recon']).keep).toBe(false);
-		expect(parseLaunchArgs(['--rm', 'recon']).keep).toBe(false);
+describe('parseLaunchArgs — retired --keep / --rm (throwaway always)', () => {
+	// Every launch is now throwaway (`--rm` always); the flags that once toggled
+	// that are RETIRED and error with guidance toward image-based persistence.
+	it('--keep errors (retired), pointing at snapshot / machine create --image', () => {
+		expect(() => parseLaunchArgs(['--keep', 'recon'])).toThrow(AnonPiError);
+		expect(() => parseLaunchArgs(['--keep', 'recon'])).toThrow(/--keep/);
+		expect(() => parseLaunchArgs(['--keep', 'recon'])).toThrow(/snapshot/);
+		expect(() => parseLaunchArgs(['--keep', 'recon'])).toThrow(/--image/);
 	});
 
-	it('--keep leaves the container kept (keep=true)', () => {
-		expect(parseLaunchArgs(['--keep', 'recon']).keep).toBe(true);
+	it('--rm errors (retired): throwaway is the only behaviour, no flag toggles it', () => {
+		expect(() => parseLaunchArgs(['--rm', 'recon'])).toThrow(AnonPiError);
+		expect(() => parseLaunchArgs(['--rm', 'recon'])).toThrow(/--rm/);
+		expect(() => parseLaunchArgs(['--rm', 'recon'])).toThrow(/snapshot/);
 	});
 
-	it('errors when --keep and --rm are BOTH given (contradictory)', () => {
-		expect(() => parseLaunchArgs(['--keep', '--rm', 'recon'])).toThrow(
-			AnonPiError,
+	it('--keep in the no-project pi position (`--keep pi …`) also errors', () => {
+		expect(() => parseLaunchArgs(['--keep', 'pi', '--version'])).toThrow(
+			/--keep/,
 		);
 	});
 });
@@ -136,16 +142,8 @@ describe('parseLaunchArgs — forwarded pi args', () => {
 	});
 
 	it('anon-pi flags BEFORE the project still parse; everything after is pi args', () => {
-		const p = parseLaunchArgs([
-			'-m',
-			'webveil',
-			'--keep',
-			'recon',
-			'--flag',
-			'x',
-		]);
+		const p = parseLaunchArgs(['-m', 'webveil', 'recon', '--flag', 'x']);
 		expect(p.machine).toBe('webveil');
-		expect(p.keep).toBe(true);
 		expect(p.project).toBe('recon');
 		expect(p.piArgs).toEqual(['--flag', 'x']);
 	});
@@ -270,9 +268,9 @@ describe('parseLaunchArgs — pi session resume (no project)', () => {
 		);
 	});
 
-	it('--keep --rm with a session flag is still contradictory', () => {
-		expect(() => parseLaunchArgs(['--keep', '--rm', '--session', 'x'])).toThrow(
-			AnonPiError,
+	it('--keep before a session flag errors (retired flag)', () => {
+		expect(() => parseLaunchArgs(['--keep', '--session', 'x'])).toThrow(
+			/--keep/,
 		);
 	});
 

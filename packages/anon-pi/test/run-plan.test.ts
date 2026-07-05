@@ -251,10 +251,10 @@ describe('resolveRunPlan — the two invariant mounts (always)', () => {
 		}
 	});
 
-	it('the machine home mount is present on EVERY path (incl. --mount, --keep)', () => {
+	it('the machine home mount is present on EVERY path (incl. --mount)', () => {
 		for (const intent of [
 			baseIntent({mode: 'pi', project: 'recon'}),
-			baseIntent({mode: 'pi', project: 'recon', keep: true}),
+			baseIntent({mode: 'pi', project: 'recon'}),
 			baseIntent({mode: 'shell', mountParent: '/host/dev', project: 'sub'}),
 		]) {
 			const p = resolveRunPlan(intent, homeFresh);
@@ -294,22 +294,23 @@ describe('resolveRunPlan — the two invariant mounts (always)', () => {
 	});
 });
 
-describe('resolveRunPlan — --rm default / --keep', () => {
-	it('--rm is present by DEFAULT (throwaway container)', () => {
-		expect(launch().netcageArgs).toContain('--rm');
-	});
-
-	it('--rm is ABSENT under --keep (leaves a kept container)', () => {
-		expect(launch({keep: true}).netcageArgs).not.toContain('--rm');
-	});
-
-	it('the machine home mount survives regardless of --rm/--keep', () => {
-		for (const keep of [false, true]) {
-			const p = launch({keep});
-			expect(p.netcageArgs.join(' ')).toContain(
-				`${machine.home}:${CONTAINER_HOME_ROOT}`,
-			);
+describe('resolveRunPlan — throwaway always (--rm on every launch)', () => {
+	it('--rm is present on EVERY launch (throwaway is the only behaviour)', () => {
+		for (const over of [
+			{mode: 'pi' as const, project: 'recon'},
+			{mode: 'shell' as const, project: undefined},
+			{mode: 'pi' as const, project: '.'},
+			{mode: 'pi' as const, project: 'sub', mountParent: '/host/dev'},
+		]) {
+			expect(launch(over).netcageArgs).toContain('--rm');
 		}
+	});
+
+	it('the machine home mount survives (throwaway loses only container scratch)', () => {
+		const p = launch();
+		expect(p.netcageArgs.join(' ')).toContain(
+			`${machine.home}:${CONTAINER_HOME_ROOT}`,
+		);
 	});
 });
 
@@ -361,13 +362,11 @@ describe('resolveRunPlan — forced egress (HARD invariant, EVERY mode)', () => 
 		{mode: 'pi', project: 'recon'},
 		{mode: 'pi', project: '.'},
 		{mode: 'pi', project: 'recon', piArgs: ['-p', 'x']},
-		{mode: 'pi', project: 'recon', keep: true},
 		{mode: 'shell', project: undefined},
 		{mode: 'shell', project: 'recon'},
 		{mode: 'shell', project: '.'},
 		{mode: 'pi', project: 'sub', mountParent: '/host/dev'},
 		{mode: 'shell', mountParent: '/host/dev', project: undefined},
-		{mode: 'pi', project: 'recon', keep: true, mountParent: '/host/dev'},
 	];
 
 	it('EVERY composed argv carries --proxy <p> and exactly one --allow-direct <llm>', () => {
