@@ -432,9 +432,10 @@ export const ROOT_TOKEN = '.';
  * `.` is the root token (see ROOT_TOKEN); `..` is parent-traversal (both are
  * also rejected by the structural checks below, but listed here so the
  * reserved-name concept is explicit). `pi` is the passthrough token. The
- * SUBCOMMAND NOUN words (`machine`, `image`, `init`, `forward`, `ports`) are
- * reserved too: each is dispatched BEFORE the launch grammar, so a folder so
- * named would be UNREACHABLE by bare name (a latent trap). Reserving them makes
+ * SUBCOMMAND NOUN words (`machine`, `image`, `container`, `init`, `forward`,
+ * `ports`) are reserved too: each is dispatched BEFORE the launch grammar, so a
+ * folder so named would be UNREACHABLE by bare name (a latent trap). Reserving
+ * them makes
  * validateName refuse such a name up front with a clear error, closing the
  * trap. `--mount`'s `/work` is a CONTAINER path, not a name here, so it needs no
  * reservation. The reservation is GLOBAL (validateName is the one validator);
@@ -447,6 +448,7 @@ export const RESERVED_NAMES: readonly string[] = [
 	'pi',
 	'machine',
 	'image',
+	'container',
 	'init',
 	'forward',
 	'ports',
@@ -833,6 +835,18 @@ export interface LaunchIntent {
 	settingsSeed?: string;
 	/** The seed version stamped into a fresh home's marker. Default SEED_VERSION. */
 	seedVersion?: string;
+	/**
+	 * The DURABLE-box marker (the explicit `container` noun; see the container ADR
+	 * that supersedes ADR-0004's "lost capability" note). When set, the launch is a
+	 * durable named box: resolveRunPlan OMITS `--rm` (the box survives exit),
+	 * `--name`s the container by `durable.name` (so `container enter` can
+	 * `netcage start <name>`), and stamps the `anon-pi.container` label carrying the
+	 * name (so `container list`/`rm` read boxes back off the label). ORTHOGONAL to
+	 * the identity fields: launchIdentityKey is unchanged by it, so the durable box
+	 * is resolvable by `forward`/`ports` EXACTLY as a throwaway launch. Omitted =>
+	 * the default THROWAWAY launch (`--rm`, no name, no container label).
+	 */
+	durable?: {name: string};
 }
 
 /**
@@ -1311,7 +1325,18 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
  *   - the two mounts <home>:/root and <projectsRoot>:/projects, always;
  *   - --mount adds EXACTLY <parent>:/work and re-roots cwd, nothing else;
  *   - --proxy <p> + exactly one --allow-direct <llm> (forced egress, fail-closed);
- *   - --rm on EVERY launch (throwaway always; ADR-0004).
+ *   - --rm on every THROWAWAY launch (throwaway is the default; ADR-0004).
+ *
+ * The one PARAMETER on this is intent.durable (the explicit `container` noun):
+ * when set, the launch is a DURABLE named box - `--rm` is OMITTED (the box
+ * survives exit), the container is `--name`d by durable.name (so `container
+ * enter` can `netcage start <name>`), and the `anon-pi.container` label carries
+ * the name (so `container list`/`rm` read boxes back). This is the deliberate,
+ * OPT-IN reintroduction of the retired `--keep` (the container ADR supersedes
+ * ADR-0004's "lost capability" note): a durable box is STILL fully jailed - the
+ * two invariant mounts + forced egress are composed IDENTICALLY, never weakened.
+ * It is NOT a forked launch path: the one composition below just omits `--rm`
+ * and adds the name + label when durable.
  *
  * Throws AnonPiError (a plan is NEVER produced) when the image, the machine
  * home, the proxy, or the direct-hole llm is missing.
@@ -1379,10 +1404,21 @@ export function resolveRunPlan(
 	// task; here the argv simply omits -it for the one headless shape.
 	const headless = mode === 'pi' && isHeadlessPiArgs(intent.piArgs);
 
+	const durable = intent.durable;
 	const netcageArgs: string[] = ['run'];
-	// Throwaway ALWAYS: every launch is `--rm` (ADR-0004). Durable state is
-	// image-based (snapshot + a pinned machine), never an accreting container.
-	netcageArgs.push('--rm');
+	if (durable === undefined) {
+		// THROWAWAY (the default): `--rm` removes the container on exit (ADR-0004).
+		// Non-durable state is image-based (snapshot + a pinned machine).
+		netcageArgs.push('--rm');
+	} else {
+		// DURABLE (the explicit `container` noun): NO `--rm` (the box survives
+		// exit). Name it so `container enter` can `netcage start <name>`, and stamp
+		// the durable-box label (the name) so `container list`/`rm` read it back.
+		// EVERYTHING ELSE below (mounts, forced egress, seed, cwd, image) is the
+		// SAME as a throwaway launch: a durable box is still fully jailed.
+		netcageArgs.push('--name', durable.name);
+		netcageArgs.push('--label', `${ANON_PI_CONTAINER_LABEL}=${durable.name}`);
+	}
 	// Forced egress: the proxy + the ONE direct hole. Never omitted.
 	netcageArgs.push('--proxy', proxy, '--allow-direct', directTarget);
 	if (!headless) netcageArgs.push('-it');
@@ -1805,6 +1841,18 @@ export function parseNetcagePortsJson(stdout: string): NetcageListener[] {
  * here so the pure ps-JSON parser and the CLI's stamp/read agree on one name.
  */
 export const ANON_PI_KEY_LABEL = 'anon-pi.key';
+
+/**
+ * The netcage label a DURABLE box (the `container` noun) is stamped with, its
+ * VALUE being the box's name (`ANON_PI_CONTAINER_LABEL=<name>`). Distinct from
+ * `anon-pi.key` (the machine+cwd IDENTITY every launch stamps): this label marks
+ * a container as an anon-pi DURABLE box and carries its user-chosen name, so
+ * `container list`/`rm` enumerate + name boxes off the label with no anon-pi-side
+ * registry file (the label IS the record; see the container ADR). A throwaway
+ * launch never carries it. resolveRunPlan stamps it (with `--name <name>`) only
+ * when intent.durable is set.
+ */
+export const ANON_PI_CONTAINER_LABEL = 'anon-pi.container';
 
 /**
  * A raw `netcage ps --format json` entry, as anon-pi consumes it: the fields the
@@ -3171,6 +3219,200 @@ export function parseImageArgs(args: readonly string[]): ImageCommand {
 	return fail(`unknown image subcommand: ${verb} (snapshot | list)`);
 }
 
+// --- the `container` noun: explicit DURABLE named boxes (create/enter/list/rm).
+// The deliberate, opt-in reintroduction of the retired `--keep` (the container
+// ADR supersedes ADR-0004's "lost capability" note): a durable box is a netcage
+// run WITHOUT `--rm` the user NAMES, so there is no create-vs-enter inference.
+// `create` freezes the box's image + cwd at create (so it takes the cwd mode
+// word); `enter` takes ONLY the name (image + cwd frozen) and REFUSES `-i` /
+// project / `--shell` grammatically. The parse is PURE here; the impure verb
+// bodies (create/enter, list/rm) land in the sibling tasks.
+
+/**
+ * A parsed `container <verb> …` command. A discriminated union so the CLI
+ * dispatches on `verb` with already-validated fields:
+ *   - `create <name> [-i <ref>] [-m <machine>] [--mount <p>] [<project>|--shell]`:
+ *     instantiate a durable box. `name` is a validated box name. The cwd mode
+ *     word (a `project` token - a name or the `.` root - OR `--shell`) is FROZEN
+ *     at create (the box's cwd is its stable identity); the two are mutually
+ *     exclusive. `-i`/`-m`/`--mount` mirror the launch grammar (`-i` an ephemeral
+ *     image ref - NOT name-validated - `-m` the HOME machine, `--mount` a HOST
+ *     parent path).
+ *   - `enter <name>`: re-enter the box. Takes ONLY the name; `-i` and a
+ *     project/`--shell` are grammatically REFUSED (both frozen at create), so
+ *     the impure enter body owns no such logic.
+ *   - `list`: no args (reads boxes off the `anon-pi.container` label; zero state).
+ *   - `rm <name> [--yes]`: remove a box (`--yes`/`-y` skips the confirm).
+ */
+export type ContainerCommand =
+	| {
+			verb: 'create';
+			name: string;
+			machine?: string;
+			image?: string;
+			mountParent?: string;
+			shell: boolean;
+			project?: string;
+	  }
+	| {verb: 'enter'; name: string}
+	| {verb: 'list'}
+	| {verb: 'rm'; name: string; yes: boolean};
+
+/**
+ * PURE: parse the tokens AFTER `container` into a ContainerCommand. Validates the
+ * box name via validateName (the reserved-name / traversal guard). Throws
+ * AnonPiError (printed verbatim, exit 1) for an unknown/missing verb, a missing
+ * or extra positional, an unknown flag, a bad name, or - on `enter` - any of the
+ * frozen-at-create tokens (`-i`, a project, `--shell`), with a message pointing
+ * at re-create / `image snapshot` (the enter body relies on this refusal).
+ *
+ * `create`'s cwd mode word mirrors the launch grammar: a bare positional is a
+ * project (`.` allowed as the root token), `--shell` is the shell mode word, and
+ * the two are mutually exclusive (a box has ONE frozen cwd).
+ */
+export function parseContainerArgs(args: readonly string[]): ContainerCommand {
+	const fail = (msg: string): never => {
+		throw new AnonPiError(
+			`anon-pi: ${msg}\nRun \`anon-pi container --help\` or \`anon-pi --help\`.`,
+		);
+	};
+
+	const verb = args[0];
+	if (verb === undefined) {
+		fail('`container` needs a subcommand: create | enter | list | rm');
+	}
+
+	const rest = args.slice(1);
+
+	if (verb === 'list') {
+		if (rest.length > 0)
+			fail(`container list takes no arguments, got: ${rest.join(' ')}`);
+		return {verb: 'list'};
+	}
+
+	if (verb === 'create') {
+		let name: string | undefined;
+		let machine: string | undefined;
+		let image: string | undefined;
+		let mountParent: string | undefined;
+		let shell = false;
+		let project: string | undefined;
+		const setCwdMode = (word: 'shell' | string): void => {
+			// The cwd is FROZEN at create: exactly ONE mode word (a project or
+			// --shell), never both, so the box has one stable identity.
+			if (shell || project !== undefined)
+				fail(
+					'container create takes ONE cwd mode word: a project or --shell, not both',
+				);
+			if (word === 'shell') shell = true;
+			else project = word;
+		};
+		for (let i = 0; i < rest.length; i++) {
+			const a = rest[i];
+			if (a === '-m' || a === '--machine') {
+				const v = rest[++i];
+				if (v === undefined) fail(`${a} needs a machine name`);
+				machine = validateName(v as string, 'machine');
+				continue;
+			}
+			if (a === '-i' || a === '--image') {
+				// The EPHEMERAL per-launch image override (frozen into the box). A raw
+				// ref resolved in netcage's private store, NOT a name token: not
+				// name-validated (mirrors the launch grammar's `-i`).
+				const v = rest[++i];
+				if (v === undefined) fail(`${a} needs an image ref`);
+				image = v as string;
+				continue;
+			}
+			if (a === '--mount') {
+				const v = rest[++i];
+				if (v === undefined) fail('--mount needs a HOST parent path');
+				mountParent = v as string;
+				continue;
+			}
+			if (a === '--shell') {
+				setCwdMode('shell');
+				continue;
+			}
+			if (a === ROOT_TOKEN) {
+				// the root token is a valid cwd mode word (the root itself), not a name.
+				if (name === undefined)
+					fail('container create needs a <name> before the cwd mode word');
+				setCwdMode(ROOT_TOKEN);
+				continue;
+			}
+			if (a.startsWith('-')) fail(`unknown option: ${a}`);
+			if (name === undefined) {
+				name = validateName(a, 'project');
+				continue;
+			}
+			// a second bare positional after the name is the project cwd mode word.
+			if (shell || project !== undefined)
+				fail(`container create got extra argument: ${a}`);
+			setCwdMode(validateName(a, 'project'));
+		}
+		if (name === undefined) fail('container create needs a <name>');
+		return {
+			verb: 'create',
+			name: name as string,
+			machine: nonEmpty(machine),
+			image: nonEmpty(image),
+			mountParent: nonEmpty(mountParent),
+			shell,
+			project,
+		};
+	}
+
+	if (verb === 'enter') {
+		// The image + cwd are FROZEN at create, so enter takes ONLY the name. `-i`
+		// and a project/`--shell` are REFUSED (not silently ignored): the refusal is
+		// the whole grammatical guarantee the enter body relies on.
+		const refuseFrozen = (what: string): never =>
+			fail(
+				`container enter takes only a <name>: ${what} is FROZEN at create and ` +
+					'cannot be changed on enter. Re-create the box under a new name (a new ' +
+					'name is a new box), or `anon-pi image snapshot` it and launch the image.',
+			);
+		let name: string | undefined;
+		for (let i = 0; i < rest.length; i++) {
+			const a = rest[i];
+			if (a === '-i' || a === '--image') refuseFrozen('the image (`-i`)');
+			if (a === '--shell') refuseFrozen('the cwd (`--shell`)');
+			if (a === ROOT_TOKEN) refuseFrozen('the cwd (a project/`.`)');
+			if (a.startsWith('-')) fail(`unknown option: ${a}`);
+			if (name === undefined) {
+				name = validateName(a, 'project');
+				continue;
+			}
+			// a second bare positional is the (refused) frozen cwd mode word.
+			refuseFrozen('the cwd (a project/`.`)');
+		}
+		if (name === undefined) fail('container enter needs a <name>');
+		return {verb: 'enter', name: name as string};
+	}
+
+	if (verb === 'rm') {
+		let name: string | undefined;
+		let yes = false;
+		for (const a of rest) {
+			if (a === '--yes' || a === '-y') {
+				yes = true;
+				continue;
+			}
+			if (a.startsWith('-')) fail(`unknown option: ${a}`);
+			if (name !== undefined)
+				fail(`container rm takes one name, got extra: ${a}`);
+			name = validateName(a, 'project');
+		}
+		if (name === undefined) fail('container rm needs a <name>');
+		return {verb: 'rm', name: name as string, yes};
+	}
+
+	return fail(
+		`unknown container subcommand: ${verb} (create | enter | list | rm)`,
+	);
+}
+
 /**
  * PURE: the clean image tag a `image snapshot <name>` writes:
  * `anon-pi/<name>:latest`. A same-name re-snapshot OVERWRITES this tag (that is
@@ -3317,6 +3559,7 @@ USAGE
   anon-pi init                   onboard: verify your proxy, capture your local model, pick an image
   anon-pi machine …              manage machines (create / list / set-image / rm)
   anon-pi image …                snapshot a running container into an image; list anon-pi images
+  anon-pi container …            durable named boxes: create / enter / list / rm (survive exit)
   anon-pi --delete-home [<m>]    delete a machine's home (config + convos); keep its image pin + files
   anon-pi --delete-project <p>   delete a project's files + its per-machine sessions; keep the homes
 
@@ -3338,11 +3581,13 @@ USAGE
               the wrong image); establish the machine's image with
               \`anon-pi machine create <m> --image <ref>\` first.
 
-  Every launch is THROWAWAY: the container is removed on exit. To persist system
+  A bare launch is THROWAWAY: the container is removed on exit. To persist system
   state you built in a session, snapshot the running container into a named image
   (\`anon-pi image snapshot <name>\`) and pin a machine to it (\`anon-pi machine
-  create <m> --image anon-pi/<name>:latest\`). Your pi config + conversations live
-  in the machine home (a host mount) and persist regardless.
+  create <m> --image anon-pi/<name>:latest\`); OR, for a single mutable box that
+  ACCRETES scratch across sessions, \`anon-pi container create <name>\` a durable
+  box and re-enter it with \`anon-pi container enter <name>\`. Your pi config +
+  conversations live in the machine home (a host mount) and persist regardless.
 
 WHAT IT DOES
   Runs pi inside netcage with all web/DNS egress forced through the socks5h proxy

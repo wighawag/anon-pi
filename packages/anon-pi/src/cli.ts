@@ -81,6 +81,8 @@ import {
 	resolveRunPlan,
 	serializeMachineJson,
 	parseImageArgs,
+	parseContainerArgs,
+	type ContainerCommand,
 	snapshotImageTag,
 	snapshotProvenanceLabels,
 	parseImageProvenance,
@@ -159,6 +161,7 @@ function main(argv: string[]): number {
 		'init',
 		'machine',
 		'image',
+		'container',
 		'forward',
 		'ports',
 	]);
@@ -182,6 +185,14 @@ function main(argv: string[]): number {
 	// "image" (ADR-0003 §1: snapshot moved off `machine` onto this new noun).
 	if (args[0] === 'image') {
 		return runImage(args.slice(1));
+	}
+
+	// `container …` is the durable-box surface (create/enter/list/rm), dispatched
+	// BEFORE the launch grammar so a bare `container` is never parsed as a project
+	// named "container" (the container ADR: an explicit durable-box noun that
+	// supersedes ADR-0004's "throwaway always" ONLY for this opt-in path).
+	if (args[0] === 'container') {
+		return runContainer(args.slice(1));
 	}
 
 	// The destructive cleanup verbs (replacing the old `--fresh`). Dispatched
@@ -917,6 +928,47 @@ function runImage(imageArgs: string[]): number {
 			case 'list':
 				return imageList();
 		}
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+}
+
+// --- the `container` noun: explicit DURABLE named boxes (create/enter/list/rm).
+// The parse (parseContainerArgs), the reserved word, and the durable run-plan
+// variant land in this task; the four verbs' IMPURE bodies land in the sibling
+// tasks (container-create-enter, container-list-rm). This dispatch wires the
+// grammar + reserved word + `--help` end-to-end so the parse errors and the help
+// are reachable now; each verb is a stub until its task fills it.
+
+/**
+ * Parse `container <verb> …` (pure parseContainerArgs) and dispatch. Prints
+ * CONTAINER_HELP on `--help`/`-h`. The four verb bodies are STUBBED here (they
+ * land in the create-enter and list-rm tasks); the parse + reserved word + help
+ * are live so the grammar is reachable end-to-end.
+ */
+function runContainer(containerArgs: string[]): number {
+	if (containerArgs.includes('--help') || containerArgs.includes('-h')) {
+		process.stdout.write(CONTAINER_HELP);
+		return 0;
+	}
+
+	let cmd: ContainerCommand;
+	try {
+		cmd = parseContainerArgs(containerArgs);
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+
+	// The impure verb bodies land in the sibling tasks (container-create-enter,
+	// container-list-rm). Until then the grammar parses + reports errors, but a
+	// well-formed verb is not yet implemented: say so clearly (exit 1) rather than
+	// pretend success.
+	try {
+		throw new AnonPiError(
+			`anon-pi: \`container ${cmd.verb}\` is not implemented yet ` +
+				'(the durable-box verb bodies land in a follow-up). The grammar + ' +
+				'`container --help` are live; the create/enter/list/rm bodies are next.',
+		);
 	} catch (e) {
 		return reportAnonPiError(e);
 	}
@@ -2443,6 +2495,33 @@ opt-in per project, default SKIP; no TTY => none copied). This is equivalent to
 \`list\` reads the provenance labels straight off the images (ZERO stored state):
 it shows every \`anon-pi/*\` image plus any dangling image still carrying an
 \`anon-pi.source-machine\` label (an orphaned snapshot), by its ID.
+`;
+
+/** The `container` subcommand help. */
+const CONTAINER_HELP = `anon-pi container - durable named boxes you create once and re-enter
+
+USAGE
+  anon-pi container create <name> [-i <ref>] [-m <machine>] [--mount <p>] [<project>|--shell]
+                                 instantiate a durable jailed box (netcage run, NO --rm)
+  anon-pi container enter <name> re-enter it at its FROZEN cwd (netcage start; no -i, no cwd)
+  anon-pi container list         list your durable boxes (name, machine, image, cwd, running?)
+  anon-pi container rm <name> [--yes]   remove a box (--yes to also stop a RUNNING one)
+
+A durable box is a jailed container that SURVIVES exit (unlike a normal launch,
+which is always throwaway): it accretes uncommitted scratch (shell history,
+/tmp, a half-built tree) across sessions. You NAME it, so "resume my box" and
+"give me a new one" are never confused - a new name is a new box.
+
+\`create\` FREEZES the box's image (\`-i\` > the machine's pinned image) and its
+cwd (a project token, \`.\` for the projects root, or \`--shell\`) at create time.
+\`enter\` therefore takes ONLY the name: it REFUSES \`-i\` and a project/\`--shell\`
+(both frozen at create) rather than silently ignore them. To change the image or
+cwd, re-create under a new name, or \`anon-pi image snapshot\` the box and launch
+the image.
+
+The box is STILL fully jailed: all egress is forced through the proxy, fail-
+closed, exactly like a throwaway launch. \`forward\`/\`ports\` resolve a RUNNING
+durable box by its identity label just as they do a throwaway one.
 `;
 
 // --- impure helpers ---------------------------------------------------------
