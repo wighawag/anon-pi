@@ -928,7 +928,13 @@ function runImage(imageArgs: string[]): number {
 	try {
 		switch (cmd.verb) {
 			case 'snapshot':
-				return imageSnapshot(env, cmd.name, cmd.machine, cmd.createMachine);
+				return imageSnapshot(
+					env,
+					cmd.name,
+					cmd.machine,
+					cmd.createMachine,
+					cmd.updateMachine,
+				);
 			case 'list':
 				return imageList();
 		}
@@ -1341,15 +1347,20 @@ function containerRm(name: string, yes: boolean): number {
  * required source. podman pauses the container during commit and unpauses, so
  * the live session survives. A same-name re-snapshot OVERWRITES the `:latest`
  * tag (the previous image becomes dangling but keeps its provenance label).
- * `--create-machine <m>` ALSO creates machine <m> from the fresh snapshot,
- * running the home-copy + per-project session carry-over. Forced egress is
- * untouched (commit is a local podman op).
+ * `--create-machine <m>` ALSO creates NEW machine <m> from the fresh snapshot,
+ * running the home-copy + per-project session carry-over. `--update-machine <m>`
+ * instead RE-PINS an EXISTING machine <m> to the fresh snapshot; it does NOT
+ * copy the home (the home is already the right one when <m> is the snapshot's
+ * own source), and skips the set-image warning in that case. The two are
+ * mutually exclusive (enforced in parseImageArgs). Forced egress is untouched
+ * (commit is a local podman op).
  */
 function imageSnapshot(
 	env: AnonPiEnv,
 	name: string,
 	machine: string | undefined,
 	createMachine: string | undefined,
+	updateMachine: string | undefined,
 ): number {
 	// If --create-machine names an EXISTING machine, refuse FIRST (before netcage /
 	// any commit), so a name clash fails fast (mirrors machine create). The
@@ -1359,7 +1370,21 @@ function imageSnapshot(
 		if (existsSync(targetDir)) {
 			process.stderr.write(
 				`anon-pi: machine ${JSON.stringify(createMachine)} already exists (${targetDir}). ` +
-					'Pick a different --create-machine name or `anon-pi machine rm` it first.\n',
+					'Pick a different --create-machine name, use --update-machine to re-pin it, ' +
+					'or `anon-pi machine rm` it first.\n',
+			);
+			return 1;
+		}
+	}
+
+	// The mirror image for --update-machine: refuse FIRST if the machine does NOT
+	// exist (nothing to re-pin), pointing at --create-machine instead.
+	if (updateMachine !== undefined) {
+		const targetDir = machineDir(env, updateMachine);
+		if (!existsSync(targetDir)) {
+			process.stderr.write(
+				`anon-pi: no machine ${JSON.stringify(updateMachine)} (${targetDir}). ` +
+					'Use --create-machine to create it from the snapshot.\n',
 			);
 			return 1;
 		}
@@ -1435,6 +1460,33 @@ function imageSnapshot(
 		} else {
 			process.stderr.write(
 				'anon-pi: the committed container has no source machine; the new home seeds fresh on first launch.\n',
+			);
+		}
+	}
+
+	// --update-machine: RE-PIN an existing machine to the fresh snapshot. The home
+	// is left untouched (mirrors `machine set-image`), preserving any per-machine
+	// projects override. When the target IS the snapshot's own source machine, the
+	// home already matches the new image, so the set-image compatibility warning is
+	// suppressed; re-pinning a DIFFERENT machine keeps the warning (its home was
+	// built for another image).
+	if (updateMachine !== undefined) {
+		const prev = readMachineJson(env, updateMachine);
+		writeFileSync(
+			machineJsonPath(env, updateMachine),
+			serializeMachineJson({image: tag, projects: prev.projects}),
+		);
+		if (sourceMachine === updateMachine) {
+			process.stdout.write(
+				`anon-pi: re-pinned machine ${JSON.stringify(updateMachine)} to ${tag} ` +
+					'(its own fresh snapshot; home unchanged).\n',
+			);
+		} else {
+			process.stdout.write(
+				`anon-pi: re-pinned machine ${JSON.stringify(updateMachine)} to ${tag}.\n`,
+			);
+			process.stderr.write(
+				setImageWarning(updateMachine, prev.image, tag) + '\n',
 			);
 		}
 	}
@@ -2827,7 +2879,7 @@ To SNAPSHOT a running container into an image, use \`anon-pi image snapshot\`
 const IMAGE_HELP = `anon-pi image - snapshot a running container into an image, and list anon-pi images
 
 USAGE
-  anon-pi image snapshot <name> [-m <machine>] [--create-machine <m>]
+  anon-pi image snapshot <name> [-m <machine>] [--create-machine <m>|--update-machine <m>]
                                  commit the RUNNING container into anon-pi/<name>:latest
   anon-pi image list             list anon-pi images with their provenance (read-only)
 
@@ -2844,11 +2896,17 @@ briefly during the commit. A same-name re-snapshot OVERWRITES the \`:latest\` ta
 still shows it by ID). To preserve a specific snapshot, snapshot it under a
 different name.
 
-\`--create-machine <m>\` ALSO creates machine <m> pinned to the fresh snapshot,
+\`--create-machine <m>\` ALSO creates NEW machine <m> pinned to the fresh snapshot,
 copying the source machine's HOME (config + extensions + dotfiles) MINUS its
 conversations, then offering the conversations separately (grouped BY PROJECT,
 opt-in per project, default SKIP; no TTY => none copied). This is equivalent to
 \`image snapshot\` followed by a provenance-aware \`machine create --image\`.
+
+\`--update-machine <m>\` instead RE-PINS an EXISTING machine <m> to the fresh
+snapshot (equivalent to \`image snapshot\` followed by \`machine set-image\`). The
+HOME is left untouched; when <m> is the snapshot's own source machine the home
+already matches the new image, so no warning is printed. The two flags are
+mutually exclusive.
 
 \`list\` reads the provenance labels straight off the images (ZERO stored state):
 it shows every \`anon-pi/*\` image plus any dangling image still carrying an

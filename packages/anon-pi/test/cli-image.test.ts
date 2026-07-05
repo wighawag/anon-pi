@@ -68,6 +68,34 @@ describe('image snapshot', () => {
 		expect(r.stderr).toContain('already exists');
 	});
 
+	it('--update-machine refuses a MISSING machine (before netcage/commit)', () => {
+		const home = tempHome();
+		const r = run(
+			['image', 'snapshot', 'webscan', '--update-machine', 'toolbox'],
+			{home, env: NO_NETCAGE},
+		);
+		expect(r.status).toBe(1);
+		expect(r.stderr).toContain('no machine');
+	});
+
+	it('--create-machine + --update-machine together is a grammar error', () => {
+		const home = tempHome();
+		const r = run(
+			[
+				'image',
+				'snapshot',
+				'webscan',
+				'--create-machine',
+				'a',
+				'--update-machine',
+				'b',
+			],
+			{home},
+		);
+		expect(r.status).toBe(1);
+		expect(r.stderr).toContain('mutually exclusive');
+	});
+
 	it('rejects an invalid name and an invalid -m filter (traversal guard)', () => {
 		const home = tempHome();
 		expect(run(['image', 'snapshot', 'a/b'], {home}).status).toBe(1);
@@ -117,6 +145,7 @@ describe('image --help', () => {
 		expect(r.stdout).toContain('snapshot');
 		expect(r.stdout).toContain('list');
 		expect(r.stdout).toContain('--create-machine');
+		expect(r.stdout).toContain('--update-machine');
 		expect(r.stdout).not.toContain('launch pi inside a netcage');
 	});
 });

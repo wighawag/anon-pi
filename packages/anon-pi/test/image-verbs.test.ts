@@ -34,6 +34,7 @@ describe('parseImageArgs — the verb grammar', () => {
 			name: 'webscan',
 			machine: undefined,
 			createMachine: undefined,
+			updateMachine: undefined,
 		});
 	});
 
@@ -43,6 +44,7 @@ describe('parseImageArgs — the verb grammar', () => {
 			name: 'webscan',
 			machine: 'recon',
 			createMachine: undefined,
+			updateMachine: undefined,
 		});
 		expect(
 			parseImageArgs(['snapshot', 'webscan', '--machine', 'recon']).machine,
@@ -57,7 +59,42 @@ describe('parseImageArgs — the verb grammar', () => {
 			name: 'webscan',
 			machine: undefined,
 			createMachine: 'toolbox',
+			updateMachine: undefined,
 		});
+	});
+
+	it('snapshot --update-machine <m> is a validated machine name', () => {
+		expect(
+			parseImageArgs(['snapshot', 'webscan', '--update-machine', 'toolbox']),
+		).toEqual({
+			verb: 'snapshot',
+			name: 'webscan',
+			machine: undefined,
+			createMachine: undefined,
+			updateMachine: 'toolbox',
+		});
+	});
+
+	it('--create-machine and --update-machine are mutually exclusive', () => {
+		expect(() =>
+			parseImageArgs([
+				'snapshot',
+				'webscan',
+				'--create-machine',
+				'a',
+				'--update-machine',
+				'b',
+			]),
+		).toThrow(/mutually exclusive/);
+	});
+
+	it('--update-machine needs a name and validates it', () => {
+		expect(() => parseImageArgs(['snapshot', 'a', '--update-machine'])).toThrow(
+			AnonPiError,
+		);
+		expect(() =>
+			parseImageArgs(['snapshot', 'a', '--update-machine', 'x/y']),
+		).toThrow(AnonPiError);
 	});
 
 	it('snapshot -m + --create-machine compose', () => {
@@ -75,6 +112,7 @@ describe('parseImageArgs — the verb grammar', () => {
 			name: 'webscan',
 			machine: 'recon',
 			createMachine: 'toolbox',
+			updateMachine: undefined,
 		});
 	});
 

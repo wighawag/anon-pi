@@ -3197,24 +3197,34 @@ export function parseMachineArgs(args: readonly string[]): MachineCommand {
 /**
  * A parsed `image <verb> …` command (ADR-0003 §1). A discriminated union so the
  * CLI dispatches on `verb` with already-validated fields:
- *   - `snapshot <name> [-m <machine>] [--create-machine <m>]`: commit the
- *     RUNNING container into `anon-pi/<name>:latest`. `name` is a validated
- *     image name (a safe tag segment). `-m <machine>` is an OPTIONAL filter
- *     (which running container to commit when several are up), NOT a required
- *     source. `--create-machine <m>` ALSO creates machine <m> from the fresh
- *     snapshot (running the home-copy + session carry-over).
+ *   - `snapshot <name> [-m <machine>] [--create-machine <m>|--update-machine <m>]`:
+ *     commit the RUNNING container into `anon-pi/<name>:latest`. `name` is a
+ *     validated image name (a safe tag segment). `-m <machine>` is an OPTIONAL
+ *     filter (which running container to commit when several are up), NOT a
+ *     required source. `--create-machine <m>` ALSO creates NEW machine <m> from
+ *     the fresh snapshot (running the home-copy + session carry-over).
+ *     `--update-machine <m>` instead RE-PINS an EXISTING machine <m> to the fresh
+ *     snapshot (no home copy: the home is already the right one). The two are
+ *     mutually exclusive.
  *   - `list`: no args (read-only; zero stored state).
  */
 export type ImageCommand =
-	| {verb: 'snapshot'; name: string; machine?: string; createMachine?: string}
+	| {
+			verb: 'snapshot';
+			name: string;
+			machine?: string;
+			createMachine?: string;
+			updateMachine?: string;
+	  }
 	| {verb: 'list'};
 
 /**
  * PURE: parse the tokens AFTER `image` into an ImageCommand. Validates the image
- * name + the `-m` / `--create-machine` machine names via validateName (the
- * reserved-name / traversal guard), so the CLI only ever joins safe segments.
- * Throws AnonPiError (printed verbatim, exit 1) for an unknown/missing verb, a
- * missing or extra positional, an unknown flag, or a bad name.
+ * name + the `-m` / `--create-machine` / `--update-machine` machine names via
+ * validateName (the reserved-name / traversal guard), so the CLI only ever joins
+ * safe segments. Throws AnonPiError (printed verbatim, exit 1) for an
+ * unknown/missing verb, a missing or extra positional, an unknown flag, a bad
+ * name, or `--create-machine` + `--update-machine` together (mutually exclusive).
  *
  * `<name>` is validated with the `machine` kind: it shares the same
  * folder-safe / reserved-name rules, and a snapshot name is an image-tag
@@ -3244,6 +3254,7 @@ export function parseImageArgs(args: readonly string[]): ImageCommand {
 		let name: string | undefined;
 		let machine: string | undefined;
 		let createMachine: string | undefined;
+		let updateMachine: string | undefined;
 		for (let i = 0; i < rest.length; i++) {
 			const a = rest[i];
 			if (a === '-m' || a === '--machine') {
@@ -3258,17 +3269,29 @@ export function parseImageArgs(args: readonly string[]): ImageCommand {
 				createMachine = validateName(v as string, 'machine');
 				continue;
 			}
+			if (a === '--update-machine') {
+				const v = rest[++i];
+				if (v === undefined) fail('--update-machine needs a machine name');
+				updateMachine = validateName(v as string, 'machine');
+				continue;
+			}
 			if (a.startsWith('-')) fail(`unknown option: ${a}`);
 			if (name !== undefined)
 				fail(`image snapshot takes one <name>, got extra: ${a}`);
 			name = validateName(a, 'machine');
 		}
 		if (name === undefined) fail('image snapshot needs a <name>');
+		if (createMachine !== undefined && updateMachine !== undefined)
+			fail(
+				'--create-machine and --update-machine are mutually exclusive ' +
+					'(one creates a NEW machine, the other re-pins an EXISTING one)',
+			);
 		return {
 			verb: 'snapshot',
 			name: name as string,
 			machine: nonEmpty(machine),
 			createMachine: nonEmpty(createMachine),
+			updateMachine: nonEmpty(updateMachine),
 		};
 	}
 

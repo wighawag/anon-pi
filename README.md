@@ -242,14 +242,16 @@ If you never create a machine explicitly, launches use the `default` machine (wh
 ## Managing images
 
 ```
-anon-pi image snapshot <name> [-m <machine>] [--create-machine <m>]
+anon-pi image snapshot <name> [-m <machine>] [--create-machine <m>|--update-machine <m>]
                                  commit the RUNNING container into anon-pi/<name>:latest
 anon-pi image list               list anon-pi images with their provenance (read-only)
 ```
 
 `image snapshot` captures the current filesystem of a **running** jailed container (for example after you `sudo apt install` some tools) into the clean tag `anon-pi/<name>:latest`, baking **provenance** as podman labels (source machine, source image, snapshot time). This is the way to keep container-level system changes (every launch is throwaway): freeze the running box into a named image, then pin a machine to it. The container is auto-detected from your running anon-pi containers (a picker when several are up); `-m <machine>` is an **optional filter**, not a required source. The container must still be running (do not exit the session; podman pauses it briefly during the commit). A same-name re-snapshot **overwrites** the `:latest` tag; the previous image becomes dangling but keeps its provenance, so `image list` still shows it by ID. To preserve a specific snapshot, snapshot it under a different name.
 
-`--create-machine <m>` also creates machine `<m>` pinned to the fresh snapshot, **copying the source machine's home** (your pi config, extensions, and dotfiles, which are correct for the committed image) **minus its conversations**. Conversations are handled separately: you are offered each one **grouped by project**, opt-in per project (default **skip**), choosing **copy** or **skip** for each (with no TTY, none are copied). Copy never touches the source machine; after copying, a single confirmed step (default No) can **delete** the copied groups from the source (the only way to "move" a conversation out). This is equivalent to `image snapshot` followed by a provenance-aware `machine create --image`.
+`--create-machine <m>` also creates a **new** machine `<m>` pinned to the fresh snapshot, **copying the source machine's home** (your pi config, extensions, and dotfiles, which are correct for the committed image) **minus its conversations**. Conversations are handled separately: you are offered each one **grouped by project**, opt-in per project (default **skip**), choosing **copy** or **skip** for each (with no TTY, none are copied). Copy never touches the source machine; after copying, a single confirmed step (default No) can **delete** the copied groups from the source (the only way to "move" a conversation out). This is equivalent to `image snapshot` followed by a provenance-aware `machine create --image`.
+
+`--update-machine <m>` instead **re-pins an existing** machine `<m>` to the fresh snapshot (equivalent to `image snapshot` followed by `machine set-image`). The home is left untouched; when `<m>` is the snapshot's own source machine the home already matches the new image, so no warning is printed (unlike `set-image`). The two flags are mutually exclusive: `--create-machine` refuses an existing name, `--update-machine` refuses a missing one.
 
 `image list` reads the provenance labels straight off the images (**zero stored state**): it shows every `anon-pi/*` image plus any dangling image still carrying an `anon-pi.source-machine` label (an orphaned snapshot), by its ID.
 

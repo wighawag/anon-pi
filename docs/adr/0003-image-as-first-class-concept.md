@@ -83,9 +83,18 @@ WITHOUT the inference.
   exact 0.15 prompts), after the fact. No provenance / home gone => plain fresh
   create, as today.
 - `anon-pi image snapshot <name> --create-machine <m>`: convenience shortcut that
-  snapshots THEN creates the machine (running the same home-copy + session
+  snapshots THEN creates a NEW machine (running the same home-copy + session
   carry-over). Kept because it is the common one-step path; it is redundant with
   `image snapshot` + provenance-aware `machine create`, but nicer.
+- `anon-pi image snapshot <name> --update-machine <m>`: the mirror shortcut that
+  snapshots THEN RE-PINS an EXISTING machine to the fresh snapshot (redundant
+  with `image snapshot` + `machine set-image`, but nicer). It does NOT copy the
+  home; when `<m>` IS the snapshot's own source machine the home already matches
+  the new image, so the `set-image` compatibility warning is SUPPRESSED (re-pinning
+  a DIFFERENT machine still warns). `--create-machine` and `--update-machine` are
+  mutually exclusive, and each fail-fast on the wrong existence state
+  (`--create-machine` refuses an existing name; `--update-machine` a missing one),
+  so a mistyped name never silently mutates a durable machine.
 
 ## Consequences
 
