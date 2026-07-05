@@ -47,7 +47,8 @@ may be gone; consumers must tolerate that).
 
 ### 3. `-i <ref>` / `--image <ref>`: an EPHEMERAL, per-launch image override
 
-- Slots into the launch grammar beside `-m`, `--shell`, `--mount`, `--keep`.
+- Slots into the launch grammar beside `-m`, `--shell`, `--mount` (there is no
+  `--keep`: retired by ADR-0004; every launch is throwaway).
 - Highest priority in the image-resolution chain:
   `-i` > `machine.json.image` > `ANON_PI_IMAGE` > error.
 - Composes with `-m`: `-m` picks the HOME, `-i` picks the IMAGE.
@@ -59,14 +60,20 @@ may be gone; consumers must tolerate that).
   (it enables `image list` + the auto-copy below) but do NOT warn on `-i` now. A
   lineage-aware warning can be added later if a real need appears.
 
-### 4. Kept-container identity gains the image (amends ADR-0002)
+### 4. `--keep`/`--rm` are RETIRED (superseded by snapshot + `-i`) - see ADR-0004
 
-ADR-0002 keyed a kept container on (machine, projectsRoot, mountParent, cwd) and
-DELIBERATELY excluded the image (it was fixed per machine). With `-i` the image
-is now variable per launch, so two `--keep` launches of the same machine + cwd
-but DIFFERENT images are genuinely different containers. Therefore the resolved
-IMAGE joins `keptContainerKey`. Without this, `--keep` + a different `-i` would
-wrongly `netcage start` a container built from the other image.
+The initial plan had the image join `keptContainerKey` (so two `--keep` launches
+differing only in image would not cross-resume). During the ADR-0003 grill we
+concluded that `snapshot` + `-i` REPLACE the `--keep` use case entirely ("apt
+install, quit, re-enter" = snapshot to an image, relaunch via `-i` / a
+machine pinned to it), and that `--keep`'s mutable-inferred-identity is the very
+source of the resume-vs-fresh ambiguity. So `--keep`/`--rm` and the whole
+kept-container run-vs-start inference are RETIRED (ADR-0004); every launch is
+throwaway. This makes the image/kept-key question MOOT: there are no kept
+containers to key. The durable-environment need is met by a machine pinned to a
+snapshot image (a real name, no inference). A future explicit `container` noun
+(work/notes/ideas/container-create-flow.md) may reintroduce durable named boxes
+WITHOUT the inference.
 
 ### 5. Machine creation is provenance-aware; `--create-machine` is a convenience
 
