@@ -48,15 +48,26 @@ describe('parseContainerBoxesJson (netcage ps -a => durable boxes)', () => {
 		const r = parseContainerBoxesJson(
 			JSON.stringify([box, throwaway, sidecar]),
 		);
-		expect(r).toEqual([{name: 'recon-box', ref: 'boxid1', running: false}]);
+		expect(r).toEqual([
+			{name: 'recon-box', ref: 'boxid1', running: false, key: 'a2V5'},
+		]);
 	});
 
 	it('reports running vs stopped from State (both are seen, unlike the runningOnly ps reader)', () => {
 		const r = parseContainerBoxesJson(JSON.stringify([box, runningBox]));
 		expect(r).toEqual([
-			{name: 'recon-box', ref: 'boxid1', running: false},
-			{name: 'live-box', ref: 'boxid2', running: true},
+			{name: 'recon-box', ref: 'boxid1', running: false, key: 'a2V5'},
+			{name: 'live-box', ref: 'boxid2', running: true, key: 'a2V5'},
 		]);
+	});
+
+	it('carries the RAW anon-pi.key label for the CLI to decode (machine + cwd), or "" when absent', () => {
+		const noKey = {
+			...box,
+			Labels: {[ANON_PI_CONTAINER_LABEL]: 'recon-box'},
+		};
+		expect(parseContainerBoxesJson(JSON.stringify([noKey]))[0].key).toBe('');
+		expect(parseContainerBoxesJson(JSON.stringify([box]))[0].key).toBe('a2V5');
 	});
 
 	it('the box name is the label VALUE (not the netcage container Names)', () => {
