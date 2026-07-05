@@ -721,6 +721,32 @@ export function resolveLlm(args: {
 	return nonEmpty(args.env.llmDirect) ?? nonEmpty(args.config?.llm);
 }
 
+/**
+ * PURE: resolve the IMAGE a launch runs against, highest-priority first:
+ * a per-launch `-i`/`--image` override > the machine's pinned image
+ * (machine.json) > `ANON_PI_IMAGE` (the env fallback) > undefined (the CLL then
+ * errors). The `-i` override is STRICTLY EPHEMERAL: it selects the image for
+ * THIS launch only and is NEVER written back to machine.json (that persistent
+ * pin is `machine set-image` / `machine create --image`). No mismatch warning is
+ * ever emitted (ADR-0003 section 3: `-i` is explicit + ephemeral, so a warning
+ * carries no information the user lacks). Empty strings are treated as unset at
+ * every tier (nonEmpty), so a blank env/pin falls through cleanly.
+ */
+export function resolveLaunchImage(args: {
+	/** The per-launch `-i`/`--image` override (ParsedLaunch.image), if given. */
+	override?: string;
+	/** The machine's pinned image (machine.json.image), if set. */
+	machineImage?: string;
+	/** The `ANON_PI_IMAGE` env fallback, if set. */
+	envImage?: string;
+}): string | undefined {
+	return (
+		nonEmpty(args.override) ??
+		nonEmpty(args.machineImage) ??
+		nonEmpty(args.envImage)
+	);
+}
+
 // --- The per-machine RunPlan resolver ----------------------------------------
 //
 // The heart of the machines+projects rework: given a resolved launch intent
@@ -849,9 +875,10 @@ export const DEFAULT_MACHINE = 'default';
  * project): the CLI runs the host-side menu. `pi`/`shell` carry the chosen
  * target. `project` is a validated project name, the `.` root token, or
  * undefined (menu / bare shell, which lands at the active root). `mountParent` is the `--mount` HOST parent
- * (a path, NOT a name-namespaced token). Every launch is throwaway (`--rm`
- * always; the retired `--keep`/`--rm` flags now error). `piArgs` are the trailing
- * tokens forwarded to pi (pi mode only; undefined otherwise).
+ * (a path, NOT a name-namespaced token). `image` is the ephemeral per-launch
+ * `-i`/`--image` override (undefined when not given). Every launch is throwaway
+ * (`--rm` always; the retired `--keep`/`--rm` flags now error). `piArgs` are the
+ * trailing tokens forwarded to pi (pi mode only; undefined otherwise).
  */
 export interface ParsedLaunch {
 	mode: LaunchMode;
@@ -864,6 +891,16 @@ export interface ParsedLaunch {
 	machineExplicit: boolean;
 	project?: string;
 	mountParent?: string;
+	/**
+	 * The EPHEMERAL per-launch image override (`-i <ref>` / `--image <ref>`), or
+	 * undefined. Highest priority in the image-resolution chain (see
+	 * resolveLaunchImage): `-i` > machine.json.image > ANON_PI_IMAGE. It NEVER
+	 * mutates machine.json (that persistent pin is `machine set-image` /
+	 * `machine create --image`); `-i` picks the IMAGE for this launch while `-m`
+	 * picks the HOME, and they compose. The ref is passed straight through to
+	 * netcage's private image store: anon-pi does NOT pre-check it or auto-pull.
+	 */
+	image?: string;
 	piArgs?: string[];
 }
 
@@ -1060,6 +1097,7 @@ function finishPiNoProjectLaunch(args: {
 	machine: string;
 	machineExplicit: boolean;
 	mountParent?: string;
+	image?: string;
 	shell: boolean;
 	piArgs: string[];
 	fail: (msg: string) => never;
@@ -1075,14 +1113,15 @@ function finishPiNoProjectLaunch(args: {
 		machineExplicit: args.machineExplicit,
 		project: undefined,
 		mountParent: args.mountParent,
+		image: args.image,
 		piArgs: args.piArgs,
 	};
 }
 
 /**
  * PURE: parse grammar A into a ParsedLaunch. Consumes the anon-pi flags
- * (`-m <machine>`, `--shell`, `--mount <parent>`) LEFT of the
- * project positional; the FIRST bare positional is the project (`.` allowed as
+ * (`-m <machine>`, `--shell`, `--mount <parent>`, `-i`/`--image <ref>`) LEFT of
+ * the project positional; the FIRST bare positional is the project (`.` allowed as
  * the root token). In pi mode every token AFTER the project is forwarded to pi
  * verbatim (so `anon-pi recon -p '...'` works) — anon-pi flags must come before
  * the project. A pi session-resume flag (`--session <id>`, `--continue`,
@@ -1102,6 +1141,7 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 	let machineSet = false;
 	let shell = false;
 	let mountParent: string | undefined;
+	let image: string | undefined;
 	let project: string | undefined;
 	let piArgs: string[] | undefined;
 
@@ -1129,6 +1169,16 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 			mountParent = v as string;
 			continue;
 		}
+		if (a === '-i' || a === '--image') {
+			// The EPHEMERAL per-launch image override. A raw ref, NOT a
+			// name-namespaced anon-pi token (it resolves in netcage's private
+			// image store, so any podman ref / `anon-pi/<name>:latest` snapshot tag
+			// is valid): not name-validated here. It never mutates machine.json.
+			const v = args[++i];
+			if (v === undefined) fail(`${a} needs an image ref`);
+			image = v as string;
+			continue;
+		}
 		if ((RETIRED_LAUNCH_FLAGS as readonly string[]).includes(a)) {
 			// `--keep`/`--rm` are retired (ADR-0004): throwaway is the only
 			// behaviour now. Point at the image-based replacement.
@@ -1149,6 +1199,7 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 				machine,
 				machineExplicit: machineSet,
 				mountParent,
+				image,
 				shell,
 				piArgs: args.slice(i + 1),
 				fail,
@@ -1190,6 +1241,7 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 				machine,
 				machineExplicit: machineSet,
 				mountParent,
+				image,
 				shell,
 				piArgs,
 				fail,
@@ -1219,6 +1271,7 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 			machineExplicit: machineSet,
 			project,
 			mountParent,
+			image,
 		};
 	}
 
@@ -1231,6 +1284,7 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 			machineExplicit: machineSet,
 			project: undefined,
 			mountParent,
+			image,
 		};
 	}
 
@@ -1242,6 +1296,7 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 		machineExplicit: machineSet,
 		project,
 		mountParent,
+		image,
 		piArgs,
 	};
 }
@@ -3257,6 +3312,7 @@ USAGE
   anon-pi forward [<p>] [--port …]  open a host port onto a running container's in-jail server
   anon-pi ports [<project>]      list a running container's open in-jail TCP listeners
   anon-pi -m <machine> [<p>]     the same, on <machine> (its own image + home + conversations)
+  anon-pi -i <ref> [<p>]         run against <ref> for THIS launch only (also --image; ephemeral)
   anon-pi --mount <parent> [<p>] root at a HOST parent folder instead of the projects root
   anon-pi init                   onboard: verify your proxy, capture your local model, pick an image
   anon-pi machine …              manage machines (create / list / set-image / rm)
@@ -3266,6 +3322,21 @@ USAGE
 
   <project>   a folder under the projects root (mounted at ${CONTAINER_PROJECTS_ROOT}; pi's cwd). \`.\` means
               the root itself (a scratch pi at ${CONTAINER_PROJECTS_ROOT}, ${CONTAINER_MOUNT_ROOT} for --mount, or ~).
+
+  -i <ref>, --image <ref>   EPHEMERAL per-launch image override, highest priority
+              (\`-i\` > the machine's machine.json image > ANON_PI_IMAGE). It picks the
+              IMAGE for this launch only; \`-m\` picks the HOME, and the two compose.
+              It NEVER changes machine.json (to re-pin a machine's image, use
+              \`anon-pi machine set-image\` / \`machine create --image\`). No mismatch
+              warning is printed. <ref> resolves in NETCAGE'S private image store
+              (\`anon-pi/<name>:latest\` snapshots + \`init\`-built images live there),
+              NOT your default podman store; anon-pi does NOT pre-check it and does
+              NOT auto-pull (an anonymity tool must not silently fetch a remote
+              image). A "not found" means the ref is not in netcage's store: snapshot
+              it (\`anon-pi image snapshot <name>\`) or build it into that store.
+              On a FRESH machine home \`-i\` is REFUSED (it would seed the home from
+              the wrong image); establish the machine's image with
+              \`anon-pi machine create <m> --image <ref>\` first.
 
   Every launch is THROWAWAY: the container is removed on exit. To persist system
   state you built in a session, snapshot the running container into a named image

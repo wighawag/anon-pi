@@ -110,6 +110,89 @@ describe('parseLaunchArgs — --mount', () => {
 	});
 });
 
+describe('parseLaunchArgs — -i / --image (ephemeral per-launch image override)', () => {
+	// `-i <ref>` / `--image <ref>` parse into ParsedLaunch.image (the ephemeral
+	// override). It is a raw ref (NOT name-validated), composes with -m/--shell/
+	// --mount/the project, and is undefined when not given. The CLI resolves it
+	// into the launch image (see resolveLaunchImage) and never writes machine.json.
+	it('image is undefined when -i/--image is not given', () => {
+		expect(parseLaunchArgs(['recon']).image).toBeUndefined();
+		expect(parseLaunchArgs([]).image).toBeUndefined();
+	});
+
+	it('`-i <ref>` before the project sets image (project still parses)', () => {
+		const p = parseLaunchArgs(['-i', 'anon-pi/base:latest', 'recon']);
+		expect(p.image).toBe('anon-pi/base:latest');
+		expect(p.mode).toBe('pi');
+		expect(p.project).toBe('recon');
+	});
+
+	it('`--image <ref>` is the long form of -i', () => {
+		expect(parseLaunchArgs(['--image', 'my/pi:tag', 'recon']).image).toBe(
+			'my/pi:tag',
+		);
+	});
+
+	it('accepts a raw podman ref (not name-validated like a project)', () => {
+		// a ref with a `/` and `:` would be an invalid project NAME, but is a fine
+		// image ref: `-i` does not run it through validateName.
+		expect(parseLaunchArgs(['-i', 'registry.example/x:1.2', '.']).image).toBe(
+			'registry.example/x:1.2',
+		);
+	});
+
+	it('composes with -m (`-m` picks the HOME, `-i` picks the IMAGE)', () => {
+		const p = parseLaunchArgs(['-m', 'webveil', '-i', 'snap:latest', 'recon']);
+		expect(p.machine).toBe('webveil');
+		expect(p.machineExplicit).toBe(true);
+		expect(p.image).toBe('snap:latest');
+		expect(p.project).toBe('recon');
+	});
+
+	it('composes with --shell', () => {
+		const p = parseLaunchArgs(['-i', 'snap:latest', '--shell', 'recon']);
+		expect(p.mode).toBe('shell');
+		expect(p.image).toBe('snap:latest');
+		expect(p.project).toBe('recon');
+	});
+
+	it('composes with --mount', () => {
+		const p = parseLaunchArgs([
+			'--mount',
+			'/host/dev',
+			'-i',
+			'snap:latest',
+			's',
+		]);
+		expect(p.mountParent).toBe('/host/dev');
+		expect(p.image).toBe('snap:latest');
+		expect(p.project).toBe('s');
+	});
+
+	it('carries onto a no-project pi launch (menu / passthrough / session)', () => {
+		expect(parseLaunchArgs(['-i', 'snap:latest']).image).toBe('snap:latest');
+		expect(parseLaunchArgs(['-i', 'snap:latest', 'pi', '-V']).image).toBe(
+			'snap:latest',
+		);
+		expect(
+			parseLaunchArgs(['-i', 'snap:latest', '--session', 'xyz']).image,
+		).toBe('snap:latest');
+	});
+
+	it('a token AFTER the project is a pi arg, not an -i for anon-pi', () => {
+		// anon-pi flags must precede the project; everything after forwards to pi.
+		const p = parseLaunchArgs(['recon', '-i', 'x']);
+		expect(p.image).toBeUndefined();
+		expect(p.piArgs).toEqual(['-i', 'x']);
+	});
+
+	it('errors when -i / --image has no ref argument', () => {
+		expect(() => parseLaunchArgs(['-i'])).toThrow(AnonPiError);
+		expect(() => parseLaunchArgs(['--image'])).toThrow(AnonPiError);
+		expect(() => parseLaunchArgs(['-i'])).toThrow(/image ref/);
+	});
+});
+
 describe('parseLaunchArgs — retired --keep / --rm (throwaway always)', () => {
 	// Every launch is now throwaway (`--rm` always); the flags that once toggled
 	// that are RETIRED and error with guidance toward image-based persistence.

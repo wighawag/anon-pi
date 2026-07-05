@@ -15,6 +15,7 @@ import {
 	projectContainerCwd,
 	projectHostDir,
 	resolveCwd,
+	resolveLaunchImage,
 	ROOT_TOKEN,
 	rootCwd,
 	validateName,
@@ -181,5 +182,48 @@ describe('resolveCwd (uniform . vs named across every root)', () => {
 		// projects live at /projects or /work, never as a subfolder of the machine
 		// home ~; only "." (the machine home itself) is valid for a machine root.
 		expect(() => resolveCwd('machine', 'recon')).toThrow(AnonPiError);
+	});
+});
+
+describe('resolveLaunchImage (image-resolution precedence: -i > machine.json > env)', () => {
+	// The ephemeral per-launch `-i` override is highest priority, then the
+	// machine's pinned image (machine.json), then ANON_PI_IMAGE, then undefined
+	// (the CLI errors). `-i` never mutates machine.json (that is the CLI's job to
+	// honour); this is purely the resolution order.
+	it('the `-i` override WINS over machine.json + env', () => {
+		expect(
+			resolveLaunchImage({
+				override: 'over:latest',
+				machineImage: 'pin:latest',
+				envImage: 'env:latest',
+			}),
+		).toBe('over:latest');
+	});
+
+	it('machine.json wins over env when there is no override', () => {
+		expect(
+			resolveLaunchImage({machineImage: 'pin:latest', envImage: 'env:latest'}),
+		).toBe('pin:latest');
+	});
+
+	it('env (ANON_PI_IMAGE) is the fallback when neither override nor pin is set', () => {
+		expect(resolveLaunchImage({envImage: 'env:latest'})).toBe('env:latest');
+	});
+
+	it('undefined when nothing supplies an image (the CLI then errors)', () => {
+		expect(resolveLaunchImage({})).toBeUndefined();
+	});
+
+	it('an empty string at any tier is treated as unset (falls through)', () => {
+		expect(
+			resolveLaunchImage({
+				override: '',
+				machineImage: '',
+				envImage: 'env:latest',
+			}),
+		).toBe('env:latest');
+		expect(
+			resolveLaunchImage({override: '   ', machineImage: 'pin:latest'}),
+		).toBe('pin:latest');
 	});
 });
