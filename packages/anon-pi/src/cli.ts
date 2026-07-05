@@ -74,6 +74,7 @@ import {
 	parseMachineJson,
 	projectHostDir,
 	resolveAnonPiHome,
+	resolveLaunchImage,
 	resolveLlm,
 	resolveProjectsRoot,
 	resolveProxy,
@@ -300,8 +301,35 @@ function runLaunch(parsed: ParsedLaunch): number {
 			);
 		}
 
-		// The machine's image: machine.json wins, ANON_PI_IMAGE is the fallback.
-		const image = machineConf.image ?? env.image ?? '';
+		// The machine's image, highest-priority first: the EPHEMERAL per-launch
+		// `-i`/`--image` override > machine.json.image > ANON_PI_IMAGE. `-i` is
+		// strictly ephemeral (it is NEVER written back to machine.json; that pin is
+		// `machine set-image` / `machine create --image`) and no mismatch warning is
+		// printed (ADR-0003 section 3). `-i` picks the IMAGE; `-m` picks the HOME;
+		// they compose.
+		const iSet = (parsed.image ?? '').trim().length > 0;
+		const home = machineHomeDir(env, machineName);
+		// A fresh (unseeded) home has no established image/home baseline yet.
+		// Seeding it from the ephemeral `-i` image would poison the home with the
+		// wrong-image seed; skipping the seed would run pi unconfigured. So refuse
+		// and channel "make this the machine's image" to the explicit machine verb.
+		// (An ALREADY-SEEDED home just runs the override image against it; the
+		// runtime extension-compat risk is accepted silently, ADR-0003.)
+		if (iSet && homeFresh(home)) {
+			throw new AnonPiError(
+				`anon-pi: machine ${JSON.stringify(machineName)} has no home yet; \`-i\` is ` +
+					`ephemeral (it never seeds the home).\n` +
+					`Establish its image first with \`anon-pi machine create ${machineName} ` +
+					`--image ${parsed.image}\` (or launch once normally to seed), then use ` +
+					`\`-i\` to override per-launch.`,
+			);
+		}
+		const image =
+			resolveLaunchImage({
+				override: parsed.image,
+				machineImage: machineConf.image,
+				envImage: env.image,
+			}) ?? '';
 
 		// --mount re-roots at a HOST parent; otherwise the resolved projects root.
 		// Expand a leading `~` + absolutize the mount path so it is a real host dir
@@ -318,7 +346,6 @@ function runLaunch(parsed: ParsedLaunch): number {
 			mountParent,
 		});
 
-		const home = machineHomeDir(env, machineName);
 		const machine: Machine = {name: machineName, home, image};
 
 		// The local-model models.json + settings seed for this machine's FRESH-home

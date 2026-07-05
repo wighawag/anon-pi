@@ -299,3 +299,103 @@ describe('machine.json image + -m machine selection', () => {
 		expect(argv).toContain('my/webveil:tag');
 	});
 });
+
+describe('-i / --image (ephemeral per-launch image override)', () => {
+	// Mark a machine home as ALREADY SEEDED (the seed marker present), so `-i`
+	// runs the override image against the existing home instead of refusing the
+	// fresh-home seed.
+	function seedHome(home: string, machine = 'default'): string {
+		const mhome = join(home, 'machines', machine, 'home');
+		mkdirSync(join(mhome, '.pi', 'agent'), {recursive: true});
+		writeFileSync(join(mhome, '.pi', 'agent', '.anon-pi-seed'), '1\n');
+		return mhome;
+	}
+
+	it('`-i <ref>` on a SEEDED home runs against <ref> (wins over machine.json + env)', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		const mdir = join(home, 'machines', 'default');
+		mkdirSync(mdir, {recursive: true});
+		writeFileSync(
+			join(mdir, 'machine.json'),
+			JSON.stringify({image: 'pinned/machine:tag'}),
+		);
+		seedHome(home);
+		const r = run(['-i', 'over/ride:latest', 'recon', '-p', 'x'], {home});
+		expect(r.status).toBe(0);
+		const argv = lastArgv();
+		// the -i override is the launch image, not the machine.json pin nor env.
+		expect(argv).toContain('over/ride:latest');
+		expect(argv).not.toContain('pinned/machine:tag');
+		expect(argv).not.toContain('my/pi:tag'); // ANON_PI_IMAGE env fallback
+	});
+
+	it('`-i` NEVER mutates machine.json and prints NO mismatch warning', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		const mdir = join(home, 'machines', 'default');
+		mkdirSync(mdir, {recursive: true});
+		const mjson = join(mdir, 'machine.json');
+		writeFileSync(mjson, JSON.stringify({image: 'pinned/machine:tag'}));
+		seedHome(home);
+		const r = run(['-i', 'over/ride:latest', 'recon', '-p', 'x'], {home});
+		expect(r.status).toBe(0);
+		// machine.json is byte-for-byte unchanged (image pin untouched).
+		expect(JSON.parse(readFileSync(mjson, 'utf8')).image).toBe(
+			'pinned/machine:tag',
+		);
+		// no mismatch warning (ADR-0003: -i is explicit + ephemeral).
+		expect(r.stderr.toLowerCase()).not.toContain('warning');
+		expect(r.stderr.toLowerCase()).not.toContain('mismatch');
+	});
+
+	it('`-i` composes with `-m` (`-m` picks the HOME, `-i` picks the IMAGE)', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		const mdir = join(home, 'machines', 'webveil');
+		mkdirSync(mdir, {recursive: true});
+		writeFileSync(
+			join(mdir, 'machine.json'),
+			JSON.stringify({image: 'my/webveil:tag'}),
+		);
+		seedHome(home, 'webveil');
+		const r = run(
+			['-m', 'webveil', '-i', 'over/ride:latest', 'recon', '-p', 'x'],
+			{
+				home,
+			},
+		);
+		expect(r.status).toBe(0);
+		const argv = lastArgv();
+		// -m picks the home; -i picks the image (over the machine.json pin).
+		expect(argv.join(' ')).toContain(`${home}/machines/webveil/home:/root`);
+		expect(argv).toContain('over/ride:latest');
+		expect(argv).not.toContain('my/webveil:tag');
+	});
+
+	it('`-i` on a FRESH (unseeded) home REFUSES with guidance to `machine create --image`', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		// no seed marker => fresh home.
+		const r = run(['-i', 'over/ride:latest', 'recon', '-p', 'x'], {home});
+		expect(r.status).toBe(1);
+		expect(r.stderr).toContain('no home yet');
+		expect(r.stderr).toContain('machine create');
+		expect(r.stderr).toContain('--image over/ride:latest');
+		// it refused BEFORE spawning netcage run (no launch argv recorded here).
+	});
+
+	it('WITHOUT -i a fresh home launches normally (the refusal is -i-only)', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		// fresh home, no -i: the normal seed-on-fresh launch still works.
+		const r = run(['recon', '-p', 'x'], {home});
+		expect(r.status).toBe(0);
+		expect(lastArgv()[0]).toBe('run');
+	});
+
+	it('--help documents the netcage-store boundary + the fresh-home refusal', () => {
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		const r = run(['--help'], {home});
+		expect(r.status).toBe(0);
+		expect(r.stdout).toContain('--image');
+		expect(r.stdout).toContain('ephemeral');
+		// the store boundary (no auto-pull) is stated so a "not found" is understood.
+		expect(r.stdout.toLowerCase()).toContain('auto-pull');
+	});
+});
