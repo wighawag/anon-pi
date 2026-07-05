@@ -66,6 +66,12 @@ encode enough for `keyProject` (the cwd/project) and the machine filter.
   ambiguity). A FUTURE explicit `container` noun
   (work/notes/ideas/container-create-flow.md) can reintroduce durable NAMED boxes
   WITHOUT inference, if the workflow proves central.
+  **SUPERSEDED by ADR-0005** (2026-07-05): that future `container` noun is now
+  built. Durable mutable boxes are back as an explicit, opt-in, NAMED noun
+  (`container create`/`enter`/`list`/`rm`), with no create-vs-enter inference and
+  the forced-egress + identity-label invariants intact. The bare launch stays
+  throwaway; this note's "deliberately dropped" no longer holds for the opt-in
+  path. See `docs/adr/0005-container-noun-durable-boxes.md`.
 
 ## Out of scope
 

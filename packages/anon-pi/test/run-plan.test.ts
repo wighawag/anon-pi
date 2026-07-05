@@ -6,11 +6,15 @@
 // ~/.anon-pi is read or written.
 import {describe, it, expect} from 'vitest';
 import {
+	ANON_PI_CONTAINER_LABEL,
 	AnonPiError,
 	CONTAINER_AGENT_DIR,
 	CONTAINER_HOME_ROOT,
 	CONTAINER_MOUNT_ROOT,
 	CONTAINER_PROJECTS_ROOT,
+	keyProject,
+	launchIdentityKey,
+	parseKeptKey,
 	resolveRunPlan,
 	type LaunchIntent,
 	type Machine,
@@ -311,6 +315,92 @@ describe('resolveRunPlan — throwaway always (--rm on every launch)', () => {
 		expect(p.netcageArgs.join(' ')).toContain(
 			`${machine.home}:${CONTAINER_HOME_ROOT}`,
 		);
+	});
+});
+
+describe('resolveRunPlan — durable (the `container` noun: no --rm)', () => {
+	// A durable box is the EXPLICIT reintroduction of the retired --keep (the
+	// container ADR that supersedes ADR-0004's "lost capability" note): a netcage
+	// run WITHOUT --rm, named + labelled so `container enter`/`list`/`rm` find it.
+	// It is STILL fully jailed: forced egress + the two invariant mounts are
+	// composed EXACTLY as the throwaway plan does. Parameterised on the ONE
+	// resolveRunPlan (no forked launch path): intent.durable carries the box name.
+	const durable = (over: Partial<LaunchIntent> = {}) =>
+		launch({durable: {name: 'recon-box'}, ...over});
+
+	it('OMITS --rm (the box survives exit; that is the whole point)', () => {
+		expect(durable().netcageArgs).not.toContain('--rm');
+	});
+
+	it('names the container (--name <box>) so `enter` can netcage start it', () => {
+		const p = durable();
+		const i = p.netcageArgs.indexOf('--name');
+		expect(i).toBeGreaterThanOrEqual(0);
+		expect(p.netcageArgs[i + 1]).toBe('recon-box');
+	});
+
+	it('stamps the durable-box NAME label so list/rm can read boxes back', () => {
+		const p = durable();
+		expect(p.netcageArgs).toContain('--label');
+		expect(p.netcageArgs).toContain(`${ANON_PI_CONTAINER_LABEL}=recon-box`);
+	});
+
+	it('KEEPS the two invariant mounts EXACTLY as the throwaway plan', () => {
+		const p = durable();
+		expect(p.netcageArgs.join(' ')).toContain(
+			`${machine.home}:${CONTAINER_HOME_ROOT}`,
+		);
+		expect(p.netcageArgs.join(' ')).toContain(
+			`${projectsRoot}:${CONTAINER_PROJECTS_ROOT}`,
+		);
+	});
+
+	it('KEEPS forced egress: --proxy + EXACTLY one --allow-direct, unchanged', () => {
+		const args = durable().netcageArgs;
+		expect(args).toContain('--proxy');
+		expect(args.filter((a) => a === '--allow-direct')).toHaveLength(1);
+	});
+
+	it('freezes the cwd into the plan (the create-time mode word)', () => {
+		const p = durable({mode: 'pi', project: 'recon'});
+		expect(p.cwd).toBe(`${CONTAINER_PROJECTS_ROOT}/recon`);
+		const i = p.netcageArgs.indexOf('-w');
+		expect(p.netcageArgs[i + 1]).toBe(`${CONTAINER_PROJECTS_ROOT}/recon`);
+	});
+
+	it('freezes the image into the plan', () => {
+		expect(durable().netcageArgs).toContain(machine.image);
+	});
+
+	it('a durable --shell box still runs bash + seeds if fresh', () => {
+		const p = durable({mode: 'shell', project: undefined});
+		const i = p.netcageArgs.indexOf(machine.image);
+		expect(p.netcageArgs[i + 3]).toContain('exec bash');
+	});
+});
+
+describe('resolveRunPlan — durable carries a decodable identity key (story 13)', () => {
+	// forward/ports resolve a RUNNING managed container by the anon-pi.key
+	// identity label (parseKeptKey -> keyProject: machine + project). The identity
+	// key is stamped by the CLI (withKeyLabel) EXACTLY the same for a durable and a
+	// throwaway launch, so the ONE invariant that matters here is: the pure
+	// launchIdentityKey is IDENTICAL for a durable + throwaway intent of the same
+	// identity (durable is orthogonal to the identity fields). A running durable
+	// box therefore decodes to the same machine + project as a throwaway one.
+	it('the identity key is the SAME for a durable + throwaway intent', () => {
+		const throwaway = launchIdentityKey(baseIntent());
+		const dur = launchIdentityKey(baseIntent({durable: {name: 'recon-box'}}));
+		expect(dur).toBe(throwaway);
+	});
+
+	it('the durable identity key still decodes to machine + project', () => {
+		const f = parseKeptKey(
+			launchIdentityKey(
+				baseIntent({durable: {name: 'recon-box'}, project: 'recon'}),
+			),
+		);
+		expect(f.machine).toBe('recon');
+		expect(keyProject(f)).toBe('recon');
 	});
 });
 
