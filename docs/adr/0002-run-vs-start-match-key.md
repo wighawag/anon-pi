@@ -1,5 +1,11 @@
 # Run-vs-start match key for kept (netcage.managed) containers
 
+> AMENDED by ADR-0003: the resolved IMAGE is now ALSO part of the key. This ADR
+> originally excluded the image (it was fixed per machine); once `-i <image>`
+> makes the image variable per launch, two `--keep` launches differing only in
+> image are distinct kept containers, so the image joins the key below.
+
+
 For the exploratory `--keep` flow, anon-pi must decide whether a re-entered
 launch resumes an existing kept container (`netcage start`) or runs a fresh one
 (`netcage run` without `--rm`). ADR-0001 already fixed that netcage's
