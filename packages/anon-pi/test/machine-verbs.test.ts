@@ -11,7 +11,6 @@ import {
 	parseMachineArgs,
 	serializeMachineJson,
 	setImageWarning,
-	snapshotImageRef,
 } from '../src/index.js';
 
 describe('parseMachineArgs — the verb grammar', () => {
@@ -106,68 +105,10 @@ describe('parseMachineArgs — the verb grammar', () => {
 		);
 	});
 
-	it('snapshot <new-name>: the sole positional is the new name; machine undefined', () => {
-		expect(parseMachineArgs(['snapshot', 'recon-net'])).toEqual({
-			verb: 'snapshot',
-			name: 'recon-net',
-			machine: undefined,
-			imageTag: undefined,
-		});
-	});
-
-	it('snapshot -m/--machine is an OPTIONAL filter (validated), not a source', () => {
-		expect(parseMachineArgs(['snapshot', 'recon-net', '-m', 'recon'])).toEqual({
-			verb: 'snapshot',
-			name: 'recon-net',
-			machine: 'recon',
-			imageTag: undefined,
-		});
-		expect(
-			parseMachineArgs(['snapshot', 'recon-net', '--machine', 'recon']).machine,
-		).toBe('recon');
-	});
-
-	it('snapshot --image-tag <ref> overrides the generated image name', () => {
-		expect(
-			parseMachineArgs(['snapshot', 'recon-net', '--image-tag', 'my/snap:1']),
-		).toEqual({
-			verb: 'snapshot',
-			name: 'recon-net',
-			machine: undefined,
-			imageTag: 'my/snap:1',
-		});
-	});
-
-	it('snapshot rejects a missing name, an extra positional, empty -m/--image-tag, and bad names', () => {
-		expect(() => parseMachineArgs(['snapshot'])).toThrow(/needs a <new-name>/);
-		expect(() => parseMachineArgs(['snapshot', 'a', 'b'])).toThrow(/got extra/);
-		expect(() => parseMachineArgs(['snapshot', 'a', '-m'])).toThrow(
-			AnonPiError,
-		);
-		expect(() => parseMachineArgs(['snapshot', 'a', '--image-tag'])).toThrow(
-			AnonPiError,
-		);
-		expect(() => parseMachineArgs(['snapshot', 'a/b'])).toThrow(
-			/invalid machine name/,
-		);
-		expect(() => parseMachineArgs(['snapshot', 'ok', '-m', 'a/b'])).toThrow(
-			AnonPiError,
-		);
-	});
-});
-
-describe('snapshotImageRef (the default snapshot image name)', () => {
-	it('is anon-pi/<name>:snapshot-<UTC-YYYYMMDDHHMMSS>, deterministic in `now`', () => {
-		const now = new Date(Date.UTC(2026, 6, 4, 9, 5, 7)); // 2026-07-04 09:05:07 UTC
-		expect(snapshotImageRef('recon-net', now)).toBe(
-			'anon-pi/recon-net:snapshot-20260704090507',
-		);
-	});
-
-	it('zero-pads all fields', () => {
-		const now = new Date(Date.UTC(2026, 0, 1, 0, 0, 0)); // 2026-01-01 00:00:00
-		expect(snapshotImageRef('m', now)).toBe(
-			'anon-pi/m:snapshot-20260101000000',
+	it('snapshot moved OFF the machine noun (now `image snapshot`)', () => {
+		// The verb is gone from the machine grammar: it is an unknown subcommand now.
+		expect(() => parseMachineArgs(['snapshot', 'recon-net'])).toThrow(
+			/unknown machine subcommand/,
 		);
 	});
 });

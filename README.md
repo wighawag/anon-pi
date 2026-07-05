@@ -68,13 +68,14 @@ anon-pi -m <machine> [<p>]     the same, on <machine> (its own image + home + co
 anon-pi --mount <parent> [<p>] root at a HOST parent folder instead of the projects root
 anon-pi init                   onboard: verify your proxy, capture your local model, pick an image
 anon-pi machine …              manage machines (create / list / set-image / rm)
+anon-pi image …                snapshot a running container into an image; list anon-pi images
 anon-pi --delete-home [<m>]    delete a machine's home (config + convos); keep its image pin + files
 anon-pi --delete-project <p>   delete a project's files + its per-machine sessions; keep the homes
 ```
 
 A `<project>` is a folder under the projects root (mounted at `/projects`; pi's cwd). The token `.` means the root itself (a scratch pi at `/projects`, at `/work` under `--mount`, or at `~` for a shell). A named project is created on the host if it does not exist yet.
 
-Every subcommand carries its own help: `anon-pi --help` (the launch surface), `anon-pi init --help`, and `anon-pi machine --help`.
+Every subcommand carries its own help: `anon-pi --help` (the launch surface), `anon-pi init --help`, `anon-pi machine --help`, and `anon-pi image --help`.
 
 ### Common tasks
 
@@ -93,7 +94,7 @@ Every subcommand carries its own help: `anon-pi --help` (the launch surface), `a
 | A scratch pi not tied to a subfolder | `anon-pi .` |
 | Use a separate anonymized environment | `anon-pi -m <machine> <project>` |
 | Jail pi into a host folder you edit with host tools | `anon-pi --mount <host-parent> <subfolder>` |
-| Install system tools and keep them | `anon-pi --shell` (then `apt install …`), then `anon-pi machine snapshot <name>` while it is still running |
+| Install system tools and keep them | `anon-pi --shell` (then `apt install …`), then `anon-pi image snapshot <name>` while it is still running |
 | Add a second machine | `anon-pi machine create <name> --image <ref>` |
 | Reset a machine's conversations | `anon-pi --delete-home [<machine>]` |
 | Delete a project (files + its sessions) | `anon-pi --delete-project <project>` |
@@ -214,11 +215,14 @@ To preserve system state you set up in a session (for example after you `apt ins
 ```sh
 anon-pi --shell recon                 # a jailed shell; apt install / configure as you like
 # in another terminal, while that session is STILL running:
-anon-pi machine snapshot toolbox      # freeze the running container -> image + a machine "toolbox"
-anon-pi -m toolbox recon              # later: launch on the snapshot-pinned machine
+anon-pi image snapshot toolbox        # freeze the running container -> anon-pi/toolbox:latest
+anon-pi machine create box --image anon-pi/toolbox:latest   # a machine pinned to it
+anon-pi -m box recon                  # later: launch on the snapshot-pinned machine
 ```
 
 The catch is timing: the snapshot commits a **running** container, so do it before you exit (once the session ends, the throwaway container is already gone). What you actually care about, your pi config and conversations, is in the machine home and survives every exit anyway.
+
+One step does both: `anon-pi image snapshot toolbox --create-machine box` commits the image AND creates machine `box` from it, carrying the source machine's home + conversations over (the same prompts described under [Managing images](#managing-images)). `anon-pi image list` shows your snapshots with their provenance (source machine, source image, when), including orphaned snapshots (an overwritten `:latest`) by their ID.
 
 ## Managing machines
 
@@ -227,18 +231,27 @@ anon-pi machine create <name> [--image <ref>]   create a machine, pin its image
 anon-pi machine list                            list machines and their images
 anon-pi machine set-image <name> <ref>          re-pin the image (WARNS; no reseed)
 anon-pi machine rm <name> [--yes]               delete the machine + its home
-anon-pi machine snapshot <new-name> [-m <machine>] [--image-tag <ref>]
-                                                commit a RUNNING container into a
-                                                new image + create <new-name>
 ```
-
-`snapshot` captures the current filesystem of a **running** jailed container (for example after you `sudo apt install` some tools) into a new image, then creates `<new-name>` pinned to it, so you can preserve an environment you built interactively. This is the **only** way to keep container-level system changes (every launch is throwaway): freeze the running box into a named image, then relaunch on the machine pinned to it. The container is auto-detected from your running anon-pi containers (a picker when several are up); `-m <machine>` is an **optional filter**, not a required source. The container must still be running (do not exit the session; podman pauses it briefly during the commit). It relaunches through the same forced-egress jail.
-
-The source machine's **home is copied** into the new machine (your pi config, extensions, and dotfiles, which are correct for the committed image), **minus its conversations**. Conversations are handled separately: you are offered each one **grouped by project**, opt-in per project (default **skip**), choosing **copy** or **skip** for each (with no TTY, none are copied). Copy never touches the source machine; after copying, a single confirmed step (default No) can **delete** the copied groups from the source (the only way to "move" a conversation out). This keeps the anonymity model intact: a snapshot does not silently inherit the source machine's whole history.
 
 A machine's home is seeded on FIRST LAUNCH, not at create. `set-image` re-pins the image only and **warns**: it does not reseed or touch the home, so the home's extensions were built for the old image. `rm` confirms on a TTY, skips the prompt with `--yes`, and aborts non-interactively without it (it never deletes unprompted in a script). `create` with no `--image` and no TTY is an error (a machine needs an image to launch).
 
+`create --image <ref>` is **provenance-aware**: if `<ref>` was produced by `anon-pi image snapshot` (it carries an `anon-pi.source-machine` label) and that machine's home still exists, you are offered its home + conversations to carry over (opt-in; with no TTY nothing is copied). Otherwise it is a plain fresh create.
+
 If you never create a machine explicitly, launches use the `default` machine (which `init` creates). Give a machine its own image + home + conversations by naming it with `-m`.
+
+## Managing images
+
+```
+anon-pi image snapshot <name> [-m <machine>] [--create-machine <m>]
+                                 commit the RUNNING container into anon-pi/<name>:latest
+anon-pi image list               list anon-pi images with their provenance (read-only)
+```
+
+`image snapshot` captures the current filesystem of a **running** jailed container (for example after you `sudo apt install` some tools) into the clean tag `anon-pi/<name>:latest`, baking **provenance** as podman labels (source machine, source image, snapshot time). This is the way to keep container-level system changes (every launch is throwaway): freeze the running box into a named image, then pin a machine to it. The container is auto-detected from your running anon-pi containers (a picker when several are up); `-m <machine>` is an **optional filter**, not a required source. The container must still be running (do not exit the session; podman pauses it briefly during the commit). A same-name re-snapshot **overwrites** the `:latest` tag; the previous image becomes dangling but keeps its provenance, so `image list` still shows it by ID. To preserve a specific snapshot, snapshot it under a different name.
+
+`--create-machine <m>` also creates machine `<m>` pinned to the fresh snapshot, **copying the source machine's home** (your pi config, extensions, and dotfiles, which are correct for the committed image) **minus its conversations**. Conversations are handled separately: you are offered each one **grouped by project**, opt-in per project (default **skip**), choosing **copy** or **skip** for each (with no TTY, none are copied). Copy never touches the source machine; after copying, a single confirmed step (default No) can **delete** the copied groups from the source (the only way to "move" a conversation out). This is equivalent to `image snapshot` followed by a provenance-aware `machine create --image`.
+
+`image list` reads the provenance labels straight off the images (**zero stored state**): it shows every `anon-pi/*` image plus any dangling image still carrying an `anon-pi.source-machine` label (an orphaned snapshot), by its ID.
 
 ## Deleting data
 
@@ -353,7 +366,8 @@ anon-pi 0.4.0 was a **per-workdir** launcher: a bare positional was a host folde
 - **`anon-pi import` is GONE.** Onboarding is now `anon-pi init`, which (among other things) generates the local-model `models.json` for the default machine. There is no separate import step.
 - **`--fresh` is GONE.** To reset, use the explicit data verbs: `anon-pi --delete-home [<machine>]` (wipe a machine's home, keep its image pin + project files) and `anon-pi --delete-project <project>` (wipe a project's files + its per-machine sessions).
 - **`--ephemeral` / `ANON_PI_EPHEMERAL` are GONE.** The container is **throwaway** now; there is no separate ephemeral mode.
-- **`--keep` and `--rm` are GONE.** Every launch is throwaway (there is no flag to toggle it): passing either is an error. The exploratory "install, quit, re-enter" flow is served by snapshotting the running container into a named image (`anon-pi machine snapshot <name>`) and pinning a machine to it (`anon-pi machine create <m> --image <name>`), which is explicit and named instead of an inferred mutable pet container. Your pi config and conversations were never in the container anyway (they live in the machine home).
+- **`--keep` and `--rm` are GONE.** Every launch is throwaway (there is no flag to toggle it): passing either is an error. The exploratory "install, quit, re-enter" flow is served by snapshotting the running container into a named image (`anon-pi image snapshot <name>`) and pinning a machine to it (`anon-pi machine create <m> --image anon-pi/<name>:latest`), which is explicit and named instead of an inferred mutable pet container. Your pi config and conversations were never in the container anyway (they live in the machine home).
+- **`machine snapshot` is now `image snapshot`.** Snapshot moved off the `machine` noun onto the new `image` noun: `anon-pi image snapshot <name>` commits the running container into `anon-pi/<name>:latest` (with provenance labels), and `--create-machine <m>` also builds a machine from it. See [Managing images](#managing-images).
 - **The layout moved.** Everything now lives under `~/.anon-pi/` (`config.json` + `machines/` + `projects/`), **not** under `~/.config/anon-pi`. `ANON_PI_HOME` still overrides the root; the old `ANON_PI_CONFIG` / `ANON_PI_SOURCE_MODELS` variables are gone.
 - **Old state is NOT migrated.** anon-pi does not read or convert your old `~/.config/anon-pi/state/<slug>/` directories. Once you have moved to the new model you can delete the old tree:
 
@@ -372,7 +386,7 @@ Start fresh with `anon-pi init`, then `anon-pi` (the menu) or `anon-pi <project>
 - **`no TTY` on a bare `anon-pi`** — the menu and interactive pi need a terminal. In a script, name the project and forward args: `anon-pi <project> <pi-args…>` (that path needs no TTY).
 - **The exit IP looks like your home IP** — the proxy is not actually anonymizing. Re-run `anon-pi init`; its `netcage verify` step prints the real exit IP as proof. anon-pi never claims a provider, only shows you the exit.
 - **A destructive verb won't run in a script** — `machine rm` / `--delete-home` / `--delete-project` confirm on a TTY and abort non-interactively; pass `--yes` to proceed unattended.
-- **`--keep` / `--rm` say they are gone** — that is expected: every launch is throwaway now. To keep system changes you made in a session, `anon-pi machine snapshot <name>` the **still-running** container into a named image, then relaunch on the machine pinned to it (`anon-pi -m <name>`). Your pi config + conversations persist regardless (they live in the machine home).
+- **`--keep` / `--rm` say they are gone** — that is expected: every launch is throwaway now. To keep system changes you made in a session, `anon-pi image snapshot <name>` the **still-running** container into a named image, then pin a machine to it (`anon-pi machine create <m> --image anon-pi/<name>:latest`) and relaunch (`anon-pi -m <m>`). Your pi config + conversations persist regardless (they live in the machine home).
 
 ## Platform
 

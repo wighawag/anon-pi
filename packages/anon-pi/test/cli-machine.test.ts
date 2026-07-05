@@ -188,37 +188,12 @@ describe('machine rm', () => {
 	});
 });
 
-describe('machine snapshot', () => {
-	it('refuses to clobber an existing target machine (before any commit)', () => {
+describe('machine snapshot is GONE (moved to `image snapshot`)', () => {
+	it('`machine snapshot` is now an unknown subcommand', () => {
 		const home = tempHome();
-		run(['machine', 'create', 'recon-net', '--image', 'my/pi:tag'], {home});
 		const r = run(['machine', 'snapshot', 'recon-net'], {home});
 		expect(r.status).toBe(1);
-		expect(r.stderr).toContain('already exists');
-	});
-
-	it('with netcage unavailable, exits 1 and writes no machine (never commits)', () => {
-		// HERMETIC: force netcage OFF by narrowing PATH to the base dirs (netcage
-		// lives in ~/.local/bin, not here), so `hasNetcage()` is false and the verb
-		// exits at netcageMissing BEFORE resolving/committing any real container.
-		// This test must NEVER reach `netcage commit` (that would mutate the real
-		// image store), so we do not rely on the ambient netcage state.
-		const home = tempHome();
-		const r = run(['machine', 'snapshot', 'ghost-snap'], {
-			home,
-			env: {PATH: '/usr/bin:/bin'},
-		});
-		expect(r.status).toBe(1);
-		expect(r.stderr.toLowerCase()).toContain('netcage');
-		expect(existsSync(join(home, 'machines', 'ghost-snap'))).toBe(false);
-	});
-
-	it('rejects an invalid new-name and an invalid -m filter (traversal guard)', () => {
-		const home = tempHome();
-		expect(run(['machine', 'snapshot', 'a/b'], {home}).status).toBe(1);
-		expect(run(['machine', 'snapshot', 'ok', '-m', 'a/b'], {home}).status).toBe(
-			1,
-		);
+		expect(r.stderr.toLowerCase()).toContain('unknown machine subcommand');
 	});
 });
 
@@ -249,7 +224,8 @@ describe('machine --help', () => {
 		expect(r.status).toBe(0);
 		expect(r.stdout).toContain('anon-pi machine - manage machines');
 		expect(r.stdout).toContain('set-image');
-		expect(r.stdout).toContain('snapshot');
+		// snapshot moved OFF the machine noun onto `image`; the help points there.
+		expect(r.stdout).toContain('image snapshot');
 		// NOT the global top-level help header.
 		expect(r.stdout).not.toContain('launch pi inside a netcage');
 	});
