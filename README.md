@@ -56,10 +56,12 @@ It then writes `~/.anon-pi/config.json` + the `default` machine. It **never dest
 anon-pi                        MENU: pick a project (pi), a shell, or a new project
 anon-pi <project>              pi in the project (/projects/<project>); exit pi -> host
 anon-pi <project> <pi-args…>   forward args to pi (e.g. -p for a headless one-shot)
+anon-pi <pi-args…>             any leading pi flag with no project forwards to pi
+                               (e.g. `anon-pi -p "hello world"`, `anon-pi --model x`)
 anon-pi --session <id>         resume a pi session by id, in its own project (also -r/--resume)
 anon-pi <project> --fork <id>  fork a session into <project> (`.`=root; --continue too; project required)
 anon-pi --list-models          list the models pi sees (also --models; no project needed)
-anon-pi pi <pi-args…>          run pi with ANY args and no project (the passthrough)
+anon-pi pi <pi-args…>          explicit passthrough: run pi with ANY args and no project
 anon-pi --version              print anon-pi's version (also -V)
 anon-pi --shell [<project>]    a jailed bash (at ~, or cd'd into <project>) - the project-hopper
 anon-pi forward [<p>] [--port …]  open a host port onto a running container's in-jail server
@@ -187,18 +189,19 @@ anon-pi recon --continue      # continue recon's most recent session
 
 If you name a project that differs from the session's own (e.g. `anon-pi other --session <id>`), anon-pi trusts you and cds into `other`; pi then asks whether to fork the session into it (its normal guard for a cwd mismatch).
 
-### Running pi directly (`anon-pi pi …`)
+### Running pi directly
 
-Any tokens **after a project** are already forwarded to pi (`anon-pi recon --model qwen -p "…"`). For pi commands that need **no project** — listing models, exporting a session, any other pi flag — use the passthrough:
+Any tokens **after a project** are forwarded to pi (`anon-pi recon --model qwen -p "…"`). For pi commands that need **no project**, any leading pi flag anon-pi does not own is forwarded to pi automatically, so you can just type it:
 
 ```sh
+anon-pi -p "hello world"            # a headless one-shot, no project
+anon-pi --model qwen3-coder         # run pi with arbitrary flags, no project
 anon-pi --list-models              # what models does pi see in the jail? (also --models)
-anon-pi pi --model qwen3-coder     # run pi with arbitrary flags, no project
-anon-pi pi --export out.html --session <id>   # export a session and exit
+anon-pi pi --export out.html --session <id>   # explicit `pi` passthrough (equivalent, clearer)
 anon-pi -m webveil pi --version    # pi's own version, on a machine
 ```
 
-`anon-pi pi <args…>` is the general escape hatch: it runs pi inside the jail with exactly the args you give and no project, so you never need anon-pi to special-case each pi flag. (`--version`/`-V` on its own prints *anon-pi's* version; use `anon-pi pi --version` for pi's.)
+anon-pi consumes its OWN flags (`-m`/`--machine`, `--shell`, `--mount`, `-i`/`--image`) and hands **everything else** to pi (pi rejects a genuinely bogus flag itself), so you never need anon-pi to special-case each pi flag. The explicit `anon-pi pi <args…>` spelling still works and reads clearly when you want it. (`--version`/`-V` on its own prints *anon-pi's* version; use `anon-pi pi --version` for pi's.)
 
 ### `--mount`: root at a host parent (the caveat)
 

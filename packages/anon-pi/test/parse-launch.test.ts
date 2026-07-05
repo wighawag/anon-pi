@@ -224,6 +224,24 @@ describe('parseLaunchArgs — forwarded pi args', () => {
 		expect(p.piArgs).toEqual(['-p', 'do a thing']);
 	});
 
+	it('a leading pi flag with NO project forwards to pi (anon-pi -p "...")', () => {
+		// The headline ergonomic: `anon-pi -p "hello world"` == `anon-pi pi -p
+		// "hello world"`, no explicit `pi` token needed.
+		const p = parseLaunchArgs(['-p', 'hello world']);
+		expect(p.mode).toBe('pi');
+		expect(p.project).toBeUndefined();
+		expect(p.piArgs).toEqual(['-p', 'hello world']);
+	});
+
+	it('an anon-pi flag before a leading pi flag is still captured', () => {
+		// `-m` is consumed by anon-pi; the rest (`-p ...`) forwards to pi.
+		const p = parseLaunchArgs(['-m', 'webveil', '-p', 'hi']);
+		expect(p.machine).toBe('webveil');
+		expect(p.machineExplicit).toBe(true);
+		expect(p.project).toBeUndefined();
+		expect(p.piArgs).toEqual(['-p', 'hi']);
+	});
+
 	it('anon-pi flags BEFORE the project still parse; everything after is pi args', () => {
 		const p = parseLaunchArgs(['-m', 'webveil', 'recon', '--flag', 'x']);
 		expect(p.machine).toBe('webveil');
@@ -252,8 +270,13 @@ describe('parseLaunchArgs — reserved-name guard + validation', () => {
 		expect(() => parseLaunchArgs(['-m', 'a/b', 'recon'])).toThrow(AnonPiError);
 	});
 
-	it('errors on an unknown option', () => {
-		expect(() => parseLaunchArgs(['--nope'])).toThrow(AnonPiError);
+	it('forwards an anon-pi-unknown flag to pi (no-project launch)', () => {
+		// A flag anon-pi does not own is handed to pi verbatim (pi rejects a truly
+		// bogus flag itself), so `anon-pi --nope` == `anon-pi pi --nope`.
+		const p = parseLaunchArgs(['--nope']);
+		expect(p.mode).toBe('pi');
+		expect(p.project).toBeUndefined();
+		expect(p.piArgs).toEqual(['--nope']);
 	});
 
 	it('errors when -m has no machine argument', () => {
@@ -388,10 +411,10 @@ describe('parseLaunchArgs — the `pi` passthrough (any pi flags, no project)', 
 		expect(p.piArgs).toEqual(['--version']);
 	});
 
-	it('is the escape hatch for flags anon-pi would otherwise reject', () => {
-		// `anon-pi --model x` (no project) is an unknown option; `anon-pi pi
-		// --model x` is the explicit passthrough.
-		expect(() => parseLaunchArgs(['--model', 'x'])).toThrow(AnonPiError);
+	it('is an equivalent, clearer spelling of the implicit forward', () => {
+		// `anon-pi --model x` now forwards to pi automatically; `anon-pi pi
+		// --model x` is the explicit, equivalent spelling.
+		expect(parseLaunchArgs(['--model', 'x']).piArgs).toEqual(['--model', 'x']);
 		expect(parseLaunchArgs(['pi', '--model', 'x']).piArgs).toEqual([
 			'--model',
 			'x',

@@ -932,8 +932,9 @@ export interface ParsedLaunch {
  *    the projects root by surprise. Add a project (`.` for the root; created on
  *    demand): `anon-pi <project> --fork <id>`.
  *  - QUERY (`--list-models`/`--models`): pi prints + exits, no project relevant.
- * For arbitrary pi flags with no project (e.g. `--model x`), use the explicit
- * `anon-pi pi <args…>` passthrough instead.
+ * For arbitrary pi flags with no project (e.g. `--model x`), anon-pi forwards
+ * them to pi automatically (the flag + everything after it); the explicit
+ * `anon-pi pi <args…>` passthrough is an equivalent, clearer spelling.
  */
 const PI_NO_PROJECT_FLAGS: ReadonlySet<string> = new Set([
 	// session selection
@@ -1061,8 +1062,11 @@ export function sessionHeaderCwd(headerLine: string): string | undefined {
 
 /**
  * The explicit pi-passthrough token: `anon-pi pi <args…>` runs pi with the given
- * args and NO project (the general escape hatch for any pi flag). It is a
- * RESERVED project name (see RESERVED_NAMES) so a project can never shadow it.
+ * args and NO project. It is now mostly a CLARITY alias: any unrecognised-by-
+ * anon-pi flag in the no-project position already forwards to pi (so `anon-pi
+ * --model x` works without it), but the explicit `pi` token still reads clearly
+ * and lets a BARE positional after it (`anon-pi pi -p ...`) be unambiguous. It is
+ * a RESERVED project name (see RESERVED_NAMES) so a project can never shadow it.
  */
 export const PI_PASSTHROUGH_TOKEN = 'pi';
 
@@ -1147,8 +1151,16 @@ function finishPiNoProjectLaunch(args: {
  * Validates the project name and the `-m` machine name via validateName (the
  * reserved-name guard); `--mount <parent>` is a HOST path in its own namespace,
  * distinct from the project-name namespace (NAME vs `--mount` exclusivity), so
- * it is NOT name-validated here. Throws AnonPiError for an unknown option, a
- * missing `-m`/`--mount` argument, a RETIRED `--keep`/`--rm` flag, or a bad name.
+ * it is NOT name-validated here.
+ *
+ * ANY flag anon-pi does not itself own, seen in the no-project position, is
+ * FORWARDED to pi verbatim (that flag + everything after it), so `anon-pi -p
+ * "hi"` == `anon-pi pi -p "hi"` and `anon-pi --model x` == `anon-pi pi --model
+ * x`. There is no "unknown option" for a flag: anon-pi captures its own flags
+ * (`-m`/`--machine`, `--shell`, `--mount`, `-i`/`--image`) and hands everything
+ * else to pi (pi rejects a genuinely bogus flag itself). The explicit `pi`
+ * token still works as before for clarity. Throws AnonPiError only for a missing
+ * `-m`/`--mount` argument, a RETIRED `--keep`/`--rm` flag, or a bad name.
  */
 export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 	let machine = DEFAULT_MACHINE;
@@ -1262,7 +1274,24 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
 			});
 		}
 		if (a.startsWith('-')) {
-			fail(`unknown option: ${a}`);
+			// ANY other flag in the no-project position is FORWARDED to pi verbatim
+			// (this flag + everything after it), exactly as the explicit `anon-pi pi
+			// <args…>` token does. So `anon-pi -p "hello"` == `anon-pi pi -p "hello"`,
+			// `anon-pi --model x` == `anon-pi pi --model x`, etc. anon-pi's OWN flags
+			// (`-m`/`--machine`, `--shell`, `--mount`, `-i`/`--image`) are matched
+			// ABOVE this point, so they are still captured; the RETIRED `--keep`/`--rm`
+			// and the NEEDS-PROJECT `--fork`/`--continue` are handled above too (they
+			// keep their own errors). Only genuinely unrecognised-by-anon-pi flags fall
+			// through here and go to pi (pi rejects the truly bogus ones itself).
+			return finishPiNoProjectLaunch({
+				machine,
+				machineExplicit: machineSet,
+				mountParent,
+				image,
+				shell,
+				piArgs: args.slice(i),
+				fail,
+			});
 		}
 		// the first bare positional is the project.
 		project = validateName(a, 'project');
@@ -3624,10 +3653,12 @@ USAGE
   anon-pi                        MENU: pick a project (pi), a shell, or a new project
   anon-pi <project>              pi in the project (${CONTAINER_PROJECTS_ROOT}/<project>); exit pi -> host
   anon-pi <project> <pi-args…>   forward args to pi (e.g. -p for a headless one-shot)
+  anon-pi <pi-args…>             any leading pi flag with no project forwards to pi
+                                 (e.g. \`anon-pi -p "hello world"\`, \`anon-pi --model x\`)
   anon-pi --session <id>         resume a pi session by id, in its own project (also -r/--resume)
   anon-pi <project> --fork <id>  fork a session into <project> (\`.\`=root; --continue too; project required)
   anon-pi --list-models          list the models pi sees (also --models; no project needed)
-  anon-pi pi <pi-args…>          run pi with ANY args and no project (the passthrough)
+  anon-pi pi <pi-args…>          explicit passthrough: run pi with ANY args and no project
   anon-pi --version              print anon-pi's version (also -V)
   anon-pi --shell [<project>]    a jailed bash (at /projects, or cd'd into <project>) - the project-hopper
   anon-pi forward [<p>] [--port …]  open a host port onto a running container's in-jail server
