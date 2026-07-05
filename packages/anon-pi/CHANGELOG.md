@@ -1,5 +1,89 @@
 # anon-pi
 
+## 0.17.0
+
+### Minor Changes
+
+- fd010f5: Implement the `container create` and `container enter` verb bodies (the durable
+  named box lifecycle from the container ADR / `container-noun-parse-and-plan`
+  foundation).
+
+  - `anon-pi container create <name> [-i <ref>] [-m <machine>] [--mount <p>]
+[<project>|--shell]` now instantiates a DURABLE jailed box: a `netcage run`
+    WITHOUT `--rm` (so it survives exit), `--name`d and stamped with the
+    `anon-pi.container=<name>` label. The image is FROZEN via the normal launch
+    chain (`-i` > machine.json image > `ANON_PI_IMAGE`) and the cwd is FROZEN from
+    the create-time mode word. `-m` picks the HOME and `--mount` composes exactly as
+    a normal launch. Forced egress (the proxy + the one `--allow-direct`) and the
+    two invariant mounts are intact: a durable box is still fully jailed. Creating a
+    box whose name ALREADY exists FAILS FAST with a clear error (never a silent
+    re-enter or clobber).
+  - `anon-pi container enter <name>` now re-enters a STOPPED box via `netcage start
+-it <ref>`, which re-stands the jail at the box's frozen cwd and re-supplies the
+    forced egress (`start` stands the jail back up). An UNKNOWN name errors (never a
+    silent success), and an already-RUNNING box is REFUSED with guidance (reach its
+    in-jail servers via `forward` / `ports`, or `container rm` to reset it) rather
+    than opening a second attach against the same filesystem.
+
+  Boxes are read back off the `anon-pi.container` netcage label (a new pure
+  `parseContainerBoxesJson` over `netcage ps -a --format json`), so there is no
+  anon-pi-side registry file: the label IS the record. `container list` / `rm` land
+  in a follow-up task.
+
+- 99a3255: Implement the `container list` and `container rm` verb bodies, completing the
+  four verbs of the `container` noun (the durable-box housekeeping from the
+  container ADR / `container-noun` prd).
+
+  - `anon-pi container list` prints your durable boxes, one tab-separated row each,
+    with enough identity to tell them apart: the box NAME, its MACHINE and
+    CWD/PROJECT (decoded off the `anon-pi.key` identity label the launch stamps),
+    its IMAGE (read back per box via `netcage inspect`), and running-or-stopped. It
+    is read-only and filtered to anon-pi durable boxes only (the
+    `anon-pi.container` label): a throwaway launch and a netcage sidecar are
+    dropped. There is NO anon-pi-side registry file: the netcage container + its
+    labels ARE the record, mirroring how `image list` reads provenance off image
+    labels.
+  - `anon-pi container rm <name>` removes a durable box. A STOPPED box is removed
+    directly (`netcage rm <ref>`). A RUNNING box is a live instance, so it is
+    GUARDED: WITHOUT `--yes` it REFUSES with "it is running, re-run with --yes"
+    guidance; WITH `--yes` it STOP-then-removes in one atomic call (`netcage rm -f
+<ref>`), so the user never sees a half-removed box. An UNKNOWN name errors
+    (never a silent success).
+
+  `ContainerBox` (the pure `parseContainerBoxesJson` reader) now also carries the
+  raw `anon-pi.key` label so `list` can show the machine + cwd off the label with
+  no extra query.
+
+- 355f650: Add the pure foundation of a new `container` noun: explicit durable named boxes
+  (`create` / `enter` / `list` / `rm`) that SURVIVE exit, reintroducing the mutable
+  single-box continuity ADR-0004 dropped, but as an explicit, opt-in, NAMED noun
+  with no create-vs-enter inference.
+
+  This lands the PURE parts + the wiring; the impure verb bodies follow:
+
+  - `parseContainerArgs` parses the four verbs into a typed `ContainerCommand`.
+    `create <name> [-i <ref>] [-m <machine>] [--mount <p>] [<project>|--shell]`
+    freezes the box's image + cwd at create (so it takes the cwd mode word);
+    `enter <name>` takes ONLY the name and grammatically REFUSES `-i` and a
+    project/`--shell` (both frozen at create), pointing at re-create / `image
+snapshot`.
+  - `container` is now a RESERVED noun word (alongside `machine` / `image`): a
+    project can no longer be named `container`.
+  - The run-plan composition (`resolveRunPlan`) is parameterised on a `durable`
+    shape: a durable plan OMITS `--rm`, `--name`s the container, and stamps an
+    `anon-pi.container=<name>` label, while keeping the two invariant mounts and the
+    forced-egress proxy + single `--allow-direct` EXACTLY as a throwaway launch. The
+    `anon-pi.key` identity label is unchanged, so `forward` / `ports` resolve a
+    RUNNING durable box just as they do a throwaway one.
+  - `anon-pi container --help` and the `container` dispatch are live end-to-end; the
+    create/enter/list/rm bodies are stubbed here (they land in follow-up tasks).
+
+  This DELIBERATELY re-opens ADR-0004's "throwaway always" drop, but only for the
+  opt-in `container` path (the bare launch stays throwaway). Recorded in
+  `docs/adr/0005-container-noun-durable-boxes.md`, which SUPERSEDES ADR-0004's
+  "lost capability" note. A durable box is still FULLY jailed; the jail is never
+  weakened.
+
 ## 0.16.0
 
 ### Minor Changes
