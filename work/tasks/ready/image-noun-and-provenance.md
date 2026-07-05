@@ -5,6 +5,33 @@ prd: machines-and-projects-workspace
 adr: 0003-image-as-first-class-concept
 ---
 
+## Prompt
+
+> FIRST, check this task against current reality: confirm `machine snapshot`
+> still lives on the `machine` noun in `src/cli.ts`, that `resolveRunningContainer`
+> (the `forward`/`ports` running-container resolution) is available to reuse, and
+> that `copyHomeMinusSessions` + `carryOverSessions` exist for the shared helper.
+> If the surface has diverged, adapt or route to needs-attention.
+
+Introduce the top-level `image` noun and MOVE snapshot to it (per ADR-0003 §1+2):
+`anon-pi image snapshot <name> [-m <machine>] [--create-machine <m>]` commits the
+RUNNING container into `anon-pi/<name>:latest`, baking provenance as podman labels
+via `netcage commit -c 'LABEL ...'` (`anon-pi.source-machine`, `anon-pi.source-image`
+read from the running container via inspect, `anon-pi.snapshot-at`). Add
+`anon-pi image list` (read-only, zero stored state, surfaces orphaned/dangling
+snapshots by ID). REMOVE `machine snapshot`. Factor the home-minus-sessions copy +
+per-project session carry-over into ONE shared `carryOverHomeFromMachine` helper,
+and make `machine create <m> --image <ref>` provenance-aware. Also fold in the
+reserved-name fix (reserve the noun words; the menu must NOT crash on a
+now-reserved pre-existing folder — it filters via the tolerant `isProjectName`).
+Keep the grammar/tag/label logic PURE in `src/anon-pi.ts` and unit-tested; keep
+the netcage commit/list wiring hermetic (netcage stubbed off, no real image store
+touched). Land a `minor` changeset noting the `machine snapshot`→`image snapshot`
+breaking rename. Full spec, decisions, and acceptance criteria are below.
+
+> RECORD any non-obvious in-scope decision inline in `## Notes / decisions`, or an
+> ADR if it meets the gate.
+
 ## What to build
 
 Introduce the `image` noun and MOVE snapshot to it, baking provenance into the

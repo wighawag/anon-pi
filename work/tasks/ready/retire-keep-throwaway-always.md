@@ -5,6 +5,28 @@ prd: machines-and-projects-workspace
 adr: 0004-retire-keep-throwaway-always
 ---
 
+## Prompt
+
+> FIRST, check this task against current reality: confirm `src/anon-pi.ts` +
+> `src/cli.ts` still carry the `--keep`/`--rm` grammar, `resolveRunVsStart`,
+> `KeptContainer`, and the `queryKeptContainers` run-vs-start branch, and that
+> the `anon-pi.key` identity label (`withKeyLabel`/`parseKeptKey`/`keyProject`)
+> is still in place. If the surface has already diverged, adapt or route to
+> needs-attention.
+
+Retire `--keep`/`--rm` and the kept-container run-vs-start inference: every
+launch is throwaway (`--rm` always). CRITICALLY, **KEEP** the `anon-pi.key`
+identity label and its decode path (`parseKeptKey`/`keyProject`) — `forward`,
+`ports`, and `image snapshot` all resolve a RUNNING container via that label, so
+only the kept-container MATCHING goes, never the label itself. Passing `--keep`
+or `--rm` must now ERROR with guidance toward `image snapshot <name>` + `-i` /
+`machine create --image`. Work the full spec, decisions, and acceptance
+criteria in the sections below; keep dispatch thin (logic in the pure module),
+land tests + README/help updates + a changeset (call out the BREAKING removal).
+
+> RECORD any non-obvious in-scope decision (e.g. how the retained key is
+> simplified) inline in `## Notes / decisions`, or an ADR if it meets the gate.
+
 ## What to build
 
 Remove `--keep`/`--rm` and the kept-container run-vs-start inference; every launch

@@ -6,6 +6,32 @@ adr: 0003-image-as-first-class-concept
 blockedBy: [image-noun-and-provenance, retire-keep-throwaway-always]
 ---
 
+## Prompt
+
+> FIRST, check this task against current reality: confirm BOTH deps have landed —
+> `--keep`/`--rm` and `resolveRunVsStart` are GONE (retire-keep) and the `image`
+> noun + `image snapshot`/`image list` exist (image-noun-and-provenance). The
+> kept-container-key amendment this task once carried is DROPPED (there are no
+> kept containers to key); this task is now JUST the `-i` flag. If the surface
+> differs from that, adapt or route to needs-attention.
+
+Add the ephemeral per-launch image override (ADR-0003 §3): `-i <ref>` /
+`--image <ref>` on the launch grammar (beside `-m`, `--shell`, `--mount`),
+highest-priority image source (`-i` > `machine.json.image` > `ANON_PI_IMAGE` >
+error). It composes with `-m` (`-m` picks the HOME, `-i` picks the IMAGE) and is
+STRICTLY ephemeral: it NEVER mutates `machine.json`, and prints NO mismatch
+warning. On a FRESH (unseeded) home it must REFUSE with guidance (point at
+`machine create <m> --image <ref>`), using the existing `homeFresh(machineHome)`
+signal in `runLaunch`. Keep the `-i/--image` parse PURE in `src/anon-pi.ts` and
+unit-test the precedence; document the netcage-store boundary in help (no
+pre-check, no auto-pull). Land a `minor` changeset. Full spec + acceptance
+criteria are below.
+
+> NOTE: the "Pure vs impure" section below still names `keptContainerKey` /
+> `resolveRunVsStart` from the pre-retire-keep design; those are GONE after the
+> deps landed — IGNORE that stale threading and implement `-i` as the standalone
+> flag described in "What to build". RECORD any non-obvious decision inline.
+
 ## What to build
 
 The ephemeral per-launch image override (ADR-0003 section 3). NOTE: the
