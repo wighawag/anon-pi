@@ -1,5 +1,86 @@
 # anon-pi
 
+## 0.16.0
+
+### Minor Changes
+
+- e7297cc: Introduce the top-level `image` noun and move snapshot onto it, with provenance
+  baked into the image as podman labels (ADR-0003 §1+2).
+
+  BREAKING: `machine snapshot` is renamed to `image snapshot` (a days-old verb).
+  `anon-pi image snapshot <name> [-m <machine>] [--create-machine <m>]` commits the
+  running container into the clean tag `anon-pi/<name>:latest` (a same-name
+  re-snapshot overwrites `:latest`; the previous image becomes dangling but keeps
+  its provenance). Provenance is baked via `netcage commit -c 'LABEL …'`:
+  `anon-pi.source-machine` (the committed container's machine), `anon-pi.source-image`
+  (read from the running container via inspect, so it is accurate even when `-i`
+  made the container's image diverge from the machine's pin; falls back to
+  `machine.json.image`, else the label is omitted), and `anon-pi.snapshot-at`.
+  Provenance is best-effort history, never a live pointer.
+
+  New `anon-pi image list`: read-only, zero stored state. Reads the provenance
+  labels straight off the images, surfacing every `anon-pi/*` image plus any
+  dangling image still carrying an `anon-pi.source-machine` label (an orphaned
+  snapshot whose `:latest` tag was overwritten), by its ID.
+
+  `machine create <name> --image <ref>` is now provenance-aware: if `<ref>` was
+  produced by `image snapshot` and its source machine's home still exists, the
+  home-copy (minus sessions) + per-project session carry-over are offered (the
+  same prompts the 0.15 snapshot ran). `image snapshot --create-machine <m>` is
+  the one-step convenience for the common path. Both share one
+  `carryOverHomeFromMachine` helper; both honor the no-TTY "copy nothing" rule.
+
+  Also: the subcommand noun words (`machine`, `image`, `init`, `forward`, `ports`)
+  are now reserved names, so a project/machine/image can no longer be named after a
+  dispatched verb (closing a latent "unreachable folder" trap). A pre-existing
+  project folder now reserved is silently skipped from the menu (never a crash),
+  and creating such a name is refused with a clear "reserved name" error.
+
+- f7142ac: Add the ephemeral per-launch image override `-i <ref>` / `--image <ref>` to the
+  launch grammar (beside `-m`, `--shell`, `--mount`) (ADR-0003 §3).
+
+  `-i` is the highest-priority image source: `-i` > `machine.json.image` >
+  `ANON_PI_IMAGE` > error. It composes with `-m` (`-m` picks the HOME, `-i` picks
+  the IMAGE) and is STRICTLY EPHEMERAL: it NEVER mutates `machine.json` (to re-pin
+  a machine's image use `machine set-image` / `machine create --image`) and prints
+  NO mismatch warning (`-i` is explicit + ephemeral, so a warning carries no
+  information the user lacks).
+
+  On a FRESH (unseeded) machine home `-i` is REFUSED with guidance: seeding the
+  home from the ephemeral image would poison it with the wrong-image seed, so
+  anon-pi points at `anon-pi machine create <m> --image <ref>` (or a normal launch
+  to seed) instead. On an already-seeded home `-i` just runs the override image
+  against the existing home (the runtime extension-compat risk is accepted
+  silently, per ADR-0003).
+
+  `-i` resolves in NETCAGE'S private image store (where `anon-pi/<name>:latest`
+  snapshots and `init`-built images live), NOT the operator's default podman
+  store. anon-pi does NOT pre-check the ref and does NOT auto-pull (an anonymity
+  tool must not silently fetch a remote image); netcage/podman surfaces its own
+  "not found" via inherited stdio. The `--help` text documents this store boundary
+  so a "not found" is understood (fix: `image snapshot` it, or build it into
+  netcage's store).
+
+- 0b31321: Retire `--keep`/`--rm`: every launch is now throwaway (the container is always
+  `--rm`).
+
+  BREAKING: the `--keep` and `--rm` launch flags are removed. Passing either now
+  errors with guidance toward image-based persistence: snapshot the running
+  container into a named image (`anon-pi image snapshot <name>`) and pin a
+  machine to it (`anon-pi machine create <m> --image anon-pi/<name>:latest`). The exploratory
+  "apt install, quit, re-enter" pet-container flow (and the kept-container
+  run-vs-start inference behind it) is gone; durable state is explicit and named
+  instead of an inferred mutable container. Your pi config and conversations live
+  in the machine home (a host mount) and persist regardless.
+
+  `forward`, `ports`, and `image snapshot` are unchanged: anon-pi still stamps
+  its `anon-pi.key` identity label on every launch and reads it back to resolve a
+  running container by machine + project (the label survives; only the
+  kept-container matching was removed).
+
+  Per the ADR-0004 rollout, this ships as part of the combined 0.16.0 release
+  alongside the `image` noun and the `-i` launch override.
+
 ## 0.15.0
 
 ### Minor Changes
