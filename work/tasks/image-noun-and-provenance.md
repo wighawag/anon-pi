@@ -14,17 +14,50 @@ image as podman labels (per ADR-0003 sections 1 + 2).
   commit the RUNNING container into `anon-pi/<name>:latest`. REUSE the existing
   container resolution (`resolveRunningContainer`, `-m` optional filter,
   auto-detect / picker). Bake provenance via `netcage commit -c 'LABEL ...'`:
-  - `anon-pi.source-machine=<M>` (the committed container's machine, from its key)
-  - `anon-pi.source-image=<ref>` (that machine's `machine.json.image` at snapshot)
+  - `anon-pi.source-machine=<M>` (the committed container's machine, from its
+    stamped key: `parseKeptKey(target.key).machine`, authoritative)
+  - `anon-pi.source-image=<ref>` (what the snapshot is ACTUALLY built on: read
+    from the RUNNING CONTAINER via inspect - `netcage inspect <ref> --format
+    '{{.ImageName}}'` or equivalent - NOT `machine.json`, because `-i` makes the
+    container's image diverge from the machine's pin. Fall back to
+    `machine.json.image` if the inspect fails; OMIT the label if neither is known
+    - a missing label beats a wrong one, provenance is best-effort history)
   - `anon-pi.snapshot-at=<iso8601>`
   This REPLACES `machine snapshot` (move the verb from the `machine` noun to a new
   top-level `image` noun). `--create-machine <m>` runs the 0.15 home-copy +
-  per-project session carry-over after the commit (reuses `copyHomeMinusSessions`
-  + `carryOverSessions`).
-- **`anon-pi image list`**: read-only; filter `netcage images` (podman-faithful
-  JSON) to the `anon-pi/*` namespace, read each image's provenance labels
-  (`podman inspect` / `netcage inspect --format`), and print `<name>  from
-  machine <M>  <when>` (or `<name>  (no provenance)`). ZERO stored state.
+  per-project session carry-over after the commit.
+- **Factor the copy into ONE shared helper** `carryOverHomeFromMachine(env,
+  sourceMachine, destMachine)`: the home-minus-sessions copy
+  (`copyHomeMinusSessions`) + the interactive per-project session picker
+  (`carryOverSessions`). Both callers below use it; they differ ONLY in how they
+  learn `sourceMachine`. Honors the no-TTY "copy nothing" rule already in
+  `carryOverSessions`, so a scripted create stays non-blocking.
+  - `image snapshot --create-machine <m>`: has the source machine directly (it
+    just committed that container) -> call the helper with it.
+- **`machine create <m> --image <ref>` becomes PROVENANCE-AWARE** (fold into this
+  task or its own small follow-up): after creating + pinning, inspect `<ref>` for
+  `anon-pi.source-machine`. If present AND that machine's home exists on disk,
+  call `carryOverHomeFromMachine` (offer the copy). If absent / home gone: plain
+  fresh create (today's behavior) with a quiet note. Guard no-TTY (copy nothing).
+- **`anon-pi image list`**: read-only; list anon-pi images with their provenance.
+  Include an image if it is `anon-pi/*`-tagged OR (even when DANGLING/untagged) it
+  carries an `anon-pi.source-machine` label - so an ORPHANED snapshot (its
+  `:latest` tag was overwritten by a re-snapshot, decision below) is still shown,
+  by its ID. Print `<name-or-<none>>  from machine <M>  <when>  id:<short>`.
+  Provenance labels are read via `podman inspect` / `netcage inspect --format`.
+  ZERO stored state.
+
+## Same-name re-snapshot: overwrite `:latest`, orphans stay referenceable
+
+- `image snapshot <name>` writes `anon-pi/<name>:latest`; a same-name re-snapshot
+  OVERWRITES the tag (that is what `:latest` means). The previous image is not
+  deleted - it becomes DANGLING (untagged) but keeps its provenance label, so
+  `image list` still surfaces it (by ID) and `-i <id>` still launches it. To
+  PRESERVE a specific snapshot under a friendly name, snapshot it under a
+  DIFFERENT name (the explicit "keep this one" gesture); there is NO retag verb
+  (podman's own `podman tag` covers the rare manual case).
+- FOLLOW-UP (not this task): a thin `image rm`/`image prune` for reclaiming
+  orphaned ~3GB images (podman's `image prune` is the boundary; defer).
 
 ## Pure vs impure
 
@@ -54,6 +87,26 @@ image as podman labels (per ADR-0003 sections 1 + 2).
 - [ ] A changeset (`minor`, but call out the `machine snapshot`->`image snapshot`
       breaking rename in the body).
 
+## Reserved-name fix (fold in here)
+
+- Add the subcommand NOUN words to `RESERVED_NAMES`: `image` (new) AND the
+  pre-existing dispatch words `machine`, `init`, `forward`, `ports`. Today these
+  are reserved only STRUCTURALLY (dispatched before the launch parser), so a
+  project folder named e.g. `machine` can exist but is UNREACHABLE by bare name
+  (a latent wart). Reserving them makes `validateName` refuse such a name up
+  front with a clear "reserved name" error, closing the trap. `pi` is already
+  reserved. Update RESERVED_NAMES + its tests.
+- Wire `image` as a subcommand: add to `OWN_HELP_SUBCOMMANDS` and an
+  `args[0] === 'image'` dispatch (before the launch grammar), mirroring `machine`.
+- The reservation is GLOBAL (validateName is the one validator), so a snapshot /
+  machine / project named after a reserved word is refused everywhere (consistent,
+  not a loss). VERIFIED-safe for pre-existing folders: the menu filters project
+  folders through the tolerant `isProjectName` (try/catch), so a folder that is
+  NOW reserved is silently skipped from the menu, NOT a crash.
+- [ ] AC: a pre-existing project folder whose name is now reserved does not crash
+      the menu / `image list` (it is skipped), and creating a new such name is
+      refused with a clear "reserved name" error.
+
 ## Notes / decisions
 
 - Provenance is best-effort HISTORY (labels), never a live pointer; consumers
@@ -62,3 +115,12 @@ image as podman labels (per ADR-0003 sections 1 + 2).
   acceptable, the user chose the name).
 - Depends on netcage `commit -c/--change` (present) + `images`/`inspect`
   (present, >= 0.10.0 for JSON).
+- VERIFIED empirically (2026-07-05): `podman commit --change 'LABEL k=v'` (what
+  `netcage commit -c` forwards to) round-trips label VALUES containing `/` and
+  `:` intact and un-truncated, with NO special quoting (each `-c` is one argv
+  element). Tested all three labels incl. `source-image=anon-pi/webscan:latest`
+  and an ISO `snapshot-at`; all read back correct via `inspect --format
+  '{{json .Config.Labels}}'`. So `image list`'s label read + the commit label
+  bake are both sound. NOTE: `netcage commit` accepts ONLY a netcage-managed
+  container name (refuses an arbitrary podman container), which is exactly the
+  path `image snapshot` uses (resolveRunningContainer -> a managed tool container).

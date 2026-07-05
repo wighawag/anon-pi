@@ -71,3 +71,21 @@ encode enough for `keyProject` (the cwd/project) and the machine filter.
 
 - The `container` noun (captured as an idea; not built now).
 - A kept-container prune/list verb (moot once there are no kept containers).
+
+## Rollout (ADR-0003 + 0004 together)
+
+Implemented in three ordered tasks but shipped as ONE release (0.16.0, a rolling
+MINOR - not 1.0.0; the model is still being reshaped, so 1.0.0 stays a deliberate
+"model is stable" statement for later). Sole user, so a single combined release is
+fine. Order:
+
+1. `retire-keep-throwaway-always` - remove `--keep`/`--rm` + run-vs-start
+   inference; keep the forward/ports identity label. Foundational simplification.
+2. `image-noun-and-provenance` - the `image` noun (`snapshot` with provenance
+   labels, `list` incl. orphans), reserved noun words, the shared
+   `carryOverHomeFromMachine` helper, provenance-aware `machine create --image`.
+3. `launch-image-override` - the ephemeral `-i` flag (fresh-home refusal; store
+   boundary guidance; no pre-check/auto-pull).
+
+One changeset for the combined 0.16.0 (call out the BREAKING `--keep`/`--rm`
+removal and the `machine snapshot` -> `image snapshot` rename).
