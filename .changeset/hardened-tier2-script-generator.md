@@ -1,0 +1,5 @@
+---
+"anon-pi": minor
+---
+
+feat(hardened): add the PURE Tier-2 root-provisioning-script generator for the dedicated `anon` account deployment. New pure `buildTier2ProvisioningScript` emits the reviewable `#!/bin/sh` script text a human runs with sudo: `useradd -m anon`, the `/etc/subuid` + `/etc/subgid` range lines (idempotent grep-guard, pinned `SUBID_RANGE_START`/`SUBID_RANGE_COUNT`), `loginctl enable-linger anon`, and the scoped sudoers snippet `<login-user> ALL=(anon) <anon-pi>` (password KEPT by default; opt-in `--nopasswd` OFF by default, validated with `visudo -cf` and installed mode-0440). The account name, login user, and anon-pi binary path are INJECTED, so the whole script is unit-testable as a string; anon-pi PRINTS it and NEVER executes it (no spawn, no sudo, no fs here). It deliberately emits NO cross-user `chown`/workspace-migration line (deferred to the `harden` verb) and NO `NETCAGE_GRAPHROOT` export (netcage's uid-scoped store, ADR-0017, handles itself). Extends ADR-0006.

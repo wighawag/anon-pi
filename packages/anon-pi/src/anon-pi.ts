@@ -3986,6 +3986,134 @@ export function buildAnonSuFallback(inv: HardenedInvocation): string[] {
 	return ['su', '-', ANON_ACCOUNT, '-c', command];
 }
 
+// --- The Tier-2 root-provisioning-script GENERATOR (docs/adr/0006) -----------
+//
+// The hardened deployment (prd `hardened-dedicated-account-deployment`, stories
+// 4 + 5) splits its setup into two tiers: Tier 1 (rootless) anon-pi does itself;
+// Tier 2 (root) anon-pi must NEVER do silently. So anon-pi GENERATES a
+// reviewable shell script for the four root-requiring steps and PRINTS it; the
+// HUMAN reviews it top-to-bottom and runs it with sudo in another terminal. The
+// script is NEVER executed by anon-pi. This generator is PURE (account name,
+// login user, and the anon-pi binary path are INJECTED), so the whole script is
+// unit-testable as a STRING; nothing here spawns, sudo's, or touches the fs.
+//
+// The four steps, and ONLY these four (the script is a small auditable artifact):
+//   1. `useradd -m <account>`      create the dedicated account WITH a home dir.
+//   2. /etc/subuid + /etc/subgid   subordinate id RANGES for rootless podman.
+//   3. `loginctl enable-linger`    so `$XDG_RUNTIME_DIR` exists without a login.
+//   4. the SCOPED sudoers snippet  `<login-user> ALL=(<account>) <anon-pi>`,
+//      password KEPT (no NOPASSWD) by default: the password is what makes
+//      crossing the DAC boundary a deliberate act (ADR-0006).
+//
+// It deliberately emits NO cross-user `chown`/workspace-migration line (v1 has
+// no existing-workspace migration; that belongs to the deferred `harden` verb,
+// idea `harden-command-with-import`) and NO `NETCAGE_GRAPHROOT` export (netcage's
+// uid-scoped store, ADR-0017, handles itself when netcage runs as the account).
+
+/**
+ * The subordinate-id RANGE SIZE granted to the `anon` account on /etc/subuid
+ * and /etc/subgid: 65536 ids, the shadow-utils convention (one contiguous
+ * 16-bit block, matching what a modern `useradd` auto-allocates). Rootless
+ * podman maps container uids/gids into this block; 65536 covers the standard
+ * container id space. Named so the exact count is pinned + testable.
+ */
+export const SUBID_RANGE_COUNT = 65536;
+
+/**
+ * The FIRST subordinate id in the `anon` account's range (the START column of
+ * the /etc/subuid + /etc/subgid line). shadow-utils hands the FIRST regular user
+ * `100000-165535`; we start the dedicated account's block at 231072 (= 100000 +
+ * 2 * 65536), two blocks up, so the generated range does not collide with the
+ * login user's default allocation on a typical single-user box. It is a static,
+ * reviewable value (the human can edit the printed script if their box differs);
+ * the idempotent grep-guard means re-running never duplicates the line.
+ */
+export const SUBID_RANGE_START = 231072;
+
+/** The injected inputs for the Tier-2 root-provisioning-script generator. */
+export interface Tier2ProvisioningInputs {
+	/** The dedicated Unix account to create (canonically ANON_ACCOUNT = `anon`). */
+	account: string;
+	/**
+	 * The LOGIN user granted the scoped sudoers rule (may run ONLY the anon-pi
+	 * binary as `account`). Injected (the impure `whoami` lives in cli.ts).
+	 */
+	loginUser: string;
+	/**
+	 * The ABSOLUTE path to the anon-pi binary the sudoers rule scopes to (so the
+	 * login user may run ONLY it as the account, nothing else). Injected.
+	 */
+	anonPiPath: string;
+	/**
+	 * Opt-in `--nopasswd`: emit a NOPASSWD sudoers rule (no password prompt when
+	 * crossing). OFF by default (undefined / false) so the password is KEPT: the
+	 * password is the deliberate-crossing feature (ADR-0006). Only for a
+	 * single-user trusted box.
+	 */
+	nopasswd?: boolean;
+}
+
+/**
+ * PURE: generate the Tier-2 root-requiring provisioning SCRIPT TEXT for a
+ * hardened install. Returns a `#!/bin/sh` script the HUMAN reviews and runs with
+ * sudo; anon-pi PRINTS it and NEVER executes it (this function only returns a
+ * string). It performs EXACTLY the four provisioning steps (create account,
+ * subuid/subgid ranges, enable-linger, scoped sudoers) and nothing else:
+ *   - the account is created WITH a home dir (`useradd -m`), idempotent via an
+ *     `id <account>` guard so a re-run does not fail on an existing account;
+ *   - the /etc/subuid + /etc/subgid range lines are appended under a `grep`
+ *     guard, so re-running does not duplicate them (a reviewable, safe-to-re-run
+ *     artifact);
+ *   - `loginctl enable-linger <account>` gives the account a `$XDG_RUNTIME_DIR`
+ *     without an interactive login (rootless podman needs it);
+ *   - the sudoers snippet is `<loginUser> ALL=(<account>) <anon-pi>` (password
+ *     KEPT unless `nopasswd`), validated with `visudo -cf` and `install`ed
+ *     mode-0440 under /etc/sudoers.d so a syntax error never locks the operator
+ *     out.
+ * It emits NO cross-user `chown`/migration line and NO `NETCAGE_GRAPHROOT`
+ * export (see the section header). Inputs are injected, so it is fully testable
+ * as a string.
+ */
+export function buildTier2ProvisioningScript(
+	inputs: Tier2ProvisioningInputs,
+): string {
+	const {account, loginUser, anonPiPath, nopasswd = false} = inputs;
+	const range = `${account}:${SUBID_RANGE_START}:${SUBID_RANGE_COUNT}`;
+	const sudoersRule = nopasswd
+		? `${loginUser} ALL=(${account}) NOPASSWD: ${anonPiPath}`
+		: `${loginUser} ALL=(${account}) ${anonPiPath}`;
+	const sudoersFile = `/etc/sudoers.d/anon-pi-${loginUser}`;
+	return `#!/bin/sh
+# anon-pi Tier-2 provisioning script (REVIEW, then run with sudo yourself).
+# anon-pi GENERATED this and NEVER runs it: the root-requiring steps are
+# explicit and auditable. It does exactly four things, nothing else.
+set -eu
+
+# 1. Create the dedicated account WITH a home dir (idempotent: skip if it exists).
+if ! id ${account} >/dev/null 2>&1; then
+	useradd -m ${account}
+fi
+
+# 2. Subordinate uid/gid ranges for rootless podman (idempotent: grep-guarded so
+#    a re-run never duplicates the line).
+grep -q '^${range}$' /etc/subuid || echo '${range}' >>/etc/subuid
+grep -q '^${range}$' /etc/subgid || echo '${range}' >>/etc/subgid
+
+# 3. Enable linger so \$XDG_RUNTIME_DIR exists without an interactive login.
+loginctl enable-linger ${account}
+
+# 4. Scoped sudoers rule: ${loginUser} may run ONLY anon-pi as ${account}.
+#    Password ${nopasswd ? 'NOT required (--nopasswd opted in)' : 'KEPT (crossing the boundary is deliberate)'}.
+#    Validated with visudo -cf and installed mode-0440, so a syntax error can
+#    never lock you out.
+tmp="$(mktemp)"
+printf '%s\\n' '${sudoersRule}' >"\$tmp"
+visudo -cf "\$tmp"
+install -m 0440 -o root -g root "\$tmp" '${sudoersFile}'
+rm -f "\$tmp"
+`;
+}
+
 /** The --help text (kept here so it is covered by the same module). */
 export const HELP = `anon-pi - run pi on anonymized, jailed machines (netcage: forced egress + one direct local model)
 
