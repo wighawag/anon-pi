@@ -48,8 +48,22 @@ Revised layering conclusion:
 Do NOT extract a package now (speculative reuse + the hardened/persona code is the newest + least-battle-tested; freezing an API around it now would guess its shape wrong). Instead, the low-risk, reversible move:
 
 1. **Refactor WITHIN anon-pi** so the pi-specific parts (layer 3: model seeding, the `llm` field, pi images, the pi bits of `init`) sit behind a clear internal boundary/interface, and the generic core (layer 2) does NOT import them. Untangle the tangles the seam runs through: `config.json`'s `llm` field sits next to the generic `proxy`/`hardened`; `init` interleaves proxy-probing (generic) with model-import (pi). These are config- and flow-level tangles, so the refactor is real work, not just moving files.
-2. **Let the seam be DISCOVERED from use, not guessed.** Once the internal boundary is clean, which pieces want to move DOWN into netcage vs OUT into their own package becomes VISIBLE rather than speculative.
-3. **The "netcage vs separate package vs stays-in-anon-pi" decision is DOWNSTREAM of the internal refactor**, not a prerequisite. Park it until the seam reveals it.
+2. **Let the seam be DISCOVERED from use, not guessed.** Once the internal boundary is clean, which pieces want to move OUT into their own package (vs stay inside anon-pi) becomes VISIBLE rather than speculative. (netcage is not a candidate destination - see the corrected down/up section: it already has everything, the middle layer is above it.)
+3. **The "separate package vs stays-in-anon-pi" decision is DOWNSTREAM of the internal refactor**, not a prerequisite. Park it until the seam reveals it.
+
+## Safety + how tests cover it
+
+The internal-seam-first step (step 1) is designed to be a BEHAVIOUR-PRESERVING refactor: `anon-pi <same verbs> <same flags>` must still produce the same netcage argv, the same on-disk workspace layout, the same exit codes, and the same messages, before and after. The layering is a code-organisation fact, invisible to a user.
+
+**Does it require an external-interface change? NO - and keeping it that way IS the safety constraint.** The seam is INTERNAL (layer 2 vs layer 3 in the code), not at the CLI boundary. So step 1 changes no anon-pi verb/flag/output. An external change is only the OPTIONAL later step of exposing the middle layer as its own CLI (`netcage-run --persona … -- <cmd>`), which is additive and can leave anon-pi's own surface identical (anon-pi becomes an internal consumer of the middle layer). The one caveat: the seam REVEALS surface-level tangles you MAY choose to clean up - e.g. the `llm` config field sits next to the generic `proxy`/`hardened` in `config.json`; moving `llm` behind a pi-namespace would be a user-visible config change needing a migration + changeset. That is a DEFERRABLE choice, not a requirement of the seam; the seam can be drawn with `config.json` untouched.
+
+**How safe (concretely):** the repo already has a strong black-box net - ~320 assertions across ~10 `cli-*.test.ts` files pin the external contract (exit codes, the EXACT netcage argv per verb, the workspace layout, error messages), independent of the 235 internal `anon-pi.ts` exports the seam reorganises. If those CLI tests stay green WITHOUT being edited, the refactor was behaviour-preserving.
+
+**Tests should cover the safety - three specific requirements for the eventual PRD/task:**
+
+1. **CLI tests are the behaviour-preserving contract and must pass UNCHANGED.** The done-condition is not just "green gate" but "green gate without editing any `cli-*.test.ts` assertion". An edit forced on a CLI assertion is the signal the external contract moved - surface it, do not silently accept it.
+2. **A LAYERING-GUARD test (the one genuinely NEW test the seam demands).** An automated assertion that the generic-core (layer 2) modules do NOT import/reference layer-3 pi-specific symbols (`models.json` / `llm` / `~/.pi/agent` / `Dockerfile.pi` / provider/apiKey). This is what KEEPS the seam drawn - without it, the next feature silently re-tangles the layers and the extraction rots. This guard is the real deliverable of "cover the safety".
+3. **A characterisation pin before refactoring.** Audit the highest-value external behaviours the refactor touches (every verb's netcage argv, every exit code, the persona re-exec argv) and confirm each is already asserted; add a golden/characterisation test for any hole FIRST, so the refactor has a fixed point where the existing 320 assertions leave a gap.
 
 ## Open threads (deferred, resolve when the seam is drawn)
 
