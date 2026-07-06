@@ -3915,10 +3915,14 @@ export function envFromProcess(
 // the process. cli.ts (a later task) does the actual exec.
 
 /**
- * The single dedicated Unix account name the hardened deployment runs under
- * (prd `hardened-dedicated-account-deployment`, docs/adr/0006). One canonical
- * name, pinned here so it can never be re-forked (the old idea note drifted
- * `netuser` vs `anon`).
+ * The DEFAULT persona's dedicated Unix account name (prd
+ * `hardened-dedicated-account-deployment`, docs/adr/0006). In v1 this was the
+ * ONLY account; multi-persona (prd `multi-persona-hardened-accounts`,
+ * superseding ADR-0006) makes it the DEFAULT of N personas: it is the account
+ * for the empty-suffix persona (`personaAccount(undefined) === 'anon'`), so an
+ * existing v1 install is a multi-persona install with exactly one persona named
+ * `anon`. One canonical default name, pinned here so it can never be re-forked
+ * (the old idea note drifted `netuser` vs `anon`).
  */
 export const ANON_ACCOUNT = 'anon';
 
@@ -4003,6 +4007,263 @@ export function buildAnonSuFallback(inv: HardenedInvocation): string[] {
 		.map(shellQuote)
 		.join(' ');
 	return ['su', '-', ANON_ACCOUNT, '-c', command];
+}
+
+// --- Multi-persona: name<->account mapping, --as selection, generalized guard -
+//
+// v1 hard-coded ONE dedicated account `anon`. Multi-persona (prd
+// `multi-persona-hardened-accounts`, superseding ADR-0006) makes it N accounts:
+// a user-typed BARE name (`alice`) maps to the namespaced Unix account
+// `anon-<name>` (`anon-alice`), and the DEFAULT (empty/absent name) is the bare
+// `anon` (the empty-suffix case), so a v1 install is a multi-persona install
+// with exactly one persona named `anon` (byte-behaviour-identical default). This
+// section is the PURE core only: the mapping + validation, the `--as` selection
+// resolver over an INJECTED persona list, and the generalized self-re-exec loop
+// guard ("am I the TARGET persona?"). Everything OS-touching (whoami, the real
+// persona list, the exec) stays an INJECTED seam wired by later tasks, mirroring
+// the v1 hardened style; nothing here spawns, probes, or touches the fs.
+
+/**
+ * The account-name PREFIX every persona carries: a bare name `<name>` maps to
+ * the Unix account `anon-<name>`. Namespacing (over a bare `<name>` account) is
+ * deliberate: a persona `alice` as a bare `alice` account could collide with a
+ * real system/human account, whereas `anon-alice` is collision-safe and
+ * self-labelling in `/etc/passwd` (it reveals only "this box runs anonymization
+ * tooling", already true of v1's `anon`, never persona linkage). The default
+ * persona is this prefix with an EMPTY suffix, i.e. the bare `anon`
+ * (ANON_ACCOUNT), so `anon-` without a trailing hyphen is the default account.
+ */
+export const PERSONA_ACCOUNT_PREFIX = 'anon-';
+
+/**
+ * PURE: validate a user-facing BARE persona name as a safe Unix-username SUFFIX,
+ * returning it TRIMMED on success. The bare name becomes the account
+ * `anon-<name>` (personaAccount), so it must be a safe, collision-free suffix.
+ *
+ * The accepted charset is a conservative Unix-username subset: lowercase
+ * `[a-z0-9]` plus internal hyphens, and it must START with an alphanumeric
+ * (`^[a-z0-9][a-z0-9-]*$`). This is intentionally NARROWER than the full POSIX
+ * portable-username set (no underscore, no `$`, no uppercase): the resulting
+ * account is `anon-<name>`, so `<name>` only needs to be a clean, lowercase,
+ * hyphen-joinable label; a narrow charset keeps it obviously safe for passwd /
+ * sudoers / home-path / the `socks5h://<account>:x@…` Tor isolation username
+ * with no quoting surprises.
+ *
+ * Rejects (with AnonPiError):
+ *   - empty / whitespace-only (a name was required, none given);
+ *   - a name already carrying the `anon-` prefix (double-prefix -> `anon-anon-…`);
+ *   - anything outside `^[a-z0-9][a-z0-9-]*$` (uppercase, `_`, `/`, `\`, `:`,
+ *     whitespace, a leading hyphen, ...).
+ */
+export function validatePersonaName(name: string): string {
+	const trimmed = name.trim();
+	const bad = (why: string): never => {
+		throw new AnonPiError(
+			`anon-pi: invalid persona name ${JSON.stringify(name)}: ${why}. ` +
+				`A persona name must be a single lowercase label (a-z 0-9 and internal ` +
+				`hyphens, starting alphanumeric), with no \`anon-\` prefix (anon-pi adds it).`,
+		);
+	};
+	if (trimmed === '') return bad('it is empty');
+	if (trimmed.startsWith(PERSONA_ACCOUNT_PREFIX)) {
+		return bad(
+			`it already starts with the \`${PERSONA_ACCOUNT_PREFIX}\` account prefix ` +
+				`(pass the BARE name; anon-pi maps it to \`${PERSONA_ACCOUNT_PREFIX}<name>\`)`,
+		);
+	}
+	if (!/^[a-z0-9][a-z0-9-]*$/.test(trimmed)) {
+		return bad(
+			'it is not a safe lowercase Unix-username suffix (a-z 0-9 and internal ' +
+				'hyphens only, must start with a-z or 0-9)',
+		);
+	}
+	return trimmed;
+}
+
+/**
+ * PURE: map a user-facing BARE persona name to its dedicated Unix account. The
+ * DEFAULT (undefined / empty / whitespace-only) maps to the bare `anon`
+ * (ANON_ACCOUNT) so v1 installs are unchanged; a real name `<name>` maps to
+ * `anon-<name>` (via PERSONA_ACCOUNT_PREFIX), validating the bare name first
+ * (validatePersonaName) so an invalid name yields a clear error rather than a
+ * broken account. The `anon` default is NOT special-cased in provisioning: it is
+ * simply the empty-suffix persona.
+ */
+export function personaAccount(name?: string): string {
+	if (name === undefined || name.trim() === '') return ANON_ACCOUNT;
+	return PERSONA_ACCOUNT_PREFIX + validatePersonaName(name);
+}
+
+/**
+ * PURE: the inverse of personaAccount, the BARE persona name a dedicated account
+ * carries. The default account `anon` maps back to the DEFAULT (undefined bare
+ * name, since the default persona is the empty-suffix one). A namespaced account
+ * `anon-<name>` maps to `<name>`. A non-persona account (anything not `anon` and
+ * not `anon-<nonempty>`) returns undefined. Used where anon-pi must display the
+ * bare name a running account represents.
+ */
+export function personaName(account: string): string | undefined {
+	if (account === ANON_ACCOUNT) return undefined;
+	if (
+		account.startsWith(PERSONA_ACCOUNT_PREFIX) &&
+		account.length > PERSONA_ACCOUNT_PREFIX.length
+	) {
+		return account.slice(PERSONA_ACCOUNT_PREFIX.length);
+	}
+	return undefined;
+}
+
+/** The persona-selection flag: a plain `--as <name>` (default `anon` when absent). */
+export const AS_FLAG = '--as';
+
+/** The injected inputs for the pure `--as` selection resolver. */
+export interface PersonaSelectionInputs {
+	/**
+	 * The launch argv (or any token list) to scan for `--as <name>`. Injected so
+	 * the resolver stays pure; the CLI passes the real process argv tail.
+	 */
+	args: readonly string[];
+	/**
+	 * The KNOWN persona ACCOUNTS (e.g. `['anon', 'anon-alice']`), injected by the
+	 * impure layer (which enumerates the real accounts). When OMITTED the resolver
+	 * does NO existence check (there is no persona list to check against, so
+	 * `known` is undefined and no unknown-persona error is raised): this task does
+	 * no I/O. The default `anon` is always treated as known (it is the built-in
+	 * default persona), whether or not a list is injected.
+	 */
+	personas?: readonly string[];
+}
+
+/**
+ * The resolved persona selection. Pure data the impure layer acts on: `account`
+ * is the selected Unix account (`anon-<name>`, or the default `anon`); `name` is
+ * the bare name (undefined for the default); `known` is the existence predicate
+ * over the injected persona list (undefined when no list was injected, since
+ * this task does no I/O); `error` is a NON-thrown AnonPiError the impure layer
+ * surfaces (a `--as` with no value, an invalid name, or an unknown persona), so
+ * the caller decides how/when to fail. The resolver never throws for a
+ * selection problem: it RETURNS the error so the caller owns the failure.
+ */
+export interface PersonaSelection {
+	/** The selected persona Unix account (`anon-<name>`, or `anon` for the default). */
+	account: string;
+	/** The bare persona name (`<name>`), or undefined for the default persona. */
+	name?: string;
+	/**
+	 * Whether the selected account is a KNOWN persona, per the injected list.
+	 * undefined when no persona list was injected (no existence check performed).
+	 */
+	known?: boolean;
+	/**
+	 * A non-thrown selection error for the impure layer to raise (missing `--as`
+	 * value, invalid name, or unknown persona), or undefined when the selection is
+	 * clean. NOT thrown here so the caller owns when/how to fail.
+	 */
+	error?: AnonPiError;
+}
+
+/**
+ * PURE: resolve the persona a launch selects from `--as <name>`, over an
+ * INJECTED persona list. Absent `--as` selects the DEFAULT `anon` (byte-behaviour
+ * -identical to v1); `--as <name>` selects `anon-<name>`. The resolver does NO
+ * I/O: it returns a PersonaSelection (account + bare name + known-predicate +
+ * a non-thrown error) the impure layer acts on. The name is a plain argument
+ * (accepted: it may appear in argv/history/`ps`).
+ *
+ * Error cases are REPRESENTED, not thrown (the caller owns failure):
+ *   - `--as` with no following value (or a following flag) -> a clear error;
+ *   - `--as <name>` with an invalid bare name (charset) -> the validation error;
+ *   - `--as <name>` naming a persona NOT in the injected list -> an unknown
+ *     -persona error (only when a list is injected; the default `anon` is always
+ *     known). `account` is still the resolved `anon-<name>` so the caller can
+ *     quote it in a "create it with `anon-pi persona add <name>`" message.
+ */
+export function resolvePersonaSelection(
+	inputs: PersonaSelectionInputs,
+): PersonaSelection {
+	const {args, personas} = inputs;
+	const idx = args.indexOf(AS_FLAG);
+
+	// No --as: the DEFAULT persona `anon`. Known unless a list is injected that
+	// somehow omits it (the caller then decides); with no list, always known.
+	if (idx === -1) {
+		const known = personas ? personas.includes(ANON_ACCOUNT) : true;
+		const sel: PersonaSelection = {account: ANON_ACCOUNT};
+		if (personas) sel.known = known;
+		else sel.known = true;
+		return sel;
+	}
+
+	const value = args[idx + 1];
+	if (value === undefined || value.startsWith('-')) {
+		return {
+			account: ANON_ACCOUNT,
+			error: new AnonPiError(
+				`anon-pi: \`${AS_FLAG}\` needs a persona name, e.g. \`${AS_FLAG} alice\`. ` +
+					`Omit \`${AS_FLAG}\` for the default persona \`${ANON_ACCOUNT}\`.`,
+			),
+		};
+	}
+
+	let name: string;
+	try {
+		name = validatePersonaName(value);
+	} catch (e) {
+		return {
+			account: ANON_ACCOUNT,
+			error: e instanceof AnonPiError ? e : new AnonPiError(String(e)),
+		};
+	}
+
+	const account = personaAccount(name);
+	if (!personas) return {account, name, known: undefined};
+
+	const known = personas.includes(account);
+	const sel: PersonaSelection = {account, name, known};
+	if (!known) {
+		sel.error = new AnonPiError(
+			`anon-pi: no persona \`${name}\` (account \`${account}\`). ` +
+				`Create it with \`anon-pi persona add ${name}\`.`,
+		);
+	}
+	return sel;
+}
+
+/** The injected inputs for the generalized self-re-exec loop guard. */
+export interface PersonaRedirectInputs {
+	/** Whether THIS install is configured-hardened (runs under a persona account). */
+	hardened: boolean;
+	/**
+	 * The account the current process runs as (from the impure `whoami`/getuid,
+	 * INJECTED so this stays pure). v1's `isAnon` boolean generalizes to this
+	 * account identity.
+	 */
+	currentAccount: string;
+	/**
+	 * The SELECTED persona account this invocation targets (from
+	 * resolvePersonaSelection). The default is `anon`, preserving v1.
+	 */
+	selectedAccount: string;
+}
+
+/**
+ * PURE: the generalized self-re-exec loop guard. v1 asked "am I `anon`?"
+ * (shouldRedirectToAnon); with N personas it asks "am I already the TARGET
+ * persona account?". On a HARDENED install, redirect when the current account
+ * is NOT the selected persona account, and do NOT when it already IS (the loop
+ * guard, else infinite self-re-exec). A non-hardened install never redirects.
+ * Because a login-user call selecting the default `anon` has
+ * currentAccount != `anon`, this is byte-behaviour-identical to v1's
+ * shouldRedirectToAnon for the default persona. A persona is never auto
+ * -redirected to a DIFFERENT persona: the impure layer only ever passes the
+ * SELECTED account, and once running as it this returns false. Both identities
+ * are injected; nothing here spawns or probes.
+ */
+export function shouldRedirectToPersona(
+	inputs: PersonaRedirectInputs,
+): boolean {
+	if (!inputs.hardened) return false;
+	return inputs.currentAccount !== inputs.selectedAccount;
 }
 
 // --- The Tier-2 root-provisioning-script GENERATOR (docs/adr/0006) -----------
