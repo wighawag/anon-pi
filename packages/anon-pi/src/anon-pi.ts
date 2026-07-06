@@ -4114,6 +4114,261 @@ rm -f "\$tmp"
 `;
 }
 
+// --- The hardened-deployment PREFLIGHT (docs/adr/0006, prd story 6) -----------
+//
+// A half-provisioned `anon` account must fail LOUDLY with remediation, not
+// cryptically. So before a hardened install runs anything as `anon`, anon-pi
+// CHECKS the account is set up correctly and, when it is not, prints EXACTLY
+// what is missing and how to fix it. This module owns only the PURE evaluation:
+// each check is a predicate over an INJECTED probe result (a boolean the impure
+// layer computes by reading `/etc/subuid`, `loginctl show-user`, `stat
+// /dev/net/tun`, `$XDG_RUNTIME_DIR`, and `netcage --version`). The real probes
+// live in cli.ts and are wired by the init-provisioning task; NOTHING here
+// touches the fs or spawns. This mirrors the injected-`exists` seam the rest of
+// this module uses (resolveModelsSeedPath etc.).
+//
+// The netcage dependency is the UID-SCOPED store (netcage ADR-0017): running
+// netcage as `anon` auto-scopes its store to that uid, so anon-pi sets NO
+// `NETCAGE_GRAPHROOT`. The preflight only ASSERTS netcage is new enough to have
+// that store (>= NETCAGE_MIN_VERSION); it never weakens forced egress and never
+// introduces a graphroot knob.
+
+/**
+ * The netcage version FLOOR the hardened deployment requires: `0.11.0`, the
+ * release that shipped the UID-SCOPED store (netcage ADR-0017 / prd
+ * `uid-scoped-graphroot-multi-user-fix`). Running netcage as `anon` needs this so
+ * its store lands in the account's own uid-scoped path (`netcage-storage-<uid>`)
+ * instead of colliding on the shared `/var/tmp/netcage-storage` of pre-0.11.0.
+ * CONFIRMED (verified against the installed 0.10.0 vs 0.11.0 binaries). Kept as
+ * the ONE named constant (a future bump is a single-line change), never a
+ * scattered literal.
+ */
+export const NETCAGE_MIN_VERSION = '0.11.0';
+
+/**
+ * PURE: parse a netcage version STRING into a `[major, minor, patch]` numeric
+ * triple, or undefined when it is UNPARSEABLE. Accepts the common shapes of
+ * `netcage --version` output: a bare `1.2.3`, a `netcage 1.2.3`, a `v1.2.3`, or a
+ * longer line whose FIRST dotted triple is the version (e.g. a build-info line).
+ * The rule is deliberately narrow: the version is the first `<digits>.<digits>.
+ * <digits>` run in the string; a pre-release/build suffix (`1.2.3-rc1`,
+ * `1.2.3+meta`) keeps its numeric core. A string with no such triple (empty,
+ * `unknown`, `netcage version ?`) is UNPARSEABLE => undefined, which the netcage
+ * check treats as a fail-loud failure (never a silent pass).
+ */
+export function parseNetcageVersion(
+	raw: string,
+): [number, number, number] | undefined {
+	const m = /(\d+)\.(\d+)\.(\d+)/.exec(raw);
+	if (!m) return undefined;
+	return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+/**
+ * PURE: compare two `[major, minor, patch]` triples lexicographically. Returns a
+ * negative number when `a < b`, zero when equal, positive when `a > b` (the
+ * usual comparator contract), so `compareVersionTriples(v, floor) >= 0` is
+ * "v satisfies the floor".
+ */
+export function compareVersionTriples(
+	a: readonly [number, number, number],
+	b: readonly [number, number, number],
+): number {
+	for (let i = 0; i < 3; i++) {
+		if (a[i] !== b[i]) return a[i] - b[i];
+	}
+	return 0;
+}
+
+/**
+ * PURE: does a netcage version STRING satisfy the `>= floor` requirement?
+ * Parses both sides (parseNetcageVersion) and compares the triples. An
+ * UNPARSEABLE `raw` is NOT >= the floor (returns false); the netcage check maps
+ * that, and an absent netcage, to a fail-loud failure with a distinct
+ * remediation. `floor` defaults to NETCAGE_MIN_VERSION.
+ */
+export function netcageVersionSatisfies(
+	raw: string,
+	floor: string = NETCAGE_MIN_VERSION,
+): boolean {
+	const got = parseNetcageVersion(raw);
+	if (!got) return false;
+	const want = parseNetcageVersion(floor);
+	// The floor is a code constant; if it ever fails to parse that is a bug, not
+	// a runtime condition, so treat an unparseable floor as unsatisfiable.
+	if (!want) return false;
+	return compareVersionTriples(got, want) >= 0;
+}
+
+/**
+ * The INJECTED probe results the pure preflight evaluates. Each field is what
+ * the impure layer (cli.ts, wired by the init-provisioning task) computed by
+ * touching the OS; the pure predicates only READ these. Keeping them injected is
+ * what makes every check unit-testable with no real `netcage`/`loginctl`/`stat`
+ * and no real system path.
+ */
+export interface HardenedPreflightProbes {
+	/** True iff the `anon` account has BOTH an /etc/subuid and an /etc/subgid range. */
+	subidRangesPresent: boolean;
+	/** True iff linger is ON for `anon` (`loginctl enable-linger`, so $XDG_RUNTIME_DIR exists without a login). */
+	lingerEnabled: boolean;
+	/** True iff `/dev/net/tun` is present + accessible (netcage needs it). */
+	tunAccessible: boolean;
+	/** True iff the `anon` account's `$XDG_RUNTIME_DIR` is present (podman runroot lands there). */
+	xdgRuntimeDirPresent: boolean;
+	/**
+	 * The `netcage --version` output STRING, or undefined when netcage is ABSENT
+	 * (not on PATH / the probe could not run it). undefined = fail-loud "not
+	 * found"; a present-but-unparseable string is fail-loud too (see the check).
+	 */
+	netcageVersion?: string;
+}
+
+/** The stable id of each preflight check (so a caller can key off a specific failure). */
+export type HardenedPreflightCheckId =
+	'subid' | 'linger' | 'tun' | 'xdg-runtime' | 'netcage-version';
+
+/** One failing preflight check: its id + the EXACT remediation string to print. */
+export interface HardenedPreflightFailure {
+	id: HardenedPreflightCheckId;
+	/** The verbatim, copy-pasteable remediation (what is missing + how to fix it). */
+	remediation: string;
+}
+
+/**
+ * The composed preflight RESULT: all-pass, or the ORDERED list of failures (each
+ * with its exact remediation). `ok` is true iff `failures` is empty, so a caller
+ * can branch on `ok` and, when false, print every `failures[i].remediation` in
+ * order.
+ */
+export interface HardenedPreflightResult {
+	ok: boolean;
+	failures: HardenedPreflightFailure[];
+}
+
+/**
+ * PURE: the EXACT remediation message for the subuid/subgid check. Names the
+ * account and points at the Tier-2 provisioning script (which appends the range
+ * lines), since that is how a hardened install provisions them.
+ */
+export function subidRemediation(account: string): string {
+	return (
+		`anon-pi: the \`${account}\` account has no /etc/subuid + /etc/subgid ranges ` +
+		`(rootless podman needs them). Run the Tier-2 provisioning script anon-pi ` +
+		`printed (it appends \`${account}:<start>:${SUBID_RANGE_COUNT}\` to both files), ` +
+		`then re-run.`
+	);
+}
+
+/**
+ * PURE: the EXACT remediation message for the linger check. linger is what gives
+ * the account a `$XDG_RUNTIME_DIR` with no active login session (rootless podman
+ * needs it), so the fix is `loginctl enable-linger <account>`.
+ */
+export function lingerRemediation(account: string): string {
+	return (
+		`anon-pi: linger is not enabled for the \`${account}\` account, so its ` +
+		`\$XDG_RUNTIME_DIR does not exist without a login session (rootless podman ` +
+		`needs it). Enable it: \`sudo loginctl enable-linger ${account}\`, then re-run.`
+	);
+}
+
+/**
+ * PURE: the EXACT remediation message for the `/dev/net/tun` check. netcage's
+ * jail needs the tun device; if it is missing the kernel `tun` module is not
+ * loaded (or the device node is absent).
+ */
+export function tunRemediation(): string {
+	return (
+		'anon-pi: /dev/net/tun is not accessible (netcage needs it for the jail). ' +
+		'Load the tun module (`sudo modprobe tun`) and ensure /dev/net/tun exists, ' +
+		'then re-run.'
+	);
+}
+
+/**
+ * PURE: the EXACT remediation message for the account `$XDG_RUNTIME_DIR` check.
+ * The runtime dir is where podman's rootless runroot lands; it appears once
+ * linger is on and the account has a session, so the fix routes back through
+ * linger.
+ */
+export function xdgRuntimeRemediation(account: string): string {
+	return (
+		`anon-pi: the \`${account}\` account has no \$XDG_RUNTIME_DIR (podman's ` +
+		`rootless runroot lands there). It appears once linger is enabled: run ` +
+		`\`sudo loginctl enable-linger ${account}\`, then re-run.`
+	);
+}
+
+/**
+ * PURE: the EXACT remediation message for the netcage-version check. Distinct
+ * text for ABSENT vs TOO-OLD/UNPARSEABLE, because they are fixed differently
+ * (install netcage vs upgrade it), but BOTH are fail-loud (never a silent pass).
+ * `found` is the version string the probe saw (undefined = netcage absent).
+ */
+export function netcageVersionRemediation(found: string | undefined): string {
+	if (found === undefined) {
+		return (
+			`anon-pi: netcage was not found. The hardened deployment needs netcage ` +
+			`>= ${NETCAGE_MIN_VERSION} (its uid-scoped store, so running as \`${ANON_ACCOUNT}\` ` +
+			`does not collide with your login user's store). Install netcage ` +
+			`>= ${NETCAGE_MIN_VERSION}, then re-run.`
+		);
+	}
+	const parsed = parseNetcageVersion(found);
+	const gotDesc = parsed
+		? `found ${parsed.join('.')}`
+		: `could not parse the version from ${JSON.stringify(found)}`;
+	return (
+		`anon-pi: netcage is too old (${gotDesc}); the hardened deployment needs ` +
+		`>= ${NETCAGE_MIN_VERSION} for its uid-scoped store (so running as ` +
+		`\`${ANON_ACCOUNT}\` does not collide with your login user's store). Upgrade ` +
+		`netcage to >= ${NETCAGE_MIN_VERSION}, then re-run.`
+	);
+}
+
+/**
+ * PURE: evaluate the hardened-deployment preflight over INJECTED probe results.
+ * Runs every check in a FIXED order (subuid/subgid, linger, /dev/net/tun,
+ * account $XDG_RUNTIME_DIR, netcage version) and returns an all-pass result or
+ * the ORDERED list of failures, each carrying its EXACT remediation string. The
+ * netcage check FAILS on `< NETCAGE_MIN_VERSION`, on an ABSENT netcage
+ * (undefined), and on an UNPARSEABLE version string (fail-loud, never a silent
+ * pass). Nothing here touches the fs or spawns: it only reads `probes`.
+ * `account` defaults to ANON_ACCOUNT (canonically `anon`).
+ */
+export function evaluateHardenedPreflight(
+	probes: HardenedPreflightProbes,
+	account: string = ANON_ACCOUNT,
+): HardenedPreflightResult {
+	const failures: HardenedPreflightFailure[] = [];
+	if (!probes.subidRangesPresent) {
+		failures.push({id: 'subid', remediation: subidRemediation(account)});
+	}
+	if (!probes.lingerEnabled) {
+		failures.push({id: 'linger', remediation: lingerRemediation(account)});
+	}
+	if (!probes.tunAccessible) {
+		failures.push({id: 'tun', remediation: tunRemediation()});
+	}
+	if (!probes.xdgRuntimeDirPresent) {
+		failures.push({
+			id: 'xdg-runtime',
+			remediation: xdgRuntimeRemediation(account),
+		});
+	}
+	if (
+		probes.netcageVersion === undefined ||
+		!netcageVersionSatisfies(probes.netcageVersion)
+	) {
+		failures.push({
+			id: 'netcage-version',
+			remediation: netcageVersionRemediation(probes.netcageVersion),
+		});
+	}
+	return {ok: failures.length === 0, failures};
+}
+
 /** The --help text (kept here so it is covered by the same module). */
 export const HELP = `anon-pi - run pi on anonymized, jailed machines (netcage: forced egress + one direct local model)
 
