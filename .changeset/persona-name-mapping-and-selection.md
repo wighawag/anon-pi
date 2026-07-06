@@ -1,5 +1,0 @@
----
-"anon-pi": minor
----
-
-feat(persona): add the PURE multi-persona core generalizing v1's single `anon` account (prd `multi-persona-hardened-accounts`, superseding ADR-0006). New library surface in `src/anon-pi.ts`: `personaAccount(name)` maps a bare name to `anon-<name>` (default/empty -> the bare `anon`, so v1 installs are unchanged), `validatePersonaName`/`personaName` (safe lowercase Unix-username suffix, no `anon-` double-prefix) and its inverse, `resolvePersonaSelection` (the `--as <name>` resolver over an INJECTED persona list, returning account + bare name + a known? predicate + a non-thrown error for missing-value/invalid/unknown), and `shouldRedirectToPersona` (the generalized self-re-exec loop guard "am I the TARGET persona?" replacing v1's am-I-`anon` check). All pure + injected (no whoami/sudo/fs); the default persona `anon` stays byte-behaviour-identical to v1. `ANON_ACCOUNT` is now documented as the DEFAULT (empty-suffix) persona account, not the only one. The impure wiring (whoami, real persona list, exec) lands in later tasks.
