@@ -24,15 +24,21 @@ It is a PARSE/DISPLAY bug in anon-pi, not a proxy or leak problem.
 
 So anon-pi grabs the proxy address from the first line instead of the jail exit IP from the assertion line. Egress is fine (netcage's `forced-egress-exit-ip-differs-from-host` assertion is what actually proves it); only anon-pi's displayed number is wrong.
 
-## Fix shape
+## Root cause is an ANTI-PATTERN: anon-pi re-derives + string-scrapes a value netcage already presents
 
-Make `parseVerifyExitIp` extract the JAIL exit IP, not the first IPv4:
+The deeper issue (surfaced by the user) is not just the regex - it is that `init` re-implements netcage's exit-IP display by SCRAPING it out of prose and REPRINTING it as its own one-liner. Two better designs, both of which kill the bug CLASS rather than patch the regex:
 
-- SKIP the `proxy:` line (ignore any IP on a line starting `proxy:`), OR
-- specifically parse the `forced-egress-exit-ip-differs-from-host` assertion Detail ("jail exit IP <IP> differs from host <IP>") and return the JAIL IP, OR
-- more robustly, have netcage emit the exit IP on an unambiguous labelled line (a cross-repo option; netcage's `Report.String()` could print e.g. `exit-ip: <IP>` so consumers do not string-scrape assertion prose). The anon-pi-only fix (skip the proxy line / read the assertion) is enough and needs no netcage change.
+1. **Just STREAM netcage's output instead of parsing it.** netcage already prints an unambiguous, MORE trustworthy line: `[PASS] forced-egress-exit-ip-differs-from-host: jail exit IP <real public IP> differs from host <host IP> (forced egress active)`. Showing that verbatim (instead of anon-pi's re-labelled `Exit IP: X` summary) is clearer AND impossible to mislabel. The only reason anon-pi parses is to show a tidy onboarding one-liner - and that "tidiness" is exactly what broke and scared the user. Strongly consider dropping the parse and streaming `verify`'s human output (or streaming it AND dropping the summary line).
+2. **If a machine-readable value IS wanted, netcage should offer `verify --json`, not force prose-scraping.** netcage ALREADY has a JSON convention - `detect-proxy --json` and `ports --json` emit a machine contract (which is exactly why anon-pi consumes `detect-proxy --json` cleanly elsewhere and does NOT scrape it). But `verify` has NO structured output (only `Report.String()` prose, `internal/verify/verify.go`), so anon-pi is FORCED to string-scrape it. The principled fix is a CROSS-REPO pair:
+   - **netcage:** add `verify --json` (consistent with `detect-proxy`/`ports`) emitting the structured report incl. explicit `jailExitIp` + `hostExitIp` fields. A tool whose output another tool consumes should offer a stable contract, not prose.
+   - **anon-pi:** consume `verify --json` like it already does `detect-proxy --json`, instead of regex-scraping.
 
-Add a unit test with a REAL `netcage verify` output sample (proxy line = loopback + the forced-egress assertion carrying a public jail IP) asserting parseVerifyExitIp returns the PUBLIC ip, not `127.0.0.1`. The existing parseVerifyExitIp tests evidently did not include a sample where the proxy line's IP precedes the exit IP - add that case.
+## Two fixes at two severities
+
+- **Immediate (anon-pi only, cheap, unblocks users now):** make `parseVerifyExitIp` not grab the proxy line - skip any IP on a line starting `proxy:`, or parse the `forced-egress-exit-ip-differs-from-host` assertion Detail ("jail exit IP <IP> differs from host <IP>") and return the JAIL IP. OR (cleaner) drop the parse and stream netcage's output. Add a unit test with a REAL `netcage verify` sample (proxy line = loopback + the forced-egress assertion carrying a public jail IP) asserting the result is the PUBLIC ip, not `127.0.0.1`. The existing parseVerifyExitIp tests lacked a sample where the proxy line's IP precedes the exit IP - add that case.
+- **Durable (cross-repo, better, removes the scrape class):** `netcage verify --json` + anon-pi consuming it. Matches netcage's own `--json` convention; `verify` was just never brought up to it. Belongs partly in the netcage repo (its forced-egress/output contract), so it wants netcage's own review.
+
+General lesson (both this project's grain and a good one): do NOT string-scrape another tool's human prose; either stream it verbatim, or consume a structured contract it offers. anon-pi already follows this for `detect-proxy --json`; the `verify` exit-IP path is the one place it regressed to scraping, and it bit exactly where trust matters most.
 
 ## Severity
 
