@@ -1,5 +1,0 @@
----
-"anon-pi": minor
----
-
-feat(hardened): add the PURE hardened-deployment preflight predicates for the dedicated `anon` account. New `evaluateHardenedPreflight` composes five checks over INJECTED probe results (subuid/subgid ranges present, linger on, `/dev/net/tun` accessible, account `$XDG_RUNTIME_DIR` present, netcage `>= 0.11.0`) into an all-pass-or-ordered-list-of-failures result, each failing check carrying its EXACT remediation string so a half-provisioned account fails LOUDLY. The netcage floor is the single named constant `NETCAGE_MIN_VERSION = '0.11.0'` (the uid-scoped store, netcage ADR-0017), with `parseNetcageVersion` / `compareVersionTriples` / `netcageVersionSatisfies` treating an ABSENT netcage and an UNPARSEABLE version as fail-loud (never a silent pass), and distinct absent-vs-too-old remediations. Everything OS-touching (reading `/etc/subuid`, `loginctl`, `stat /dev/net/tun`, `netcage --version`) is an injected seam wired later by the init-provisioning task; nothing here spawns or touches the fs. The preflight sets no `NETCAGE_GRAPHROOT` (the uid-scoped default handles the store). Extends ADR-0006.
