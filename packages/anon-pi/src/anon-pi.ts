@@ -4266,20 +4266,29 @@ export function shouldRedirectToPersona(
 	return inputs.currentAccount !== inputs.selectedAccount;
 }
 
-// --- The Tier-2 root-provisioning-script GENERATOR (docs/adr/0006) -----------
+// --- The Tier-2 root-provisioning COMMAND generator (prd
+// `multi-persona-hardened-accounts`, decisions 0 + 8, superseding ADR-0006) ----
 //
-// The hardened deployment (prd `hardened-dedicated-account-deployment`, stories
-// 4 + 5) splits its setup into two tiers: Tier 1 (rootless) anon-pi does itself;
-// Tier 2 (root) anon-pi must NEVER do silently. So anon-pi GENERATES a
-// reviewable shell script for the four root-requiring steps and PRINTS it; the
-// HUMAN reviews it top-to-bottom and runs it with sudo in another terminal. The
-// script is NEVER executed by anon-pi. This generator is PURE (account name,
-// login user, and the anon-pi binary path are INJECTED), so the whole script is
-// unit-testable as a STRING; nothing here spawns, sudo's, or touches the fs.
+// The hardened deployment splits its setup into two tiers: Tier 1 (rootless)
+// anon-pi does itself; Tier 2 (root) anon-pi must NEVER do silently. So anon-pi
+// GENERATES the root-requiring steps and PRINTS them; the HUMAN runs them. v1
+// emitted a `#!/bin/sh` script FILE the human saved + ran with sudo. This is
+// RETIRED (for both the default `anon` and every `anon-<name>` persona): anon-pi
+// now emits COPY-PASTE COMMANDS the human pastes into a root shell they enter
+// FIRST. Rationale (decision 8): no on-disk script to leak the persona name and
+// nothing to save; entering ONE root shell (`sudo -i`/`su -`) keeps the persona
+// name out of the sudo/command AUDIT log (the become-root line carries no name,
+// and commands typed in a root shell are not individually audited). The block is
+// NEVER executed by anon-pi. This generator is PURE (account name, login user,
+// and the anon-pi binary path are INJECTED), so the whole block is unit-testable
+// as a STRING; nothing here spawns, sudo's, or touches the fs.
 //
-// The four steps, and ONLY these four (the script is a small auditable artifact):
-//   1. `useradd -m <account>`      create the dedicated account WITH a home dir.
-//   2. /etc/subuid + /etc/subgid   subordinate id RANGES for rootless podman.
+// The steps, and ONLY these (the block is small + auditable):
+//   1. `sudo -i`                   become root FIRST (paste the rest in that shell).
+//   2. `useradd -m <account>`      create the account WITH a home dir; this also
+//                                  AUTO-ALLOCATES the subuid/subgid block
+//                                  (decision 0: no explicit /etc/subuid+subgid
+//                                  range line, so N personas never collide).
 //   3. `loginctl enable-linger`    so `$XDG_RUNTIME_DIR` exists without a login.
 //   4. the SCOPED sudoers snippet  `<login-user> ALL=(<account>) <anon-pi>`,
 //      password KEPT (no NOPASSWD) by default: the password is what makes
@@ -4290,27 +4299,7 @@ export function shouldRedirectToPersona(
 // idea `harden-command-with-import`) and NO `NETCAGE_GRAPHROOT` export (netcage's
 // uid-scoped store, ADR-0017, handles itself when netcage runs as the account).
 
-/**
- * The subordinate-id RANGE SIZE granted to the `anon` account on /etc/subuid
- * and /etc/subgid: 65536 ids, the shadow-utils convention (one contiguous
- * 16-bit block, matching what a modern `useradd` auto-allocates). Rootless
- * podman maps container uids/gids into this block; 65536 covers the standard
- * container id space. Named so the exact count is pinned + testable.
- */
-export const SUBID_RANGE_COUNT = 65536;
-
-/**
- * The FIRST subordinate id in the `anon` account's range (the START column of
- * the /etc/subuid + /etc/subgid line). shadow-utils hands the FIRST regular user
- * `100000-165535`; we start the dedicated account's block at 231072 (= 100000 +
- * 2 * 65536), two blocks up, so the generated range does not collide with the
- * login user's default allocation on a typical single-user box. It is a static,
- * reviewable value (the human can edit the printed script if their box differs);
- * the idempotent grep-guard means re-running never duplicates the line.
- */
-export const SUBID_RANGE_START = 231072;
-
-/** The injected inputs for the Tier-2 root-provisioning-script generator. */
+/** The injected inputs for the Tier-2 root-provisioning command generator. */
 export interface Tier2ProvisioningInputs {
 	/** The dedicated Unix account to create (canonically ANON_ACCOUNT = `anon`). */
 	account: string;
@@ -4334,63 +4323,58 @@ export interface Tier2ProvisioningInputs {
 }
 
 /**
- * PURE: generate the Tier-2 root-requiring provisioning SCRIPT TEXT for a
- * hardened install. Returns a `#!/bin/sh` script the HUMAN reviews and runs with
- * sudo; anon-pi PRINTS it and NEVER executes it (this function only returns a
- * string). It performs EXACTLY the four provisioning steps (create account,
- * subuid/subgid ranges, enable-linger, scoped sudoers) and nothing else:
- *   - the account is created WITH a home dir (`useradd -m`), idempotent via an
- *     `id <account>` guard so a re-run does not fail on an existing account;
- *   - the /etc/subuid + /etc/subgid range lines are appended under a `grep`
- *     guard, so re-running does not duplicate them (a reviewable, safe-to-re-run
- *     artifact);
+ * PURE: generate the Tier-2 root-requiring provisioning COMMAND BLOCK for a
+ * hardened install. Returns COPY-PASTE COMMANDS the HUMAN pastes into a root
+ * shell they enter FIRST; anon-pi PRINTS them and NEVER executes them (this
+ * function only returns a string). It is NOT a `#!/bin/sh` script FILE (v1's
+ * shape, retired per decision 8): there is nothing to save to disk and nothing
+ * to leak the persona name, and the single become-root line keeps the persona
+ * name out of the audit log. The block:
+ *   - `sudo -i` becomes root FIRST (the rest is pasted in that root shell);
+ *   - `useradd -m <account>` creates the account WITH a home dir AND lets
+ *     shadow-utils AUTO-ALLOCATE its subuid/subgid block (decision 0: no
+ *     explicit /etc/subuid+/etc/subgid range line, so N personas never collide);
  *   - `loginctl enable-linger <account>` gives the account a `$XDG_RUNTIME_DIR`
  *     without an interactive login (rootless podman needs it);
  *   - the sudoers snippet is `<loginUser> ALL=(<account>) <anon-pi>` (password
  *     KEPT unless `nopasswd`), validated with `visudo -cf` and `install`ed
- *     mode-0440 under /etc/sudoers.d so a syntax error never locks the operator
- *     out.
+ *     mode-0440 under /etc/sudoers.d/anon-pi-<account> (per-account, so
+ *     provisioning a second persona never clobbers the first's rule file) so a
+ *     syntax error never locks the operator out.
  * It emits NO cross-user `chown`/migration line and NO `NETCAGE_GRAPHROOT`
  * export (see the section header). Inputs are injected, so it is fully testable
- * as a string.
+ * as a string. The name `buildTier2ProvisioningScript` is kept for continuity
+ * with the call sites; the returned STRING is a command block, not a file.
  */
 export function buildTier2ProvisioningScript(
 	inputs: Tier2ProvisioningInputs,
 ): string {
 	const {account, loginUser, anonPiPath, nopasswd = false} = inputs;
-	const range = `${account}:${SUBID_RANGE_START}:${SUBID_RANGE_COUNT}`;
 	const sudoersRule = nopasswd
 		? `${loginUser} ALL=(${account}) NOPASSWD: ${anonPiPath}`
 		: `${loginUser} ALL=(${account}) ${anonPiPath}`;
-	const sudoersFile = `/etc/sudoers.d/anon-pi-${loginUser}`;
-	return `#!/bin/sh
-# anon-pi Tier-2 provisioning script (REVIEW, then run with sudo yourself).
-# anon-pi GENERATED this and NEVER runs it: the root-requiring steps are
-# explicit and auditable. It does exactly four things, nothing else.
-set -eu
+	const sudoersFile = `/etc/sudoers.d/anon-pi-${account}`;
+	return `# anon-pi Tier-2 provisioning (REVIEW, then run yourself). anon-pi
+# GENERATED these commands and NEVER runs them: the root-requiring steps are
+# explicit + auditable. Become root FIRST, then paste the rest into that shell
+# (no script file is written; the become-root line keeps the account name out of
+# the audit log).
 
-# 1. Create the dedicated account WITH a home dir (idempotent: skip if it exists).
-if ! id ${account} >/dev/null 2>&1; then
-	useradd -m ${account}
-fi
+# 0. Become root (or use \`su -\`), then paste the commands below in that shell.
+sudo -i
 
-# 2. Subordinate uid/gid ranges for rootless podman (idempotent: grep-guarded so
-#    a re-run never duplicates the line).
-grep -q '^${range}$' /etc/subuid || echo '${range}' >>/etc/subuid
-grep -q '^${range}$' /etc/subgid || echo '${range}' >>/etc/subgid
+# 1. Create the account WITH a home dir. This also auto-allocates its
+#    subordinate uid/gid block (no explicit range line needed).
+useradd -m ${account}
 
-# 3. Enable linger so \$XDG_RUNTIME_DIR exists without an interactive login.
+# 2. Enable linger so $XDG_RUNTIME_DIR exists without an interactive login.
 loginctl enable-linger ${account}
 
-# 4. Scoped sudoers rule: ${loginUser} may run ONLY anon-pi as ${account}.
+# 3. Scoped sudoers rule: ${loginUser} may run ONLY anon-pi as ${account}.
 #    Password ${nopasswd ? 'NOT required (--nopasswd opted in)' : 'KEPT (crossing the boundary is deliberate)'}.
-#    Validated with visudo -cf and installed mode-0440, so a syntax error can
-#    never lock you out.
-tmp="$(mktemp)"
-printf '%s\\n' '${sudoersRule}' >"\$tmp"
-visudo -cf "\$tmp"
-install -m 0440 -o root -g root "\$tmp" '${sudoersFile}'
-rm -f "\$tmp"
+#    Written to a temp file, validated with visudo -cf, then installed mode-0440,
+#    so a syntax error can never lock you out.
+tmp="$(mktemp)" && printf '%s\\n' '${sudoersRule}' >"$tmp" && visudo -cf "$tmp" && install -m 0440 -o root -g root "$tmp" '${sudoersFile}' && rm -f "$tmp"
 `;
 }
 
@@ -4528,14 +4512,17 @@ export interface HardenedPreflightResult {
 
 /**
  * PURE: the EXACT remediation message for the subuid/subgid check. Names the
- * account and points at the Tier-2 provisioning script (which appends the range
- * lines), since that is how a hardened install provisions them.
+ * account and points at the Tier-2 provisioning commands anon-pi printed, which
+ * create the account with `useradd -m <account>`: modern shadow-utils then
+ * AUTO-ALLOCATES a free /etc/subuid + /etc/subgid block for it (no explicit
+ * range line, per prd `multi-persona-hardened-accounts` decision 0), so the fix
+ * is simply to run those commands.
  */
 export function subidRemediation(account: string): string {
 	return (
 		`anon-pi: the \`${account}\` account has no /etc/subuid + /etc/subgid ranges ` +
-		`(rootless podman needs them). Run the Tier-2 provisioning script anon-pi ` +
-		`printed (it appends \`${account}:<start>:${SUBID_RANGE_COUNT}\` to both files), ` +
+		`(rootless podman needs them). Run the Tier-2 provisioning commands anon-pi ` +
+		`printed (they \`useradd -m ${account}\`, which auto-allocates the ranges), ` +
 		`then re-run.`
 	);
 }
@@ -4657,8 +4644,8 @@ export function evaluateHardenedPreflight(
 // account/login-user/binary inputs, it decides the ONE next action of the step:
 //
 //   - preflight FAILS  => the `anon` account is missing/half-provisioned. Emit
-//     the Tier-2 provisioning SCRIPT (buildTier2ProvisioningScript) plus a
-//     "run it with sudo in another terminal, then continue" instruction, and
+//     the Tier-2 provisioning COMMANDS (buildTier2ProvisioningScript) plus a
+//     "become root and paste them, then continue" instruction, and
 //     signal WAIT. The impure loop prints these, waits, RE-PROBES, and calls
 //     this again (resumability: the state lives in the OS, not a flag — a
 //     re-run just re-evaluates the fresh preflight).
@@ -4696,16 +4683,16 @@ export interface HardeningStepInputs {
 
 /**
  * `wait-for-account`: the `anon` account is missing/half-provisioned. cli.ts
- * PRINTS `script` (the reviewable Tier-2 root script) + `instruction`, then
- * waits for the human to run it and continue; on continue it RE-PROBES and
+ * PRINTS `script` (the reviewable Tier-2 root COMMAND BLOCK) + `instruction`,
+ * then waits for the human to run it and continue; on continue it RE-PROBES and
  * re-plans. `failures` echoes the exact preflight remediations so the caller can
  * show precisely what is missing.
  */
 export interface HardeningWaitPlan {
 	kind: 'wait-for-account';
-	/** The Tier-2 provisioning SCRIPT text to print (never executed by anon-pi). */
+	/** The Tier-2 provisioning COMMAND BLOCK to print (never executed by anon-pi). */
 	script: string;
-	/** The "run it with sudo, then continue" instruction to print alongside the script. */
+	/** The "become root, paste the commands, then continue" instruction printed alongside the block. */
 	instruction: string;
 	/** The ordered preflight failures (each with its exact remediation) driving the wait. */
 	failures: HardenedPreflightFailure[];
@@ -4735,7 +4722,7 @@ export const HARDENED_HOME_MODE = 0o700;
  * PURE: decide the next action of the resumable `init` hardening step over the
  * INJECTED preflight result. When the preflight FAILS (the `anon` account is
  * missing or half-provisioned) it returns a `wait-for-account` plan carrying the
- * Tier-2 script to print + a run-it-then-continue instruction + the exact
+ * Tier-2 command block to print + a run-it-then-continue instruction + the exact
  * failures; the impure loop prints, waits, RE-PROBES, and calls this again (the
  * resumable state is the OS itself, so a re-run just re-evaluates a fresh
  * preflight — idempotent, no continue-flag to persist). When the preflight
@@ -4759,11 +4746,11 @@ export function planHardeningStep(
 	});
 	const instruction =
 		`anon-pi: the \`${account}\` account is not fully provisioned yet. The ` +
-		`root-requiring steps are the script ABOVE: review it, then run it with ` +
-		`sudo in ANOTHER terminal (anon-pi never sudo's for you):\n` +
-		`  sudo sh -c '<paste the script>'\n` +
-		`When it finishes, come back here and continue — anon-pi RE-CHECKS the ` +
-		`account (the preflight) and proceeds once it exists.`;
+		`root-requiring steps are the COMMANDS ABOVE: review them, then become root ` +
+		`in ANOTHER terminal (\`sudo -i\` or \`su -\`; anon-pi never sudo's for you) ` +
+		`and paste them into that root shell. When they finish, come back here and ` +
+		`continue: anon-pi RE-CHECKS the account (the preflight) and proceeds once ` +
+		`it exists.`;
 	return {
 		kind: 'wait-for-account',
 		script,
