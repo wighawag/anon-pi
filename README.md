@@ -296,6 +296,53 @@ anon-pi does not tell you "you are anonymous". It composes a launch that **force
 
 For proof, it shows you **evidence**, never a label: `init` (and `netcage verify`) run a real request through the proxy and print the actual EXIT IP, so you can see it is not your host IP. It deliberately **never claims which exit provider** you are using (Tor, a VPN, an SSH tunnel): it can only observe the exit, not name the network behind it. A running `tor`/`wireproxy` process is surfaced as a WEAK local hint, clearly not a claim about the exit.
 
+## Hardened deployment: keep your work out of a host agent's casual reach
+
+Your anonymized work (machine homes, project files, and pi session transcripts under `~/.anon-pi/machines/*/home/.pi/agent/sessions/`) lives in YOUR login user's `$HOME`. A *different* coding agent running on the host as your normal login user can casually surface it: you ask that host agent "find my previous conversation about X" or "where's that work folder", and it `find`s / `grep`s your `$HOME` and stumbles onto the anonymized work. In an AI-driven workflow the transcript basically IS the work, so surfacing it re-associates "anonymized" activity with you.
+
+The **hardened deployment** puts anon-pi's whole workspace under a single dedicated Unix account named **`anon`**, whose home is `chmod 700` and which your login user is *not* in. A casual `find`/`grep` as you then simply cannot read those files: plain Unix DAC does the work.
+
+> **Read this first: it is a DISCOVERABILITY boundary, NOT hard containment.** It defends only against an **unprivileged** host process/agent running as your login user (the accidental "find my old work" case). A host agent with **root**, or with **blanket passwordless sudo**, defeats it entirely: root ignores file permissions. If your host agents already run with broad sudo, this buys you little. anon-pi never claims otherwise, and neither should you.
+
+### The sudo password is the feature, not friction
+
+Crossing into the `anon` account requires a sudo **password** by default (the provisioning script installs a scoped sudoers rule with **no** `NOPASSWD`). That is deliberate: the password is what makes crossing the boundary a *conscious act you perform*, so an over-eager host agent's "find my work" never trips into it automatically. sudo caches the credential (~15 minutes), so day-to-day use is at most one prompt, not one per command. (There is an opt-in `--nopasswd` for a single-user trusted box only; it is OFF by default, and turning it on removes exactly this protection.)
+
+### How you turn it on: `init` asks
+
+Hardening is driven entirely by `anon-pi init` (the same onboarding you already run). There is **no `harden` verb, no `--hardened` flag, and no separate `anon` wrapper command**: anon-pi is its own wrapper. `init`'s last step asks:
+
+```
+Step 5/5 - hardened deployment (optional)
+  Run under the dedicated `anon` account? [y/N]
+```
+
+Answer `y` and it walks a two-tier "actively help, never silent root" flow:
+
+- **Tier 1 (rootless), done for you.** anon-pi points the workspace (`ANON_PI_HOME`) into the `anon` account's tree and `chmod 700`s it. No wrapper file is written, and `NETCAGE_GRAPHROOT` is never set (see the netcage note below).
+- **Tier 2 (needs root), a script YOU run.** The parts that need root (create the `anon` account, add its `/etc/subuid`+`/etc/subgid` ranges for rootless podman, `loginctl enable-linger anon` so its `$XDG_RUNTIME_DIR` exists without a login, and install the scoped sudoers rule) are **printed as a reviewable script**. anon-pi **never sudo's for you**: you read that script and run it yourself with sudo, in another terminal. It is small, auditable, and safe to re-run (each step is guarded so a second run does not duplicate anything).
+- **Resumable across the root step.** After printing the script, `init` waits and tells you to run it, then press Enter to **re-check** (it re-probes the account with the preflight below). Once the account really exists and is fully provisioned, `init` continues and finishes. So the flow is: run anon-pi, it prints "create the account with this script, then continue", you do, it verifies and proceeds. No separate command, no persisted "half-done" flag: the state is the OS, so re-running `init` after you run the script simply proceeds.
+
+The preflight that gates the continue checks the account is set up correctly (subuid/subgid ranges present, linger on, `/dev/net/tun` accessible, the account's `$XDG_RUNTIME_DIR` present, and **netcage new enough** for its uid-scoped store, `>= 0.11.0`) and prints exactly what is missing with its fix, so a half-provisioned account fails loudly rather than cryptically.
+
+### Day to day: one command, at most one prompt
+
+Once hardened, you keep using anon-pi exactly as before: `anon-pi recon`, `anon-pi --shell`, whatever. On a hardened install anon-pi **detects that it must run as `anon` and re-execs itself** as the very first thing it does, by spawning `sudo -u anon -i anon-pi "$@"` (the login `-i` form, so `$HOME`/`$XDG_RUNTIME_DIR`/env become the account's, which rootless podman needs). The first call prompts for the sudo password; subsequent calls within sudo's cache window do not. A process already running *as* `anon` does not re-exec (no loop). Where sudoers is not configured, the documented fallback is `su - anon -c 'anon-pi ...'`.
+
+This always-redirects: on a hardened install *every* login-user invocation goes to `anon`. There is no "run non-hardened on this box too" mode. A box you want non-hardened is simply a box you did not harden. anon-pi implements no privilege-switching of its own: it only ever spawns `sudo`/`su`. It ships no setuid binary and sets no uid.
+
+### It composes with ephemeral runs
+
+This stacks with the ephemeral-run idea (a launch that saves nothing) as belt-and-suspenders: ephemeral means there is **nothing to find**, and the hardened deployment means **what you do keep is out of casual reach**. The two are orthogonal and reinforce each other.
+
+### netcage runs as `anon` too (no extra config)
+
+Because anon-pi runs netcage *as* the `anon` account, netcage's uid-scoped container store lands in the account's own path automatically and does not collide with your login user's store (netcage's uid-scoped-store fix, netcage ADR-0017, in netcage `>= 0.11.0`). anon-pi does **not** set `NETCAGE_GRAPHROOT`; the uid-scoped default is enough. The forced-egress invariant is untouched: hardening only changes *which user* anon-pi runs as, never the jail.
+
+### Not in v1: a standalone `harden` verb + migration
+
+v1 hardens **only through `init`**, and a fresh `init` has nothing to import, so there is no existing-workspace migration. RE-hardening an *already-populated* login-user workspace (a `anon-pi harden` verb that imports/migrates your current `~/.anon-pi` behind the boundary) is a **documented future follow-up**, tracked as the `harden-command-with-import` idea. Until then, hardening is a fresh-install decision made at `init` time.
+
 ## Layout on disk
 
 Everything anon-pi keeps lives under `~/.anon-pi/` (override with `ANON_PI_HOME`):
