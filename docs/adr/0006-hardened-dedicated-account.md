@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted. Formalizes prd `hardened-dedicated-account-deployment`. Sibling tasks (preflight, tier-2 script, init step, docs) EXTEND this ADR; they do not re-create it.
+Accepted, then **superseded by [ADR-0007](0007-multi-persona-hardened-accounts.md)** (multi-persona hardened deployment). Formalizes prd `hardened-dedicated-account-deployment`. Sibling tasks (preflight, tier-2 script, init step, docs) EXTEND this ADR; they do not re-create it.
+
+ADR-0007 GENERALIZES the single dedicated account into N persona accounts `anon-<name>` with `anon` the DEFAULT persona, and adds per-persona fail-closed egress. The decisions below that are UNCHANGED (self-re-exec not setuid, always-redirect, the kept sudo password, netcage's uid-scoped store) still hold, now parameterized per persona; ONLY the "single canonical shared account named `anon`, pinned so it can never be re-forked" decision is replaced. Two v1 shapes are also RETIRED by 0007: the generated `#!/bin/sh` Tier-2 script FILE (now copy-paste commands run in a root shell entered first) and the explicit `/etc/subuid`+`/etc/subgid` range line (now auto-allocated by `useradd -m`).
 
 ## Context
 
