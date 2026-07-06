@@ -9,6 +9,7 @@ import {
 	validatePersonaName,
 	resolvePersonaSelection,
 	shouldRedirectToPersona,
+	stripAsFlag,
 	type PersonaSelection,
 } from '../src/index.js';
 
@@ -169,6 +170,46 @@ describe('persona selection: resolvePersonaSelection (--as <name>, default anon,
 	it('yields a PersonaSelection shape', () => {
 		const sel: PersonaSelection = resolvePersonaSelection({args: []});
 		expect(sel.account).toBe('anon');
+	});
+});
+
+describe('persona selection: stripAsFlag (the launch-forwarded argv netcage never sees --as)', () => {
+	it('removes `--as <name>` so netcage/the launch grammar never see it', () => {
+		expect(stripAsFlag(['--as', 'alice', 'recon', '--mount', '/x'])).toEqual([
+			'recon',
+			'--mount',
+			'/x',
+		]);
+	});
+
+	it('strips `--as <name>` from the MIDDLE of the argv', () => {
+		expect(stripAsFlag(['recon', '--as', 'alice', '-p', 'hi'])).toEqual([
+			'recon',
+			'-p',
+			'hi',
+		]);
+	});
+
+	it('leaves an argv with no `--as` untouched (v1 byte-identical)', () => {
+		expect(stripAsFlag(['recon', '--mount', '/x'])).toEqual([
+			'recon',
+			'--mount',
+			'/x',
+		]);
+		expect(stripAsFlag([])).toEqual([]);
+	});
+
+	it('drops a trailing `--as` with no value (the impure layer errors on it first)', () => {
+		expect(stripAsFlag(['recon', '--as'])).toEqual(['recon']);
+	});
+
+	it('strips only the FIRST `--as` occurrence (its value is a persona name, not a flag)', () => {
+		// a second literal `--as` after a stripped one is left as an ordinary token
+		// for the launch grammar to reject; selection only ever reads the first.
+		expect(stripAsFlag(['--as', 'alice', '--as', 'bob'])).toEqual([
+			'--as',
+			'bob',
+		]);
 	});
 });
 
