@@ -140,6 +140,7 @@ import {
 	resolveHostModelsPath,
 	LOCAL_PROVIDER_API_KEY,
 	parseVerifyExitIp,
+	verifyEgressAssertionPassed,
 	processHint,
 	socks5hUrl,
 	hostPortKey,
@@ -2623,10 +2624,46 @@ function initProxyStep(currentProxy: string | undefined): string | undefined {
 		const output = `${verify.stdout ?? ''}${verify.stderr ?? ''}`;
 		if (verify.error || verify.status !== 0) {
 			process.stdout.write(output.trimEnd() + '\n');
+			// netcage verify runs SEVERAL assertions and exits non-zero if ANY fails.
+			// The load-bearing one for ANONYMITY is the exit-IP-differs assertion; the
+			// rest (e.g. `dns-resolves-over-tcp-glibc`) are in-jail FUNCTIONALITY. If
+			// the anonymity assertion PASSED but something else failed, the proxy is
+			// proven-anonymous, so we do NOT trap the user: we show the failure and
+			// offer a DELIBERATE proceed-anyway (defaulting to NO). If the anonymity
+			// assertion did NOT pass (absent or FAIL), this is a real egress failure
+			// (or netcage could not prove egress) and there is NO override: re-pick.
+			if (verify.error || !verifyEgressAssertionPassed(output)) {
+				process.stdout.write(
+					`  netcage verify FAILED for ${url} (exit ${verify.status ?? 'n/a'}), and\n` +
+						`  the forced-egress exit-IP proof did NOT pass. This proxy is not proven\n` +
+						'  to anonymize your egress. Pick another port or fix the proxy.\n\n',
+				);
+				continue;
+			}
 			process.stdout.write(
-				`  netcage verify FAILED for ${url} (exit ${verify.status ?? 'n/a'}). ` +
-					'Pick another port or fix the proxy.\n\n',
+				`  netcage verify reported a NON-egress failure for ${url} (exit ` +
+					`${verify.status ?? 'n/a'}). The forced-egress exit-IP proof PASSED (your\n` +
+					`  egress is anonymized), but another netcage check failed - most likely\n` +
+					'  an in-jail DNS/functionality issue, NOT an anonymity leak. See the\n' +
+					'  output above; a `netcage-dns` issue is netcage-side, not anon-pi.\n',
 			);
+			const proceed = promptLine(
+				`  Use ${url} anyway (egress is proven anonymous)? [y/N] `,
+			);
+			if (proceed === undefined) {
+				process.stderr.write('anon-pi: aborted; nothing written.\n');
+				return undefined;
+			}
+			if (/^y(es)?$/i.test(proceed.trim())) {
+				const exitIp = parseVerifyExitIp(output);
+				if (exitIp) {
+					process.stdout.write(
+						`  Exit IP (via the proxy, NOT your host): ${exitIp}\n`,
+					);
+				}
+				return chosen;
+			}
+			process.stdout.write('  OK, pick another.\n\n');
 			continue;
 		}
 		// Show netcage's OWN output as the authoritative evidence (its

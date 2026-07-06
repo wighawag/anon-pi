@@ -19,6 +19,8 @@ import {
 	initImageMenu,
 	interpretSocks5Handshake,
 	parseVerifyExitIp,
+	verifyEgressAssertionPassed,
+	NETCAGE_EGRESS_ASSERTION,
 	processHint,
 	serializeConfigJson,
 	socks5hUrl,
@@ -285,6 +287,33 @@ describe('parseVerifyExitIp', () => {
 			'proxy: socks5h://127.0.0.1:9050\n' +
 			'[FAIL] forced-egress-exit-ip-differs-from-host: jail produced no exit IP\n';
 		expect(parseVerifyExitIp(out)).toBeUndefined();
+	});
+});
+
+describe('verifyEgressAssertionPassed (the anonymity proof, load-bearing for init)', () => {
+	it('names the exact netcage assertion id (a rename must be caught here)', () => {
+		expect(NETCAGE_EGRESS_ASSERTION).toBe(
+			'forced-egress-exit-ip-differs-from-host',
+		);
+	});
+
+	it('is TRUE when the egress assertion is [PASS], even if a sibling FAILs', () => {
+		// the REAL field output: exit-IP proof passes, only glibc-DNS-over-TCP fails.
+		const out =
+			'proxy: socks5h://127.0.0.1:9050 (source: flag)\n' +
+			'[PASS] forced-egress-exit-ip-differs-from-host: jail exit IP 64.190.76.2 differs from host 147.147.37.112 (forced egress active)\n' +
+			'[FAIL] dns-resolves-over-tcp-glibc: glibc getaddrinfo could NOT resolve one.one.one.one in the jail\n';
+		expect(verifyEgressAssertionPassed(out)).toBe(true);
+	});
+
+	it('is FALSE when the egress assertion is [FAIL] (a real anonymity failure)', () => {
+		const out =
+			'[FAIL] forced-egress-exit-ip-differs-from-host: jail produced no exit IP\n';
+		expect(verifyEgressAssertionPassed(out)).toBe(false);
+	});
+
+	it('is FALSE when the egress assertion is ABSENT (netcage could not prove egress)', () => {
+		expect(verifyEgressAssertionPassed('verify errored: offline?')).toBe(false);
 	});
 });
 

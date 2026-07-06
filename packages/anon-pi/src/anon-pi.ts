@@ -3283,6 +3283,38 @@ export function parseVerifyExitIp(output: string): string | undefined {
 }
 
 /**
+ * The netcage verify assertion that IS the anonymity guarantee: the jail's
+ * forced-egress exit IP differs from the host IP (egress really leaves via the
+ * proxy, not the host). This is the ONE assertion `init` treats as load-bearing;
+ * every other netcage assertion (e.g. `dns-resolves-over-tcp-glibc`) is about
+ * in-jail FUNCTIONALITY, not about whether the proxy anonymizes.
+ */
+export const NETCAGE_EGRESS_ASSERTION =
+	'forced-egress-exit-ip-differs-from-host';
+
+/**
+ * PURE: did netcage verify PROVE the anonymity guarantee, i.e. is there a
+ * `[PASS] forced-egress-exit-ip-differs-from-host` line in its output? This is a
+ * TARGETED scan for ONE named PASS line, NOT general prose-parsing: it lets
+ * `init` distinguish "the proxy does not anonymize" (this returns false -> MUST
+ * block) from "the proxy anonymizes but some OTHER netcage check failed" (this
+ * returns true even when `netcage verify` exited non-zero -> `init` may offer a
+ * deliberate proceed-anyway, since the anonymity proof itself held). Returns
+ * false when the assertion is absent or marked `[FAIL]`. The exact assertion id
+ * is asserted by a unit test, so a netcage rename is caught here, not in the
+ * field.
+ */
+export function verifyEgressAssertionPassed(output: string): boolean {
+	for (const line of output.split('\n')) {
+		const l = line.trim();
+		if (!l.includes(NETCAGE_EGRESS_ASSERTION)) continue;
+		// The assertion line is present; it counts ONLY when marked PASS.
+		if (/^\[PASS\]/i.test(l)) return true;
+	}
+	return false;
+}
+
+/**
  * The image-menu choices `init` offers for the default machine's image. `[1]`
  * and `[2]` build a SHIPPED Dockerfile via `podman build`; `[3]` takes an
  * existing image ref verbatim; `[4]` skips (the machine is created imageless and
