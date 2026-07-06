@@ -18,17 +18,30 @@ Proposed direction. anon-pi has grown featureful (machines/homes/projects, image
 The seam is probably NOT a simple "anon-pi core vs pi-specific" 2-way split. It looks like THREE layers:
 
 1. **netcage** (exists) - the jail + forced egress + the uid-scoped store. A deliberately THIN, single-responsibility drop-in `podman` replacement. Its value is that it is small + auditable ("never weaken forced egress" is trustworthy BECAUSE it is narrow).
-2. **A middle "run an executable in an isolated, anonymized, per-persona account" layer** - the reusable substrate this note is about: workspace/home/machine model, image lifecycle, `forward`/`ports`, and the hardened-account + persona + provisioning machinery. Could eventually be a netcage companion, a separate package, or stay inside anon-pi.
+2. **A middle "run an executable in an isolated, anonymized, per-persona account" layer** - the reusable substrate this note is about: workspace/home/machine model, image lifecycle, `forward`/`ports`, and the hardened-account + persona + provisioning machinery. It sits ABOVE netcage (composing over netcage's existing CLI; see the corrected down/up section - it needs no netcage change). Could eventually be a separate package or stay inside anon-pi.
 3. **anon-pi** - the pi-specific cap on top of (2): `init`'s local-model onboarding (probe endpoint, merge providers, generate `models.json` + settings-seed), the single `llm` `--allow-direct` hole, seeding `~/.pi/agent`, the shipped `Dockerfile.pi`/webveil images.
 
-## Leaning hypothesis for the down/up split (NOT yet decided)
+## The down/up split - CORRECTED: netcage inherits NOTHING new (verified in the netcage source)
 
-Within the hardened/persona/egress work, the pieces do not all belong on the same layer. The leaning cut (agreed in discussion, still to be validated by the actual refactor):
+An earlier version of this note said the egress-isolation MECHANISM should "go DOWN into netcage" (netcage grows a "run as identity + isolation tag" primitive). Checking the netcage source, that framing is WRONG / misleading: **netcage ALREADY has the entire mechanism. There is nothing to move down.**
 
-- **Egress-isolation MECHANISM belongs DOWN in netcage.** Composing a per-identity SOCKS-isolation username (the Tor `IsolateSOCKSAuth` tag) and scoping the store by uid are netcage-native: netcage already owns forced egress and already shipped the uid-scoped store (ADR-0017), and the in-jail login-name leak (Leak 2) is netcage's own concern. "Run this jail as this identity with this isolation tag" is a small, focused capability that fits netcage's narrow remit. Possibly "run as account X" belongs here too.
-- **Persona/account POLICY belongs UP in the middle layer.** Which persona exists, its name (`anon-<name>`), provisioning the Unix account (the Tier-2 root commands), the mode-700 workspace/home, the `--as` selection, the interactive onboarding - this is a workspace/identity MANAGER, which would dilute netcage's thin single-responsibility pitch if pushed down into it. It sits above netcage.
+- **Store scoping already exists.** `internal/jail/graphroot.go`: the default graphroot is `/var/tmp/netcage-storage-<uid>`, keyed on the RUNNING uid (ADR-0017). So running netcage AS the persona account (`anon-alice`) already gives that account its own non-colliding store, automatically, with zero anon-pi involvement.
+- **SOCKS-isolation username already flows end-to-end.** `internal/jail/run.go:335` already forwards the proxy URL's userinfo to the tun2socks redirector: `args = append(args, "-user", cfg.Proxy.Username, "-pass", cfg.Proxy.Password)` (and `internal/cli/cli.go:75` extracts `user:pass` from the proxy URL). So handing netcage `socks5h://anon-alice:x@127.0.0.1:9050` already forwards `anon-alice` as the SOCKS-isolation username to Tor, which isolates the circuit. No netcage change needed.
 
-So the clean cut is: **netcage grows a small "run as this identity with this isolation tag" primitive; the middle layer owns personas/accounts/workspaces/provisioning on top.** The pi-specific config/onboarding stays in anon-pi (layer 3).
+**So the "mechanism" is entirely a matter of WHAT anon-pi (the middle layer) PASSES to netcage, not new netcage capability:**
+
+- Run netcage AS the persona account (a `sudo -u <account>` decision the middle layer already makes) => store scopes itself (netcage, existing).
+- Put the account name in the proxy URL's userinfo (`socks5h://<account>:x@...`, which `persona add` already composes) => circuit isolates itself (netcage forwards it, existing).
+
+Both are middle-layer COMPOSITION decisions over netcage's EXISTING surface. netcage inherits ZERO new code.
+
+Revised layering conclusion:
+
+- **netcage** already provides the COMPLETE egress+store primitive (forced egress, uid-scoped store, proxy-userinfo forwarding). It needs NOTHING added; its narrow, auditable remit is untouched.
+- **The middle layer** owns COMPOSING the right netcage invocation (run-as-account, isolation-username-in-URL) PLUS all persona/account/workspace policy (names, `anon-<name>`, Tier-2 provisioning, mode-700 home, `--as`, onboarding). 100% of the new "mechanism" is argument-composition here, not jail capability.
+- **anon-pi** keeps the pi-specific cap (layer 3).
+
+**Consequence: there is NO netcage-repo work in this direction, which removes the cross-repo / forced-egress-review concern noted below.** The whole extraction stays in anon-pi's world (a middle layer + a pi cap), composing over netcage's existing CLI exactly as anon-pi already does.
 
 ## Recommended first step: draw the seam INTERNALLY, defer packaging
 
@@ -40,7 +53,6 @@ Do NOT extract a package now (speculative reuse + the hardened/persona code is t
 
 ## Open threads (deferred, resolve when the seam is drawn)
 
-- Does the middle layer become part of netcage, a netcage companion package, its own package, or stay inside anon-pi? (Downstream of step 1.)
-- Exact API of a netcage "run as identity + isolation tag" primitive (if the egress mechanism moves down).
+- Does the middle layer become a separate package or stay inside anon-pi? (Downstream of step 1. NOTE: "part of netcage" is NO LONGER a candidate - netcage already provides everything the mechanism needs, so the middle layer sits ABOVE it, not inside it.)
 - How the pi-specific config/onboarding hooks into a generic core (injectable "seed this file into the home", "probe this local endpoint", "extend the config schema") without the core knowing about pi.
 - Whether the middle layer's shape (a library anon-pi imports vs a generic CLI anon-pi drives) matters; note anon-pi already SHELLS OUT to netcage, so a second shell-out layer for orchestration it currently does in-process may be worse than a library.
