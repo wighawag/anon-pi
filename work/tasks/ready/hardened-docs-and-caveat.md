@@ -23,6 +23,7 @@ Deliver (in the README / docs, matching where anon-pi documents its verbs):
 - [ ] The unprivileged-only caveat is stated plainly (root/blanket-sudo defeats it), and the sudo-password-as-deliberate-crossing rationale is explained.
 - [ ] Docs note it composes with the ephemeral-run idea and that migration / a standalone `harden` verb are a documented future follow-up (not in v1).
 - [ ] Docs do NOT claim hard containment and do NOT reference a separate `anon` wrapper command or `--hardened` flag (neither exists).
+- [ ] Confirm the hardened vocabulary (dedicated `anon` account, hardened deployment / DAC boundary, self-re-exec) is present in `CONTEXT.md` (owned by `hardened-self-reexec-invocation`); if it is missing when this task runs, add it here so the glossary matches the shipped docs.
 - [ ] Every change produces a changeset; the `verify` gate passes (`pnpm format:check` covers the docs).
 
 ## Blocked by

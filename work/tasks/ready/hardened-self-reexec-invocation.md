@@ -25,6 +25,8 @@ Keep it consistent with the repo's pure-planner + injected-spawn style (mirror t
 - [ ] anon-pi sets no uid and ships no setuid binary: the design re-execs by SPAWNING `sudo` only (asserted structurally, i.e. the builder only ever emits a `sudo`/`su` argv, never a privilege syscall).
 - [ ] Tests cover the new behaviour (mirror the repo's pure-module test style in `packages/anon-pi/test/`): hardened+not-anon -> redirect; hardened+anon -> no redirect; not-hardened -> no redirect; argv/string shape for both forms.
 - [ ] No test invokes real `sudo`/`su`; the exec is not performed in this task at all (pure logic only).
+- [ ] This task OWNS the hardened-dedicated-account ADR: author `docs/adr/0006-hardened-dedicated-account.md` (per `docs/adr/` numbering, following ADR-FORMAT) recording the durable decisions — account name `anon`, self-re-exec (not a wrapper, not setuid), always-redirect on a hardened install (option A), password-kept-by-default, and the netcage uid-scoped-store dependency. Sibling tasks EXTEND it; they do not re-create it.
+- [ ] This task PINS the new vocabulary in `CONTEXT.md`: add glossary entries for the dedicated `anon` account, the hardened deployment / DAC discoverability boundary, and self-re-exec, so the term cannot be re-forked (the old idea note drifted `netuser` vs `anon`).
 - [ ] Every change produces a changeset (`pnpm changeset`); the `verify` gate (`pnpm format:check && pnpm changeset status --since=main && pnpm -r build && pnpm -r test`) passes.
 
 ## Blocked by
