@@ -42,6 +42,14 @@ Env-prep (run once before the first verify on a fresh worktree) is
 `pnpm install --frozen-lockfile` (`.dorfl.json` `prepare`). Keep install OUT of
 `verify`.
 
+`pnpm changeset status --since=main` is the changeset check: it EXITS NON-ZERO
+(failing `verify`) when a TRACKED file under `packages/anon-pi/` changed with no
+changeset (source, tests, tsconfig, package.json — the package DIRECTORY, not the
+publish `files` list), and exits 0 when no such package file changed (so a
+`work/`-only, root-docs-only, or gitignored-`dist`/`README` change passes with
+no changeset). It compares against `main`, so it only sees what your branch
+changed.
+
 ## Domain
 
 See `CONTEXT.md` for the domain glossary (netcage, machine, project, home,
