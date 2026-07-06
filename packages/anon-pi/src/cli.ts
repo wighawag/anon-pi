@@ -103,7 +103,9 @@ import {
 	type ImageProvenance,
 	serializeConfigJson,
 	ANON_ACCOUNT,
-	shouldRedirectToAnon,
+	shouldRedirectToPersona,
+	resolvePersonaSelection,
+	stripAsFlag,
 	buildAnonSudoArgv,
 	evaluateHardenedPreflight,
 	planHardeningStep,
@@ -168,25 +170,44 @@ import {
 const ANON_PI_KEY_LABEL = 'anon-pi.key';
 
 function main(argv: string[]): number {
-	const args = argv.slice(2);
+	const rawArgs = argv.slice(2);
 
 	// `--version`/`-V` prints anon-pi's own version and exits (before the launch
-	// grammar, so it is never parsed as a project/flag). For pi's version inside
-	// the jail, forward it: `anon-pi pi --version`.
-	if (args[0] === '--version' || args[0] === '-V') {
+	// grammar AND before any persona selection/redirect, so it is never parsed as a
+	// project/flag and never prompts for sudo). For pi's version inside the jail,
+	// forward it: `anon-pi pi --version`.
+	if (rawArgs[0] === '--version' || rawArgs[0] === '-V') {
 		process.stdout.write(`anon-pi ${anonPiVersion() ?? '(unknown)'}\n`);
 		return 0;
 	}
 
-	// HARDENED SELF-RE-EXEC (docs/adr/0006, option A): on a hardened install EVERY
-	// login-user invocation redirects to the dedicated `anon` account by SPAWNING
-	// `sudo -u anon -i <anon-pi> "$@"` (never setuid, never a uid change). Only a
-	// caller ALREADY running as `anon` skips it (the loop guard). This is the very
-	// first thing a real invocation does, so nothing touches the login user's
-	// workspace before the crossing. `--version` above is intentionally local (a
-	// trivial string, no workspace access, no reason to prompt for sudo).
-	const redirect = maybeRedirectToAnon(args);
+	// MULTI-PERSONA SELF-RE-EXEC (prd `multi-persona-hardened-accounts`,
+	// superseding ADR-0006; generalizes docs/adr/0006 option A). On a hardened
+	// install EVERY login-user invocation redirects into the SELECTED persona
+	// account (`anon-<name>`, default `anon`) by SPAWNING `sudo -u <account> -i
+	// <anon-pi> "$@"` (never setuid, never a uid change); only a caller ALREADY
+	// running as that account skips it (the generalized loop guard). This is the
+	// very first thing a real invocation does, so nothing touches the login user's
+	// workspace before the crossing.
+	//
+	// `--as <name>` (parsed here) picks the persona: it must SURVIVE into the
+	// re-exec (so the child re-derives the same persona and does not loop) yet the
+	// argv netcage sees must NEVER carry it. So the redirect forwards the RAW args
+	// (with `--as`), and the child (already the account) STRIPS `--as` below before
+	// any subcommand dispatch / launch grammar / netcage. An unknown persona errors
+	// (never a silent create, never a fall-through to `anon`); an absent `--as` is
+	// the default `anon`, byte-behaviour-identical to v1.
+	const selectedAccount = resolveSelectedPersona(rawArgs);
+	if (selectedAccount === undefined) return 1; // selection error already reported.
+
+	const redirect = maybeRedirectToPersona(rawArgs, selectedAccount);
 	if (redirect !== undefined) return redirect;
+
+	// We are NOT redirecting (already running as the selected persona, or a
+	// non-hardened install): strip `--as <name>` so nothing downstream (subcommand
+	// dispatch, the launch grammar, netcage) ever sees it. On the no-`--as` default
+	// this is a no-op, so the default path is byte-identical to v1.
+	const args = stripAsFlag(rawArgs);
 
 	// The global `--help`/`-h` prints the top-level HELP, EXCEPT when the first
 	// token is a subcommand that owns its own `--help` (so `anon-pi init --help`
@@ -373,7 +394,7 @@ function anonPiBinaryPath(): string {
 
 /**
  * The `hardened` flag from the workspace config.json (absent/false = a normal
- * install). Read here (impure) and fed into shouldRedirectToAnon (pure).
+ * install). Read here (impure) and fed into shouldRedirectToPersona (pure).
  */
 function isHardenedInstall(): boolean {
 	const env = envFromProcess(process.env);
@@ -381,30 +402,78 @@ function isHardenedInstall(): boolean {
 }
 
 /**
- * The self-re-exec hook: on a hardened install, when the caller is NOT already
- * `anon`, SPAWN `sudo -u anon -i <anon-pi> "$@"` and return its exit code (so
- * main returns it and does nothing else); otherwise return undefined (proceed
- * normally). Loop-guarded: a caller already `anon` never redirects. Uses the
- * PURE shouldRedirectToAnon + buildAnonSudoArgv; the only I/O is the identity
- * probe, the binary-path lookup, and the spawn.
+ * Resolve the SELECTED persona ACCOUNT from `--as <name>` (default `anon`), or
+ * undefined when the selection is bad (the error is already printed, so main
+ * returns 1). The PURE resolvePersonaSelection owns the parse + charset error;
+ * the only I/O here is the account-existence probe (getent, via anonAccountHome)
+ * for a NON-default persona, so an unknown/unprovisioned `--as <name>` errors
+ * clearly ("no persona `<name>`; create it with `anon-pi persona add <name>`")
+ * instead of silently creating it or falling through to `anon`. The default
+ * `anon` (no `--as`) is NEVER existence-checked, preserving v1: an absent `anon`
+ * still surfaces as the sudo re-exec failure below, exactly as before.
  */
-function maybeRedirectToAnon(args: string[]): number | undefined {
-	const isAnon = currentUsername() === ANON_ACCOUNT;
-	if (!shouldRedirectToAnon({hardened: isHardenedInstall(), isAnon})) {
+function resolveSelectedPersona(args: readonly string[]): string | undefined {
+	// First pass: parse + charset only (no list injected, so no existence check).
+	const pre = resolvePersonaSelection({args});
+	if (pre.error) {
+		reportAnonPiError(pre.error);
+		return undefined;
+	}
+	// The default persona `anon` (no `--as`) is accepted verbatim (v1 behaviour).
+	if (pre.name === undefined) return pre.account;
+
+	// A NON-default `--as <name>`: verify the persona account EXISTS. Re-run the
+	// pure resolver with the real known list so it owns the unknown-persona message
+	// verbatim (the account is `known` only when getent finds it).
+	const personas = [ANON_ACCOUNT];
+	if (anonAccountHome(pre.account) !== undefined) personas.push(pre.account);
+	const sel = resolvePersonaSelection({args, personas});
+	if (sel.error) {
+		reportAnonPiError(sel.error);
+		return undefined;
+	}
+	return sel.account;
+}
+
+/**
+ * The self-re-exec hook, generalized to the SELECTED persona (prd
+ * `multi-persona-hardened-accounts`, superseding ADR-0006). On a hardened
+ * install, when the current account is NOT already the selected persona account,
+ * SPAWN `sudo -u <account> -i <anon-pi> "$@"` and return its exit code (so main
+ * returns it and does nothing else); otherwise return undefined (proceed
+ * normally). Loop-guarded via the PURE shouldRedirectToPersona: a caller already
+ * running as the selected account never redirects. The RAW args are forwarded
+ * (so `--as` SURVIVES into the re-exec and the child re-derives the same persona
+ * without looping); the only I/O is the identity probe, the binary-path lookup,
+ * and the spawn. The default `anon` path is byte-behaviour-identical to v1.
+ */
+function maybeRedirectToPersona(
+	args: readonly string[],
+	selectedAccount: string,
+): number | undefined {
+	const currentAccount = currentUsername() ?? '';
+	if (
+		!shouldRedirectToPersona({
+			hardened: isHardenedInstall(),
+			currentAccount,
+			selectedAccount,
+		})
+	) {
 		return undefined;
 	}
 	const argv = buildAnonSudoArgv({
 		anonPiPath: anonPiBinaryPath(),
 		forwardedArgs: args,
+		account: selectedAccount,
 	});
 	const [cmd, ...rest] = argv;
 	const res = spawnSync(cmd, rest, {stdio: 'inherit'});
 	if (res.error) {
 		process.stderr.write(
-			`anon-pi: failed to re-exec as \`${ANON_ACCOUNT}\` via sudo (${res.error.message}).\n` +
-				`This is a hardened install; anon-pi runs its workspace under the \`${ANON_ACCOUNT}\`\n` +
-				`account. Ensure sudo is configured (the Tier-2 script's sudoers rule) or use the\n` +
-				`fallback: \`su - ${ANON_ACCOUNT} -c 'anon-pi ${args.join(' ')}'\`.\n`,
+			`anon-pi: failed to re-exec as \`${selectedAccount}\` via sudo (${res.error.message}).\n` +
+				`This is a hardened install; anon-pi runs its workspace under the persona's\n` +
+				`dedicated account. Ensure sudo is configured (the Tier-2 sudoers rule) or use\n` +
+				`the fallback: \`su - ${selectedAccount} -c 'anon-pi ${args.join(' ')}'\`.\n`,
 		);
 		return 1;
 	}

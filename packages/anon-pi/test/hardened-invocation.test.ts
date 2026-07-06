@@ -99,6 +99,41 @@ describe('hardened invocation: buildAnonSuFallback (`su - anon -c` string form)'
 	});
 });
 
+describe('hardened invocation: buildAnonSudoArgv targets a SELECTED persona account', () => {
+	it('re-execs into `anon-<name>` when an account is passed (multi-persona)', () => {
+		const argv = buildAnonSudoArgv({
+			anonPiPath: '/usr/local/bin/anon-pi',
+			forwardedArgs: ['--as', 'alice', 'recon'],
+			account: 'anon-alice',
+		});
+		expect(argv).toEqual([
+			'sudo',
+			'-u',
+			'anon-alice',
+			'-i',
+			'/usr/local/bin/anon-pi',
+			'--as',
+			'alice',
+			'recon',
+		]);
+	});
+
+	it('defaults to `anon` when no account is passed (v1 byte-identical)', () => {
+		expect(
+			buildAnonSudoArgv({anonPiPath: '/opt/anon-pi', forwardedArgs: []}),
+		).toEqual(['sudo', '-u', ANON_ACCOUNT, '-i', '/opt/anon-pi']);
+	});
+
+	it('the su fallback also targets the selected persona account', () => {
+		const argv = buildAnonSuFallback({
+			anonPiPath: '/usr/local/bin/anon-pi',
+			forwardedArgs: ['--as', 'alice'],
+			account: 'anon-alice',
+		});
+		expect(argv.slice(0, 3)).toEqual(['su', '-', 'anon-alice']);
+	});
+});
+
 describe('hardened invocation: the account name is pinned', () => {
 	it('names the dedicated account `anon`', () => {
 		expect(ANON_ACCOUNT).toBe('anon');

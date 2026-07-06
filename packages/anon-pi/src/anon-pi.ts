@@ -3961,13 +3961,23 @@ export interface HardenedInvocation {
 	anonPiPath: string;
 	/** The args forwarded verbatim to the re-exec'd anon-pi (the login user's argv tail). */
 	forwardedArgs: readonly string[];
+	/**
+	 * The dedicated persona account to re-exec into. DEFAULTS to ANON_ACCOUNT
+	 * (`anon`) so v1's single-account callers stay byte-identical; multi-persona
+	 * passes the SELECTED account (`anon-<name>`, from resolvePersonaSelection) so
+	 * the crossing lands in the right persona. INJECTED, so this stays pure.
+	 */
+	account?: string;
 }
 
 /**
  * PURE: compose the PRIMARY re-exec argv, the login `-i` form:
- *   `['sudo', '-u', 'anon', '-i', '<abs-anon-pi-path>', ...forwardedArgs]`
- * The `-i` (login) shell so `$HOME`/`$XDG_RUNTIME_DIR`/env become `anon`'s (which
- * rootless podman under a lingering account needs). anon-pi re-execs by SPAWNING
+ *   `['sudo', '-u', '<account>', '-i', '<abs-anon-pi-path>', ...forwardedArgs]`
+ * The account DEFAULTS to `anon` (v1's single account); multi-persona passes the
+ * SELECTED persona account (`anon-<name>`), so the crossing lands in the right
+ * persona. The `-i` (login) shell so `$HOME`/`$XDG_RUNTIME_DIR`/env become the
+ * account's (which rootless podman under a lingering account needs). anon-pi
+ * re-execs by SPAWNING
  * `sudo` only: this builder EMITS a plain argv (the first token is always
  * `sudo`), never a uid change or a privilege syscall. The anon-pi path + args are
  * injected. cli.ts spawns this argv; this module never does.
@@ -3976,7 +3986,7 @@ export function buildAnonSudoArgv(inv: HardenedInvocation): string[] {
 	return [
 		'sudo',
 		'-u',
-		ANON_ACCOUNT,
+		inv.account ?? ANON_ACCOUNT,
 		'-i',
 		inv.anonPiPath,
 		...inv.forwardedArgs,
@@ -3994,9 +4004,11 @@ export function shellQuote(token: string): string {
 }
 
 /**
- * PURE: compose the documented FALLBACK re-exec argv, the `su - anon -c '<cmd>'`
- * form for boxes where sudoers is not configured:
- *   `['su', '-', 'anon', '-c', "'<abs-anon-pi>' '<arg>' …"]`
+ * PURE: compose the documented FALLBACK re-exec argv, the
+ * `su - <account> -c '<cmd>'` form for boxes where sudoers is not configured:
+ *   `['su', '-', '<account>', '-c', "'<abs-anon-pi>' '<arg>' …"]`
+ * The account DEFAULTS to `anon` (v1) and is the SELECTED persona account under
+ * multi-persona.
  * The command STRING is the shell-quoted anon-pi path followed by each
  * shell-quoted forwarded arg (shellQuote), so the login shell re-runs anon-pi
  * safely. Like the sudo form this only ever EMITS an argv (first token always
@@ -4006,7 +4018,7 @@ export function buildAnonSuFallback(inv: HardenedInvocation): string[] {
 	const command = [inv.anonPiPath, ...inv.forwardedArgs]
 		.map(shellQuote)
 		.join(' ');
-	return ['su', '-', ANON_ACCOUNT, '-c', command];
+	return ['su', '-', inv.account ?? ANON_ACCOUNT, '-c', command];
 }
 
 // --- Multi-persona: name<->account mapping, --as selection, generalized guard -
@@ -4227,6 +4239,31 @@ export function resolvePersonaSelection(
 		);
 	}
 	return sel;
+}
+
+/**
+ * PURE: STRIP the persona-selection flag from a launch argv, so netcage (and the
+ * launch grammar / subcommand dispatch) NEVER see `--as <name>`. Removes the
+ * FIRST `--as` and its following value (the persona name). A trailing `--as`
+ * with no value drops the flag alone (the impure layer already raises the
+ * missing-value error via resolvePersonaSelection before reaching netcage). An
+ * argv with no `--as` is returned unchanged, so the no-`--as` default is
+ * byte-identical to v1. Only the FIRST occurrence is stripped: the value after
+ * `--as` is a persona name (resolvePersonaSelection reads exactly that first
+ * flag), so a stray later `--as` is left for the launch grammar to reject.
+ *
+ * This is the argv-hygiene half of decision 2: the `--as` value must be stripped
+ * from the argv netcage sees, yet SURVIVE into the re-exec (the redirect forwards
+ * the RAW argv, and the re-exec'd child strips it here before composing the jail).
+ */
+export function stripAsFlag(args: readonly string[]): string[] {
+	const idx = args.indexOf(AS_FLAG);
+	if (idx === -1) return [...args];
+	const value = args[idx + 1];
+	// Drop the flag, and its value too UNLESS the value is missing / another flag
+	// (a malformed `--as` the impure layer errors on first): then drop the flag only.
+	const drop = value === undefined || value.startsWith('-') ? 1 : 2;
+	return [...args.slice(0, idx), ...args.slice(idx + drop)];
 }
 
 /** The injected inputs for the generalized self-re-exec loop guard. */
