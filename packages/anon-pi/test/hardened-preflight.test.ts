@@ -2,7 +2,6 @@ import {describe, it, expect} from 'vitest';
 import {
 	ANON_ACCOUNT,
 	NETCAGE_MIN_VERSION,
-	SUBID_RANGE_COUNT,
 	compareVersionTriples,
 	evaluateHardenedPreflight,
 	lingerRemediation,
@@ -111,10 +110,11 @@ describe('evaluateHardenedPreflight: each check pass/fail branch + exact remedia
 		expect(res.ok).toBe(false);
 		const f = res.failures.find((x) => x.id === 'subid');
 		expect(f?.remediation).toBe(subidRemediation(ANON_ACCOUNT));
-		// the remediation names the account, the two files, and the range count.
+		// the remediation names the account, the two files, and points at the
+		// `useradd -m` that auto-allocates the ranges (no hard-coded range count).
 		expect(f?.remediation).toContain('/etc/subuid');
 		expect(f?.remediation).toContain('/etc/subgid');
-		expect(f?.remediation).toContain(String(SUBID_RANGE_COUNT));
+		expect(f?.remediation).toContain(`useradd -m ${ANON_ACCOUNT}`);
 	});
 
 	it('FAILS the linger check with its exact remediation', () => {
