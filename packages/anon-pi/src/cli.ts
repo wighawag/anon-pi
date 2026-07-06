@@ -12,15 +12,20 @@
 // egress.
 
 import {
+	chmodSync,
 	cpSync,
 	existsSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from 'node:fs';
 import {readSync} from 'node:fs';
+import {userInfo} from 'node:os';
+import {fileURLToPath} from 'node:url';
 import {spawnSync, execFileSync} from 'node:child_process';
 import {join, dirname, resolve} from 'node:path';
 import {
@@ -97,6 +102,12 @@ import {
 	type ImageCommand,
 	type ImageProvenance,
 	serializeConfigJson,
+	ANON_ACCOUNT,
+	shouldRedirectToAnon,
+	buildAnonSudoArgv,
+	evaluateHardenedPreflight,
+	planHardeningStep,
+	type HardenedPreflightProbes,
 	setImageWarning,
 	launchIdentityKey,
 	DEFAULT_SOCKS_PROBE_PORTS,
@@ -156,6 +167,16 @@ function main(argv: string[]): number {
 		process.stdout.write(`anon-pi ${anonPiVersion() ?? '(unknown)'}\n`);
 		return 0;
 	}
+
+	// HARDENED SELF-RE-EXEC (docs/adr/0006, option A): on a hardened install EVERY
+	// login-user invocation redirects to the dedicated `anon` account by SPAWNING
+	// `sudo -u anon -i <anon-pi> "$@"` (never setuid, never a uid change). Only a
+	// caller ALREADY running as `anon` skips it (the loop guard). This is the very
+	// first thing a real invocation does, so nothing touches the login user's
+	// workspace before the crossing. `--version` above is intentionally local (a
+	// trivial string, no workspace access, no reason to prompt for sudo).
+	const redirect = maybeRedirectToAnon(args);
+	if (redirect !== undefined) return redirect;
 
 	// The global `--help`/`-h` prints the top-level HELP, EXCEPT when the first
 	// token is a subcommand that owns its own `--help` (so `anon-pi init --help`
@@ -284,6 +305,181 @@ function runFirstRunInit(): number {
 /** Whether an env value is present + non-blank. */
 function nonEmptyEnv(v: string | undefined): boolean {
 	return typeof v === 'string' && v.trim() !== '';
+}
+
+// --- the hardened deployment: impure wiring (docs/adr/0006) ------------------
+//
+// The THIN I/O layer around the pure hardened decisions (shouldRedirectToAnon /
+// buildAnonSudoArgv / evaluateHardenedPreflight / planHardeningStep). Every
+// OS-touching bit is isolated here so the pure module stays testable: the
+// "am I anon?" probe (userInfo), the anon-pi binary path (this entrypoint), the
+// account-home lookup (getent), the preflight probes (reading /etc/subuid,
+// loginctl, stat /dev/net/tun, netcage --version), and the mode-700 workspace
+// write. anon-pi only ever SPAWNS sudo/su for the crossing; it never sets a uid.
+
+/** The effective username, or undefined when it cannot be determined. */
+function currentUsername(): string | undefined {
+	try {
+		return userInfo().username;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The ABSOLUTE path to THIS anon-pi binary, to re-exec as `anon`. Prefer the
+ * installed `bin` (the `anon-pi` command on the account's PATH) so the sudoers
+ * rule (scoped to that path) matches; fall back to this cli.js entrypoint. The
+ * `anon` account must be able to resolve it, so a bare `anon-pi` on PATH is the
+ * canonical target.
+ */
+function anonPiBinaryPath(): string {
+	const which = spawnSync('command', ['-v', 'anon-pi'], {
+		encoding: 'utf8',
+		shell: true,
+	});
+	if (which.status === 0) {
+		const p = which.stdout.trim();
+		if (p) {
+			try {
+				return realpathSync(p);
+			} catch {
+				return p;
+			}
+		}
+	}
+	return fileURLToPath(import.meta.url);
+}
+
+/**
+ * The `hardened` flag from the workspace config.json (absent/false = a normal
+ * install). Read here (impure) and fed into shouldRedirectToAnon (pure).
+ */
+function isHardenedInstall(): boolean {
+	const env = envFromProcess(process.env);
+	return readJsonConfig(env).hardened === true;
+}
+
+/**
+ * The self-re-exec hook: on a hardened install, when the caller is NOT already
+ * `anon`, SPAWN `sudo -u anon -i <anon-pi> "$@"` and return its exit code (so
+ * main returns it and does nothing else); otherwise return undefined (proceed
+ * normally). Loop-guarded: a caller already `anon` never redirects. Uses the
+ * PURE shouldRedirectToAnon + buildAnonSudoArgv; the only I/O is the identity
+ * probe, the binary-path lookup, and the spawn.
+ */
+function maybeRedirectToAnon(args: string[]): number | undefined {
+	const isAnon = currentUsername() === ANON_ACCOUNT;
+	if (!shouldRedirectToAnon({hardened: isHardenedInstall(), isAnon})) {
+		return undefined;
+	}
+	const argv = buildAnonSudoArgv({
+		anonPiPath: anonPiBinaryPath(),
+		forwardedArgs: args,
+	});
+	const [cmd, ...rest] = argv;
+	const res = spawnSync(cmd, rest, {stdio: 'inherit'});
+	if (res.error) {
+		process.stderr.write(
+			`anon-pi: failed to re-exec as \`${ANON_ACCOUNT}\` via sudo (${res.error.message}).\n` +
+				`This is a hardened install; anon-pi runs its workspace under the \`${ANON_ACCOUNT}\`\n` +
+				`account. Ensure sudo is configured (the Tier-2 script's sudoers rule) or use the\n` +
+				`fallback: \`su - ${ANON_ACCOUNT} -c 'anon-pi ${args.join(' ')}'\`.\n`,
+		);
+		return 1;
+	}
+	return res.status ?? 1;
+}
+
+/**
+ * Look up the `anon` account's HOME dir (getent passwd), or undefined when the
+ * account does not exist yet. Used to point ANON_PI_HOME into the account's tree
+ * on the Tier-1 continue.
+ */
+function anonAccountHome(account: string): string | undefined {
+	const res = spawnSync('getent', ['passwd', account], {encoding: 'utf8'});
+	if (res.status !== 0) return undefined;
+	const fields = res.stdout.trim().split(':');
+	// passwd: name:passwd:uid:gid:gecos:home:shell
+	const home = fields[5];
+	return home && home.trim() !== '' ? home : undefined;
+}
+
+/**
+ * The real hardened-preflight probes (docs/adr/0006 story 6), each an isolated
+ * bit of I/O feeding the PURE evaluateHardenedPreflight. NONE of this logic
+ * lives in the pure module; the pure predicates only read these booleans. On a
+ * missing account the id-range / linger / runtime probes are simply false, which
+ * the preflight maps to the "account not provisioned" failures.
+ */
+function probeHardenedPreflight(account: string): HardenedPreflightProbes {
+	return {
+		subidRangesPresent:
+			subidRangePresent('/etc/subuid', account) &&
+			subidRangePresent('/etc/subgid', account),
+		lingerEnabled: probeLingerEnabled(account),
+		tunAccessible: probeTunAccessible(),
+		xdgRuntimeDirPresent: probeAccountRuntimeDir(account),
+		netcageVersion: probeNetcageVersion(),
+	};
+}
+
+/** True iff `<account>:...` has a range line in the given /etc/subuid|subgid file. */
+function subidRangePresent(file: string, account: string): boolean {
+	try {
+		const body = readFileSync(file, 'utf8');
+		return body
+			.split('\n')
+			.some((line) => line.trim().startsWith(`${account}:`));
+	} catch {
+		return false;
+	}
+}
+
+/** True iff linger is enabled for the account (loginctl show-user Linger=yes). */
+function probeLingerEnabled(account: string): boolean {
+	const res = spawnSync(
+		'loginctl',
+		['show-user', account, '--property=Linger'],
+		{encoding: 'utf8'},
+	);
+	if (res.status !== 0) return false;
+	return /Linger=yes/i.test(res.stdout);
+}
+
+/** True iff /dev/net/tun exists + is accessible (netcage needs it). */
+function probeTunAccessible(): boolean {
+	try {
+		statSync('/dev/net/tun');
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * True iff the account's $XDG_RUNTIME_DIR (/run/user/<uid>) is present. Resolves
+ * the account uid via getent, then stats the standard runtime path.
+ */
+function probeAccountRuntimeDir(account: string): boolean {
+	const res = spawnSync('getent', ['passwd', account], {encoding: 'utf8'});
+	if (res.status !== 0) return false;
+	const uid = res.stdout.trim().split(':')[2];
+	if (!uid) return false;
+	try {
+		statSync(`/run/user/${uid}`);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** The `netcage --version` output string, or undefined when netcage is absent. */
+function probeNetcageVersion(): string | undefined {
+	const res = spawnSync('netcage', ['--version'], {encoding: 'utf8'});
+	if (res.error || res.status !== 0) return undefined;
+	const out = `${res.stdout ?? ''}${res.stderr ?? ''}`.trim();
+	return out === '' ? undefined : out;
 }
 
 // --- the launch path --------------------------------------------------------
@@ -1863,6 +2059,12 @@ WHAT IT DOES
   3. IMAGE: pick a shipped Dockerfile (built via podman), an existing ref, or skip.
   4. PROJECTS ROOT: the host folder mounted at /projects (default ~/.anon-pi/
      projects); point it at your own dev folder, or keep the default.
+  5. HARDENED DEPLOYMENT (optional): run the whole workspace under a dedicated
+     \`anon\` Unix account (mode-700 home) so a host agent as your login user
+     cannot casually find your session transcripts. anon-pi prints a reviewable
+     root script for you to run with sudo (it never sudo's for you) and is
+     RESUMABLE across it. A DISCOVERABILITY boundary, not hard containment (root
+     or blanket sudo defeats it); day-to-day anon-pi self-re-execs as \`anon\`.
   Then writes ~/.anon-pi/config.json + the \`default\` machine. Never destroys homes.
 
   Runs AUTOMATICALLY the first time you launch anon-pi with no config yet.
@@ -1927,8 +2129,19 @@ function runInit(args: string[]): number {
 	//    projects). Overridable per-launch with `--mount`; this sets the default.
 	const projects = initProjectsStep(env, current.projects);
 
-	// 5) WRITE config.json + the `default` machine (never destroying an existing
+	// 5) HARDENING (docs/adr/0006): ask whether to run under the dedicated `anon`
+	//    account. If yes, the RESUMABLE Tier-1/Tier-2 flow runs (print the root
+	//    script -> wait -> re-check -> continue). ABORT propagates; a decline or a
+	//    non-hardened install leaves `hardened` unset. There is NO `harden` verb
+	//    and NO `--hardened` flag: hardening is this step INSIDE init. A caller
+	//    ALREADY running as `anon` (a hardened reconfigure) skips the prompt.
+	const hardenResult = initHardeningStep(env);
+	if (hardenResult === ABORT) return 1;
+	const hardened = hardenResult === true ? true : current.hardened;
+
+	// WRITE config.json + the `default` machine (never destroying an existing
 	//    home). The proxy is always present (we only reach here on a chosen proxy).
+	//    `hardened` is written only when the hardening step above completed.
 	const anonHome = resolveAnonPiHome(env);
 	mkdirSync(anonHome, {recursive: true});
 	const configPath = join(anonHome, 'config.json');
@@ -1937,6 +2150,7 @@ function runInit(args: string[]): number {
 		llm: llm ?? current.llm,
 		defaultMachine: current.defaultMachine ?? DEFAULT_MACHINE,
 		projects: projects ?? current.projects,
+		hardened: hardened === true ? true : undefined,
 	};
 	writeFileSync(configPath, serializeConfigJson(nextConfig));
 	process.stdout.write(`\nanon-pi: wrote ${configPath}.\n`);
@@ -2072,7 +2286,7 @@ const ABORT = Symbol('abort');
  */
 function initProxyStep(currentProxy: string | undefined): string | undefined {
 	process.stdout.write(
-		'Step 1/4 - proxy (the socks5h endpoint that anonymizes egress)\n',
+		'Step 1/5 - proxy (the socks5h endpoint that anonymizes egress)\n',
 	);
 	if (currentProxy) {
 		process.stdout.write(`  current: ${currentProxy}\n`);
@@ -2218,7 +2432,7 @@ function initLlmStep(
 	forceLocalApiKey: boolean,
 ): LlmStepResult | typeof ABORT {
 	process.stdout.write(
-		'\nStep 2/4 - local model endpoint (the ONE direct hole)\n',
+		'\nStep 2/5 - local model endpoint (the ONE direct hole)\n',
 	);
 	if (currentLlm) process.stdout.write(`  current: ${currentLlm}\n`);
 	const prefill = currentLlm
@@ -2400,7 +2614,7 @@ function initDefaultModelPicker(chosen: readonly GeneratedModel[]): string {
  */
 function initImageStep(): string | undefined | typeof ABORT {
 	process.stdout.write(
-		'\nStep 3/4 - default machine image (an image with `pi` on PATH)\n',
+		'\nStep 3/5 - default machine image (an image with `pi` on PATH)\n',
 	);
 	const menu = initImageMenu();
 	menu.forEach((e, i) => {
@@ -2472,7 +2686,7 @@ function initProjectsStep(
 	currentProjects: string | undefined,
 ): string | undefined {
 	process.stdout.write(
-		'\nStep 4/4 - projects root (the host folder mounted at /projects)\n',
+		'\nStep 4/5 - projects root (the host folder mounted at /projects)\n',
 	);
 	const builtin = builtinProjectsRoot(env);
 	const shown = currentProjects ?? builtin;
@@ -2495,6 +2709,109 @@ function initProjectsStep(
 	const chosen = resolve(expandTilde(trimmed, env.home));
 	if (chosen === builtin) return undefined;
 	return chosen;
+}
+
+/**
+ * The HARDENING step (docs/adr/0006): ask whether to run anon-pi under the
+ * dedicated `anon` account, and if yes walk the RESUMABLE Tier-1/Tier-2 flow.
+ * Returns:
+ *   - `true`  hardening was chosen AND completed (the account is provisioned +
+ *             the Tier-1 rootless setup ran) -> init marks `hardened: true`.
+ *   - `false` the user declined (or is already running as `anon`, or a probe is
+ *             unavailable) -> leave the install non-hardened.
+ *   - ABORT   the user aborted the flow (Ctrl-C / an empty prompt) -> init exits.
+ *
+ * The DECISION is the pure planHardeningStep over evaluateHardenedPreflight; this
+ * function is the thin loop that PROBES (probeHardenedPreflight), PRINTS the
+ * Tier-2 script + wait instruction, waits for the human to continue, RE-PROBES,
+ * and on pass performs the real Tier-1 workspace write (mkdir + chmod 700).
+ * Nothing here sudo's: anon-pi PRINTS the root script and the HUMAN runs it.
+ */
+function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
+	process.stdout.write(
+		'\nStep 5/5 - hardened deployment (optional)\n' +
+			`  Run anon-pi's whole workspace under a dedicated \`${ANON_ACCOUNT}\` Unix\n` +
+			'  account (mode-700 home), so a host coding agent running as your login\n' +
+			'  user cannot casually `find`/`grep` your anonymized session transcripts.\n' +
+			'  Crossing into it is DELIBERATE (a kept sudo password). This is a\n' +
+			'  DISCOVERABILITY boundary, NOT hard containment: root or blanket sudo\n' +
+			'  defeats it. Day to day, a hardened install self-re-execs as `' +
+			ANON_ACCOUNT +
+			'`.\n',
+	);
+
+	// A caller ALREADY running as `anon` (a hardened reconfigure) does not re-ask;
+	// the install is hardened by definition.
+	if (currentUsername() === ANON_ACCOUNT) {
+		process.stdout.write(
+			`  (already running as \`${ANON_ACCOUNT}\`; keeping the hardened deployment.)\n`,
+		);
+		return true;
+	}
+
+	const ans = promptLine(
+		`  Run under the dedicated \`${ANON_ACCOUNT}\` account? [y/N] `,
+	);
+	if (ans === undefined) return false; // Enter = keep the default (no hardening).
+	if (!/^y(es)?$/i.test(ans.trim())) return false;
+
+	const loginUser = currentUsername() ?? 'your-login-user';
+	const anonPiPath = anonPiBinaryPath();
+
+	// The RESUMABLE loop: probe -> plan -> (print script + wait + re-probe) | continue.
+	for (;;) {
+		const preflight = evaluateHardenedPreflight(
+			probeHardenedPreflight(ANON_ACCOUNT),
+			ANON_ACCOUNT,
+		);
+		// The Tier-1 workspace home: under the `anon` account's tree when it exists,
+		// else a placeholder (only reached on the passing branch, where it exists).
+		const accountHome = anonAccountHome(ANON_ACCOUNT);
+		const anonWorkspace = accountHome
+			? join(accountHome, '.anon-pi')
+			: resolveAnonPiHome(env);
+		const plan = planHardeningStep({
+			preflight,
+			account: ANON_ACCOUNT,
+			loginUser,
+			anonPiPath,
+			anonHome: anonWorkspace,
+		});
+
+		if (plan.kind === 'continue-tier1') {
+			// Tier 1 (rootless): create the account's workspace mode-700. NO wrapper
+			// file is written; NETCAGE_GRAPHROOT is never set (the uid-scoped store
+			// handles itself). In tests ANON_PI_HOME is a temp dir, so this touches
+			// only the isolated workspace.
+			mkdirSync(plan.anonHome, {recursive: true});
+			chmodSync(plan.anonHome, plan.mode);
+			process.stdout.write(
+				`  anon-pi: hardened workspace ready at ${plan.anonHome} (mode 0700).\n` +
+					`  Day-to-day \`anon-pi …\` now self-re-execs as \`${ANON_ACCOUNT}\`.\n`,
+			);
+			return true;
+		}
+
+		// wait-for-account: PRINT the reviewable Tier-2 script + the instruction,
+		// then wait for the human to run it (in another terminal) and continue. On
+		// continue we loop and RE-PROBE (resumability: the state is the OS, not a
+		// flag). An empty continue-prompt aborts the hardening flow.
+		process.stdout.write('\n' + plan.script + '\n');
+		process.stdout.write(plan.instruction + '\n\n');
+		for (const f of plan.failures) {
+			process.stdout.write(`  - ${f.remediation}\n`);
+		}
+		const cont = promptLine(
+			`\n  Run the script above with sudo in another terminal, then press Enter to\n` +
+				`  re-check (or type \`skip\` to install non-hardened): `,
+		);
+		if (cont === undefined) {
+			// Enter with nothing: re-check once more (the common "I ran it" case).
+			continue;
+		}
+		if (/^skip$/i.test(cont.trim())) return false;
+		// any other input: loop and re-probe.
+	}
 }
 
 /**

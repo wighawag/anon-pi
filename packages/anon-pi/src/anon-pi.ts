@@ -577,6 +577,13 @@ export interface AnonPiConfig {
 	defaultMachine?: string;
 	/** Override the projects root (host dir mounted at /projects). */
 	projects?: string;
+	/**
+	 * True iff this install is CONFIGURED-HARDENED: the whole workspace runs under
+	 * the dedicated `anon` account and every login-user invocation self-re-execs
+	 * as `anon` (docs/adr/0006). Set by `init`'s hardening step; read by the launch
+	 * entry (shouldRedirectToAnon). Absent/false = a normal (non-hardened) install.
+	 */
+	hardened?: boolean;
 }
 
 /** Parsed shape of a per-machine machine.json. All fields optional. */
@@ -594,6 +601,13 @@ function strField(o: unknown, key: string): string | undefined {
 	return typeof v === 'string' ? v : undefined;
 }
 
+/** Pick a boolean field from a parsed-JSON object, or undefined if absent/non-boolean. */
+function boolField(o: unknown, key: string): boolean | undefined {
+	if (!o || typeof o !== 'object') return undefined;
+	const v = (o as Record<string, unknown>)[key];
+	return typeof v === 'boolean' ? v : undefined;
+}
+
 /**
  * PURE: parse an already-JSON-decoded config.json value into an AnonPiConfig,
  * keeping only the known string fields (defensive against a hand-edited file).
@@ -609,6 +623,8 @@ export function parseConfigJson(raw: unknown): AnonPiConfig {
 	if (defaultMachine !== undefined) out.defaultMachine = defaultMachine;
 	const projects = strField(raw, 'projects');
 	if (projects !== undefined) out.projects = projects;
+	const hardened = boolField(raw, 'hardened');
+	if (hardened !== undefined) out.hardened = hardened;
 	return out;
 }
 
@@ -3261,6 +3277,8 @@ export function initImageMenu(): InitImageMenuEntry[] {
  * serializeMachineJson, so a browsed ~/.anon-pi/config.json reads cleanly. The
  * proxy is REQUIRED (init only reaches here after a verified proxy), so it is
  * always present; llm / defaultMachine / projects are included when set.
+ * `hardened` is written ONLY when true (a normal install omits it, so a browsed
+ * config.json stays clean; absent = non-hardened).
  */
 export function serializeConfigJson(config: AnonPiConfig): string {
 	const out: AnonPiConfig = {};
@@ -3272,6 +3290,7 @@ export function serializeConfigJson(config: AnonPiConfig): string {
 	if (defaultMachine !== undefined) out.defaultMachine = defaultMachine;
 	const projects = nonEmpty(config.projects);
 	if (projects !== undefined) out.projects = projects;
+	if (config.hardened === true) out.hardened = true;
 	return JSON.stringify(out, null, '\t') + '\n';
 }
 
@@ -4367,6 +4386,129 @@ export function evaluateHardenedPreflight(
 		});
 	}
 	return {ok: failures.length === 0, failures};
+}
+
+// --- The resumable hardening-step ORCHESTRATOR (docs/adr/0006, prd stories 1,5-8)
+//
+// The PURE decision that stitches the three pieces above (preflight, Tier-2
+// script, Tier-1 plan) into the resumable `init` hardening step. Given the
+// injected preflight RESULT (over real probes computed by cli.ts) plus the
+// account/login-user/binary inputs, it decides the ONE next action of the step:
+//
+//   - preflight FAILS  => the `anon` account is missing/half-provisioned. Emit
+//     the Tier-2 provisioning SCRIPT (buildTier2ProvisioningScript) plus a
+//     "run it with sudo in another terminal, then continue" instruction, and
+//     signal WAIT. The impure loop prints these, waits, RE-PROBES, and calls
+//     this again (resumability: the state lives in the OS, not a flag — a
+//     re-run just re-evaluates the fresh preflight).
+//   - preflight PASSES => proceed with Tier 1: point `ANON_PI_HOME` into the
+//     `anon` account's tree (mode-700) and finish. NO wrapper file is produced
+//     (self-re-exec replaces it) and `NETCAGE_GRAPHROOT` is NEVER set.
+//
+// It is a pure function over the injected preflight result + paths: cli.ts does
+// the real probing, printing, waiting, and the mode-700 workspace write. This
+// keeps the resumable decision unit-testable at a single seam (missing-account
+// -> print-and-wait; passing -> continue) with no sudo/podman/netcage/loginctl.
+
+/** The injected inputs the hardening-step orchestrator decides over. */
+export interface HardeningStepInputs {
+	/** The preflight RESULT cli.ts computed over the real probes (evaluateHardenedPreflight). */
+	preflight: HardenedPreflightResult;
+	/** The dedicated account to provision/run under (canonically ANON_ACCOUNT = `anon`). */
+	account: string;
+	/** The login user the Tier-2 sudoers rule is scoped to (from the impure `whoami`). */
+	loginUser: string;
+	/** The ABSOLUTE anon-pi binary path the Tier-2 sudoers rule scopes to (injected). */
+	anonPiPath: string;
+	/**
+	 * The ABSOLUTE ANON_PI_HOME under the `anon` account's tree (mode-700 on
+	 * continue). cli.ts resolves it (e.g. `~anon/.anon-pi`) from the real account
+	 * home; injected so the plan stays pure.
+	 */
+	anonHome: string;
+	/**
+	 * Opt-in `--nopasswd` forwarded to the Tier-2 generator (OFF by default: the
+	 * kept sudo password is the deliberate-crossing feature, ADR-0006).
+	 */
+	nopasswd?: boolean;
+}
+
+/**
+ * `wait-for-account`: the `anon` account is missing/half-provisioned. cli.ts
+ * PRINTS `script` (the reviewable Tier-2 root script) + `instruction`, then
+ * waits for the human to run it and continue; on continue it RE-PROBES and
+ * re-plans. `failures` echoes the exact preflight remediations so the caller can
+ * show precisely what is missing.
+ */
+export interface HardeningWaitPlan {
+	kind: 'wait-for-account';
+	/** The Tier-2 provisioning SCRIPT text to print (never executed by anon-pi). */
+	script: string;
+	/** The "run it with sudo, then continue" instruction to print alongside the script. */
+	instruction: string;
+	/** The ordered preflight failures (each with its exact remediation) driving the wait. */
+	failures: HardenedPreflightFailure[];
+}
+
+/**
+ * `continue-tier1`: the preflight passed, so proceed with the rootless Tier-1
+ * setup: point `ANON_PI_HOME` at `anonHome` (under the account's tree) and apply
+ * mode `0o700`. NO wrapper file is produced (self-re-exec replaces it) and
+ * `NETCAGE_GRAPHROOT` is never set. cli.ts performs the real mkdir + chmod.
+ */
+export interface HardeningContinuePlan {
+	kind: 'continue-tier1';
+	/** The ABSOLUTE ANON_PI_HOME under the `anon` account's tree to create + own. */
+	anonHome: string;
+	/** The mode Tier 1 applies to `anonHome` (mode-700: only the account may read it). */
+	mode: number;
+}
+
+/** The next action of the resumable hardening step: wait for the account, or continue Tier 1. */
+export type HardeningStepPlan = HardeningWaitPlan | HardeningContinuePlan;
+
+/** The mode Tier 1 applies to the `anon` workspace: 0o700 (only the account reads it). */
+export const HARDENED_HOME_MODE = 0o700;
+
+/**
+ * PURE: decide the next action of the resumable `init` hardening step over the
+ * INJECTED preflight result. When the preflight FAILS (the `anon` account is
+ * missing or half-provisioned) it returns a `wait-for-account` plan carrying the
+ * Tier-2 script to print + a run-it-then-continue instruction + the exact
+ * failures; the impure loop prints, waits, RE-PROBES, and calls this again (the
+ * resumable state is the OS itself, so a re-run just re-evaluates a fresh
+ * preflight — idempotent, no continue-flag to persist). When the preflight
+ * PASSES it returns a `continue-tier1` plan (point `ANON_PI_HOME` into the
+ * account's tree at mode 0o700, no wrapper file, no `NETCAGE_GRAPHROOT`).
+ * Nothing here spawns, probes, or touches the fs.
+ */
+export function planHardeningStep(
+	inputs: HardeningStepInputs,
+): HardeningStepPlan {
+	const {preflight, account, loginUser, anonPiPath, anonHome, nopasswd} =
+		inputs;
+	if (preflight.ok) {
+		return {kind: 'continue-tier1', anonHome, mode: HARDENED_HOME_MODE};
+	}
+	const script = buildTier2ProvisioningScript({
+		account,
+		loginUser,
+		anonPiPath,
+		nopasswd,
+	});
+	const instruction =
+		`anon-pi: the \`${account}\` account is not fully provisioned yet. The ` +
+		`root-requiring steps are the script ABOVE: review it, then run it with ` +
+		`sudo in ANOTHER terminal (anon-pi never sudo's for you):\n` +
+		`  sudo sh -c '<paste the script>'\n` +
+		`When it finishes, come back here and continue — anon-pi RE-CHECKS the ` +
+		`account (the preflight) and proceeds once it exists.`;
+	return {
+		kind: 'wait-for-account',
+		script,
+		instruction,
+		failures: preflight.failures,
+	};
 }
 
 /** The --help text (kept here so it is covered by the same module). */
