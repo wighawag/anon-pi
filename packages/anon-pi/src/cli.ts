@@ -40,6 +40,7 @@ import {
 	buildMenuChoiceList,
 	buildMenuEntries,
 	builtinProjectsRoot,
+	imageTagPresent,
 	deriveProjectUsage,
 	expandTilde,
 	findingsFromNetcageDetect,
@@ -2946,6 +2947,28 @@ function initImageStep(): string | undefined | typeof ABORT {
 			choice === 'basic'
 				? 'localhost/anon-pi/pi:latest'
 				: 'localhost/anon-pi/pi-webveil:latest';
+		// SKIP-IF-EXISTS: this tag is fixed per shipped Dockerfile, and building it
+		// is expensive (apt + npm + pip, minutes). If it is ALREADY in netcage's
+		// store, offer to REUSE it (default) instead of rebuilding every `init`. A
+		// re-run of `init` (e.g. after an anon-pi upgrade) thus does not silently
+		// re-trigger a long build. Answer `n`/rebuild to force a fresh build (e.g. to
+		// pick up a new pi / SearXNG). The probe fails toward building, never toward a
+		// stale skip.
+		if (netcageImageExists(tag)) {
+			process.stdout.write(`  ${tag} already exists in netcage's store.\n`);
+			const reuse = promptLine(
+				'  Reuse it (skip the rebuild)? [Y/n] (n = rebuild fresh) ',
+			);
+			if (reuse === undefined) {
+				process.stderr.write('anon-pi: aborted; nothing written.\n');
+				return ABORT;
+			}
+			if (!/^n(o)?$/i.test(reuse.trim())) {
+				process.stdout.write(`  Reusing ${tag} (no rebuild).\n`);
+				return tag;
+			}
+			process.stdout.write('  Rebuilding fresh...\n');
+		}
 		const built = buildImage(dockerfile, tag);
 		if (!built) {
 			process.stdout.write('  Build failed; pick another option.\n');
@@ -4176,6 +4199,34 @@ function firstString(...vals: unknown[]): string | undefined {
 		if (typeof v === 'string' && v.trim() !== '') return v;
 	}
 	return undefined;
+}
+
+/**
+ * Best-effort: is `tag` already present in netcage's image store? Reads `netcage
+ * images --format json` and matches with the PURE imageTagPresent (tolerant of
+ * the `localhost/` prefix + implicit `:latest`). Returns false on ANY failure
+ * (older netcage without `images`, a parse miss, no netcage): the caller then
+ * just builds, so a probe miss can never SKIP a needed build (fail toward
+ * building, never toward a stale skip).
+ */
+function netcageImageExists(tag: string): boolean {
+	const res = spawnSync('netcage', ['images', '--format', 'json'], {
+		encoding: 'utf8',
+	});
+	if (res.error || res.status !== 0 || !res.stdout) return false;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(res.stdout);
+	} catch {
+		return false;
+	}
+	if (!Array.isArray(parsed)) return false;
+	const allTags: string[] = [];
+	for (const raw of parsed) {
+		if (raw === null || typeof raw !== 'object') continue;
+		allTags.push(...imageTags(raw as Record<string, unknown>));
+	}
+	return imageTagPresent(allTags, tag);
 }
 
 /**

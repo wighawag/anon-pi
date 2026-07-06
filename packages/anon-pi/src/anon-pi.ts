@@ -3394,6 +3394,33 @@ export function shippedWebveilDockerfilePath(): string | undefined {
 }
 
 /**
+ * PURE: does the image tag list already contain `want`? Used by `init` to SKIP a
+ * redundant rebuild of a shipped image tag (`localhost/anon-pi/pi[-webveil]:
+ * latest`) that is already in netcage's store. Podman/netcage may or may not
+ * carry the `localhost/` registry prefix on a locally-built tag (and a bare
+ * `repo:tag` with no `:tag` implies `:latest`), so both sides are NORMALIZED
+ * (drop a leading `localhost/`, default a missing `:tag` to `:latest`) before an
+ * exact compare. Keeps the store-vs-wanted match testable; the actual `netcage
+ * images` read is cli.ts's job.
+ */
+export function imageTagPresent(
+	tags: readonly string[],
+	want: string,
+): boolean {
+	const norm = (t: string): string => {
+		let s = t.trim();
+		if (s.startsWith('localhost/')) s = s.slice('localhost/'.length);
+		// A ref with no `:tag` (and not a bare digest) means `:latest`. Only add it
+		// when the LAST path segment carries no tag colon.
+		const lastSeg = s.slice(s.lastIndexOf('/') + 1);
+		if (!lastSeg.includes(':') && !lastSeg.includes('@')) s = `${s}:latest`;
+		return s;
+	};
+	const target = norm(want);
+	return tags.some((t) => norm(t) === target);
+}
+
+/**
  * Resolve a file shipped in the package root, from this module's location
  * (package root is one level up from dist/anon-pi.js). Returns undefined if it
  * cannot be found or import.meta.url is unavailable.

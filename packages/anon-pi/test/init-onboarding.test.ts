@@ -21,6 +21,7 @@ import {
 	parseVerifyExitIp,
 	verifyEgressAssertionPassed,
 	NETCAGE_EGRESS_ASSERTION,
+	imageTagPresent,
 	processHint,
 	serializeConfigJson,
 	socks5hUrl,
@@ -314,6 +315,33 @@ describe('verifyEgressAssertionPassed (the anonymity proof, load-bearing for ini
 
 	it('is FALSE when the egress assertion is ABSENT (netcage could not prove egress)', () => {
 		expect(verifyEgressAssertionPassed('verify errored: offline?')).toBe(false);
+	});
+});
+
+describe('imageTagPresent (skip-if-exists tag match, tolerant of localhost/ + :latest)', () => {
+	const want = 'localhost/anon-pi/pi-webveil:latest';
+
+	it('matches the exact tag', () => {
+		expect(imageTagPresent([want], want)).toBe(true);
+	});
+
+	it('matches when the store drops the `localhost/` prefix', () => {
+		expect(imageTagPresent(['anon-pi/pi-webveil:latest'], want)).toBe(true);
+	});
+
+	it('matches when the store omits the implicit `:latest`', () => {
+		expect(imageTagPresent(['localhost/anon-pi/pi-webveil'], want)).toBe(true);
+	});
+
+	it('does NOT match a different image or a different tag', () => {
+		expect(imageTagPresent(['localhost/anon-pi/pi:latest'], want)).toBe(false);
+		expect(imageTagPresent(['localhost/anon-pi/pi-webveil:v2'], want)).toBe(
+			false,
+		);
+	});
+
+	it('is false for an empty store', () => {
+		expect(imageTagPresent([], want)).toBe(false);
 	});
 });
 
