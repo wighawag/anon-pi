@@ -4266,6 +4266,124 @@ export function shouldRedirectToPersona(
 	return inputs.currentAccount !== inputs.selectedAccount;
 }
 
+// --- Per-persona fail-closed egress: the Tor URL composer + the offer-Tor
+// predicate (prd `multi-persona-hardened-accounts`, decisions 3 + 4 + 5,
+// superseding ADR-0006) -------------------------------------------------------
+//
+// v1 had ONE global proxy. Multi-persona gives EACH persona its OWN socks5h
+// endpoint, so two personas never share an exit IP (the isolation that matters
+// most). There are two ways to obtain a per-persona endpoint:
+//   (1) Tor multi-persona: reuse ONE running Tor, but hand it the persona's
+//       ACCOUNT NAME as the SOCKS-isolation USERNAME. Tor's `IsolateSOCKSAuth`
+//       (on by default) then builds a SEPARATE circuit + exit per distinct SOCKS
+//       username, so each persona gets an independent, auto-managed,
+//       auto-expiring circuit for free (idle circuits tear down at
+//       `MaxCircuitDirtiness` ~600s and rebuild on next use), at near-zero
+//       marginal cost (a circuit is state in the one daemon, not a process).
+//   (2) bring-your-own socks5h endpoint (a distinct wireproxy / `ssh -D` port).
+//
+// composeTorPersonaProxy is the PURE composer for path (1): account + host:port
+// in, the literal `socks5h://<account>:x@<host:port>` out. `persona add` calls
+// it ONCE at creation and stores the result verbatim in the persona's OWN
+// config.json `proxy` field (decision 5): after that it is a plain v1 `proxy`
+// string read by resolveProxy like any other, with NO launch-time re-derivation
+// and NO schema marker. offerTor is the PURE predicate over an INJECTED
+// Tor-detection probe (the real probe reuses init's SOCKS / `netcage
+// detect-proxy` seam, wired in cli.ts): it decides WHEN `persona add` offers the
+// Tor path. Fail-closed per persona is just v1's resolveProxy / PROXY_REQUIRED
+// _MESSAGE now reading the PERSONA's own config (the re-exec into the account
+// makes `resolveAnonPiHome` land in the persona's home before config is read),
+// so a persona with no resolvable proxy REFUSES byte-identically to v1 and never
+// falls back to another persona's proxy or to none. Netcage's forced-egress
+// invariant is UNCHANGED: still exactly one socks5h forced per launch,
+// fail-closed; this only picks WHICH one. No `NETCAGE_GRAPHROOT`. All pure +
+// injected: nothing here spawns, probes a socket, or touches the fs.
+
+/**
+ * The ignored placeholder PASSWORD in a Tor multi-persona SOCKS URL. Tor's
+ * `IsolateSOCKSAuth` isolates on the USERNAME (the persona account); the
+ * password is never checked, so a single, obvious placeholder is used. Pinned as
+ * a constant so the composer and its test agree and it can never silently drift.
+ * (See prd `multi-persona-hardened-accounts` Further Notes: "the password is an
+ * ignored placeholder".)
+ */
+export const TOR_PLACEHOLDER_PASSWORD = 'x';
+
+/**
+ * The DEFAULT Tor SOCKS host:port a persona's egress is composed against: the
+ * system-tor listener `127.0.0.1:9050` (DEFAULT_SOCKS_PROBE_PORTS' first entry).
+ * A custom host:port (e.g. `127.0.0.1:9150` for a Tor Browser bundle) is passed
+ * explicitly. Pinned so the composer default and its test agree.
+ */
+export const DEFAULT_TOR_SOCKS_HOST_PORT = '127.0.0.1:9050';
+
+/**
+ * PURE: compose a persona's Tor multi-persona egress URL,
+ * `socks5h://<account>:x@<host:port>`, injecting the persona's ACCOUNT NAME as
+ * the SOCKS-isolation USERNAME so Tor's `IsolateSOCKSAuth` gives THIS persona its
+ * own circuit/exit (two personas on the SAME Tor endpoint get distinct exits
+ * purely because their usernames differ). The password is the ignored
+ * placeholder `x` (TOR_PLACEHOLDER_PASSWORD). `hostPort` defaults to
+ * DEFAULT_TOR_SOCKS_HOST_PORT (`127.0.0.1:9050`) and is normalised via
+ * hostPortKey (scheme/path/userinfo stripped), so a caller that passes a full
+ * `socks5h://…` URL never yields `socks5h://socks5h://…`.
+ *
+ * The result is a PLAIN LITERAL socks5h string with NO schema marker: `persona
+ * add` stores it verbatim in the persona's own config.json `proxy` field once,
+ * and every later launch reads it as an ordinary v1 `proxy` (resolveProxy).
+ * There is NO launch-time re-derivation. Pure: account + host:port in, string
+ * out; nothing here probes Tor or touches the fs.
+ *
+ * The account must be non-empty (there is no isolation username to inject
+ * otherwise): an empty/whitespace-only account throws AnonPiError. The account
+ * is expected to already be a validated persona account (personaAccount), so no
+ * further charset validation is done here.
+ */
+export function composeTorPersonaProxy(
+	account: string,
+	hostPort: string = DEFAULT_TOR_SOCKS_HOST_PORT,
+): string {
+	const acct = account.trim();
+	if (acct === '') {
+		throw new AnonPiError(
+			'anon-pi: cannot compose a Tor persona proxy without a persona account ' +
+				'(the account is the SOCKS-isolation username).',
+		);
+	}
+	return `socks5h://${acct}:${TOR_PLACEHOLDER_PASSWORD}@${hostPortKey(hostPort)}`;
+}
+
+/**
+ * The INJECTED Tor-detection probe RESULT `offerTor` decides over: whether a
+ * SOCKS port responded (`open`) and whether it spoke SOCKS5 (`socks5`). This is
+ * the shape the impure probe in cli.ts produces by reusing init's SOCKS handshake
+ * / `netcage detect-proxy` seam (a ProxyFinding's `open` + `handshake.socks5`,
+ * or a NetcageDetectProxy candidate's `open` + `socks5`, collapsed to this pair).
+ * Kept as a tiny explicit shape so the pure predicate never depends on the full
+ * probe machinery. `undefined` represents "no detection performed".
+ */
+export interface TorDetection {
+	/** Whether the probed Tor SOCKS port was open (a TCP connection succeeded). */
+	open: boolean;
+	/** Whether the open port completed a SOCKS5 handshake (only meaningful when open). */
+	socks5?: boolean;
+}
+
+/**
+ * PURE: decide whether `persona add` should OFFER the Tor multi-persona path,
+ * over an INJECTED Tor-detection probe result. Offer Tor ONLY when a running Tor
+ * SOCKS proxy was actually observed: the port is open AND it completed a SOCKS5
+ * handshake. A closed port, an open-but-not-SOCKS5 port, or no detection at all
+ * (`undefined`) does NOT offer Tor (the user falls through to the bring-your-own
+ * SOCKS path). This never guesses: it offers Tor only on positive evidence, and
+ * the ACTUAL egress is still fail-closed (a persona with no resolved proxy
+ * refuses, whether or not Tor was offered). Pure: it decides only over the
+ * injected result; the socket/`netcage` probe is cli.ts's job.
+ */
+export function offerTor(detection: TorDetection | undefined): boolean {
+	return detection !== undefined && detection.open && detection.socks5 === true;
+}
+
 // --- The Tier-2 root-provisioning COMMAND generator (prd
 // `multi-persona-hardened-accounts`, decisions 0 + 8, superseding ADR-0006) ----
 //
