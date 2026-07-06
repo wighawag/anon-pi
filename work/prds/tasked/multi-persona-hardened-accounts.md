@@ -73,6 +73,10 @@ anon-pi implements no privilege-switching (it spawns `sudo`/`su`), never silentl
 - **`humanOnly: true`:** SET. A security boundary + a multi-account provisioning + egress-isolation design; a human ratifies the model (selection, egress, storage, provisioning) before tasking.
 - **`needsAnswers: false`:** CLEARED. Both formerly-open decisions are settled (subuid allocation = let `useradd` auto-allocate; `anon` = uniform default persona, not special-cased). Ready to task.
 
+## Tasked
+
+This PRD has been tasked into `work/tasks/` (slugs: `persona-name-mapping-and-selection`, `persona-tier2-commands-generator`, `persona-tor-egress-composition`, `persona-add-verb-wiring`, `persona-as-launch-selection-wiring`, `persona-adr-and-docs`). The durable decisions move to `docs/adr/0007-multi-persona-hardened-accounts.md` (superseding ADR-0006) at build time. The Confirmed decisions above are retained as the durable framing those tasks and the ADR formalize.
+
 ## Out of Scope
 
 - **Persona identity/credentials (email, git config, keys).** Configured inside the persona's home (container/home config), not by anon-pi. anon-pi provides the isolated account + workspace + egress; the persona is what you configure in it.
