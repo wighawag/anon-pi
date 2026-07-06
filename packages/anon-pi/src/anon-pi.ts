@@ -3880,6 +3880,112 @@ export function envFromProcess(
 	};
 }
 
+// --- The hardened self-re-exec invocation (docs/adr/0006) --------------------
+//
+// On a HARDENED install anon-pi's whole workspace lives under a single dedicated
+// Unix account named `anon` (a DAC discoverability boundary: a host agent running
+// as the login user cannot casually `find`/`grep` the session transcripts). There
+// is NO wrapper script: anon-pi is its OWN wrapper. When the login user runs
+// anon-pi on a hardened box, it RE-EXECS ITSELF as `anon` by SPAWNING `sudo`
+// (never setuid, never a raw uid change; anon-pi ships no setuid binary and sets
+// no uid). Auto-redirect is ALWAYS on a hardened install (option A): every
+// login-user invocation redirects; only a caller that already IS `anon` skips it
+// (the loop guard). This module owns ONLY the PURE decision + argv/string
+// composition: the "am I anon?" identity probe and the anon-pi path are INJECTED
+// seams (like the `exists` probe elsewhere), so nothing here spawns or touches
+// the process. cli.ts (a later task) does the actual exec.
+
+/**
+ * The single dedicated Unix account name the hardened deployment runs under
+ * (prd `hardened-dedicated-account-deployment`, docs/adr/0006). One canonical
+ * name, pinned here so it can never be re-forked (the old idea note drifted
+ * `netuser` vs `anon`).
+ */
+export const ANON_ACCOUNT = 'anon';
+
+/** The injected identity + hardened-flag inputs for the should-redirect predicate. */
+export interface RedirectInputs {
+	/** Whether THIS install is configured-hardened (runs under the `anon` account). */
+	hardened: boolean;
+	/**
+	 * Whether the current effective user already IS the `anon` account. INJECTED
+	 * (the impure `getuid`/username probe lives in cli.ts), so this stays pure.
+	 */
+	isAnon: boolean;
+}
+
+/**
+ * PURE: decide whether anon-pi must re-exec itself as the dedicated `anon`
+ * account. On a HARDENED install redirect is ALWAYS chosen when the caller is
+ * NOT already `anon` (option A: there is no non-hardened bypass on a hardened
+ * box). When the caller already IS `anon` it must NOT redirect (else an infinite
+ * self-re-exec loop). A non-hardened install never redirects. Both inputs are
+ * injected (RedirectInputs), so this calls no `getuid`/`whoami` and spawns
+ * nothing; the actual exec is cli.ts's job.
+ */
+export function shouldRedirectToAnon(inputs: RedirectInputs): boolean {
+	if (!inputs.hardened) return false;
+	return !inputs.isAnon;
+}
+
+/** The injected inputs for the invocation argv/string builders. */
+export interface HardenedInvocation {
+	/**
+	 * The ABSOLUTE path to the anon-pi binary to re-exec (resolved by the caller,
+	 * NOT hard-coded here; cli.ts derives it from its own entrypoint). Injected so
+	 * the builder stays pure/testable.
+	 */
+	anonPiPath: string;
+	/** The args forwarded verbatim to the re-exec'd anon-pi (the login user's argv tail). */
+	forwardedArgs: readonly string[];
+}
+
+/**
+ * PURE: compose the PRIMARY re-exec argv, the login `-i` form:
+ *   `['sudo', '-u', 'anon', '-i', '<abs-anon-pi-path>', ...forwardedArgs]`
+ * The `-i` (login) shell so `$HOME`/`$XDG_RUNTIME_DIR`/env become `anon`'s (which
+ * rootless podman under a lingering account needs). anon-pi re-execs by SPAWNING
+ * `sudo` only: this builder EMITS a plain argv (the first token is always
+ * `sudo`), never a uid change or a privilege syscall. The anon-pi path + args are
+ * injected. cli.ts spawns this argv; this module never does.
+ */
+export function buildAnonSudoArgv(inv: HardenedInvocation): string[] {
+	return [
+		'sudo',
+		'-u',
+		ANON_ACCOUNT,
+		'-i',
+		inv.anonPiPath,
+		...inv.forwardedArgs,
+	];
+}
+
+/**
+ * PURE: single-quote a token for a POSIX `sh -c` command string (the `su -c`
+ * fallback runs one string through a login shell). Wraps in `'…'` and escapes an
+ * embedded single quote as `'\''`, so no space/quote/metacharacter in an
+ * injected arg can break out of the command string.
+ */
+export function shellQuote(token: string): string {
+	return `'${token.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * PURE: compose the documented FALLBACK re-exec argv, the `su - anon -c '<cmd>'`
+ * form for boxes where sudoers is not configured:
+ *   `['su', '-', 'anon', '-c', "'<abs-anon-pi>' '<arg>' …"]`
+ * The command STRING is the shell-quoted anon-pi path followed by each
+ * shell-quoted forwarded arg (shellQuote), so the login shell re-runs anon-pi
+ * safely. Like the sudo form this only ever EMITS an argv (first token always
+ * `su`), never a privilege syscall; the anon-pi path + args are injected.
+ */
+export function buildAnonSuFallback(inv: HardenedInvocation): string[] {
+	const command = [inv.anonPiPath, ...inv.forwardedArgs]
+		.map(shellQuote)
+		.join(' ');
+	return ['su', '-', ANON_ACCOUNT, '-c', command];
+}
+
 /** The --help text (kept here so it is covered by the same module). */
 export const HELP = `anon-pi - run pi on anonymized, jailed machines (netcage: forced egress + one direct local model)
 
