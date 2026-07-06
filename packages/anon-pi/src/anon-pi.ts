@@ -3212,22 +3212,43 @@ export function socks5hUrl(hostPort: string): string {
 
 /**
  * PURE: extract the exit IP `netcage verify` reported from its combined output.
- * `netcage verify` prints the jail's forced-egress exit IP (an IPv4/IPv6 line)
- * as PROOF the egress leaves via the proxy (not the host IP). We scan the output
- * for the first plausible IP literal and return it; undefined if none is found
- * (the caller then shows the raw output and lets the user judge). This is a
- * best-effort PARSE of another tool's text, kept pure + tested so a format tweak
- * is caught by a unit test, not only in the field.
+ * `netcage verify` prints the jail's forced-egress exit IP (in the
+ * `forced-egress-exit-ip-differs-from-host` assertion) as PROOF the egress
+ * leaves via the proxy, not the host IP.
+ *
+ * IMPORTANT: `netcage verify` ALSO prints the proxy URL on its FIRST line
+ * (`proxy: socks5h://127.0.0.1:9050`). A naive "first IPv4 in the output" scan
+ * therefore returned the loopback PROXY address, not the exit IP - a field bug
+ * (anon-pi@0.21.0) that showed `Exit IP: 127.0.0.1` and scared users into
+ * thinking anonymization had failed. So we SKIP any line that is the proxy line
+ * (starts with `proxy:` / carries the `socks5h://` scheme) before scanning, and
+ * take the first plausible IP literal from the REMAINING lines. undefined if
+ * none is found (the caller then shows netcage's raw output and lets the user
+ * judge). This is a best-effort PARSE of another tool's text, kept pure + tested
+ * so a format tweak is caught by a unit test, not only in the field.
+ *
+ * The durable fix is a machine-readable `netcage verify --json` that anon-pi
+ * consumes instead of scraping prose (idea `netcage-verify-json-output`); this
+ * parser is the stopgap until that lands.
  */
 export function parseVerifyExitIp(output: string): string | undefined {
+	// Drop the proxy line(s): they carry the (often loopback) PROXY address,
+	// which is NOT the exit IP. Match the label `proxy:` or the socks scheme.
+	const scanned = output
+		.split('\n')
+		.filter((line) => {
+			const l = line.trimStart();
+			return !/^proxy:/i.test(l) && !/socks5h?:\/\//i.test(l);
+		})
+		.join('\n');
 	// IPv4 first (the common case: ipify returns an IPv4 for most exits).
-	const v4 = output.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+	const v4 = scanned.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
 	if (v4) {
 		const ip = v4[0];
 		if (ip.split('.').every((o) => Number(o) <= 255)) return ip;
 	}
 	// IPv6 (a loose match: at least two groups and a colon-run), best-effort.
-	const v6 = output.match(/\b(?:[0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F]{0,4}\b/);
+	const v6 = scanned.match(/\b(?:[0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F]{0,4}\b/);
 	if (v6 && v6[0].includes('::')) return v6[0];
 	if (v6 && v6[0].split(':').filter(Boolean).length >= 3) return v6[0];
 	return undefined;

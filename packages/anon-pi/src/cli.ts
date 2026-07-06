@@ -2472,16 +2472,16 @@ function initProxyStep(currentProxy: string | undefined): string | undefined {
 			);
 			continue;
 		}
+		// Show netcage's OWN output as the authoritative evidence (its
+		// `forced-egress-exit-ip-differs-from-host` assertion is the real proof),
+		// then our parsed one-liner as a convenience summary. Streaming the real
+		// output means a parse miss can never masquerade as the exit IP (the
+		// 0.21.0 `Exit IP: 127.0.0.1` field bug); the user always sees the truth.
+		process.stdout.write(output.trimEnd() + '\n');
 		const exitIp = parseVerifyExitIp(output);
 		if (exitIp) {
 			process.stdout.write(
 				`  Exit IP (via the proxy, NOT your host): ${exitIp}\n`,
-			);
-		} else {
-			process.stdout.write(
-				'  netcage verify succeeded but no exit IP was parsed; raw output:\n' +
-					output.trimEnd() +
-					'\n',
 			);
 		}
 		const ok = promptLine(`  Use ${url} as your proxy? [Y/n] `);

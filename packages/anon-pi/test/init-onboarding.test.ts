@@ -264,6 +264,28 @@ describe('parseVerifyExitIp', () => {
 	it('extracts an IPv6 exit IP', () => {
 		expect(parseVerifyExitIp('exit IP 2001:db8::1 ok')).toBe('2001:db8::1');
 	});
+
+	// REGRESSION (field bug, anon-pi@0.21.0): netcage verify prints the proxy
+	// URL on the FIRST line (`proxy: socks5h://127.0.0.1:9050`), so a naive
+	// first-IPv4 scrape returned the loopback PROXY address, not the exit IP,
+	// scaring users into thinking anonymization was broken. The proxy line's IP
+	// must be SKIPPED; the real exit IP is in the forced-egress assertion.
+	it('skips the proxy line and returns the real jail exit IP (loopback proxy)', () => {
+		const out =
+			'proxy: socks5h://127.0.0.1:9050 (source: flag)\n' +
+			'[PASS] forced-egress-exit-ip-differs-from-host: jail exit IP 203.0.113.7 differs from host 198.51.100.4 (forced egress active)\n' +
+			'[PASS] dns-resolves-via-proxy\n';
+		expect(parseVerifyExitIp(out)).toBe('203.0.113.7');
+	});
+
+	it('skips the proxy line even when the exit IP is also loopback-adjacent text', () => {
+		// only the proxy line carries an IP (verify otherwise failed to get an
+		// exit IP): we must NOT report the proxy loopback as the exit IP.
+		const out =
+			'proxy: socks5h://127.0.0.1:9050\n' +
+			'[FAIL] forced-egress-exit-ip-differs-from-host: jail produced no exit IP\n';
+		expect(parseVerifyExitIp(out)).toBeUndefined();
+	});
 });
 
 describe('initImageMenu', () => {
