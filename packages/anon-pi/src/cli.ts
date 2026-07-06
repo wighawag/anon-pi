@@ -107,6 +107,16 @@ import {
 	buildAnonSudoArgv,
 	evaluateHardenedPreflight,
 	planHardeningStep,
+	parsePersonaArgs,
+	planPersonaAdd,
+	personaAccount,
+	personaName,
+	composeTorPersonaProxy,
+	offerTor,
+	DEFAULT_TOR_SOCKS_HOST_PORT,
+	PERSONA_BYO_UNIQUENESS_WARNING,
+	type PersonaCommand,
+	type TorDetection,
 	type HardenedPreflightProbes,
 	setImageWarning,
 	launchIdentityKey,
@@ -188,6 +198,7 @@ function main(argv: string[]): number {
 		'machine',
 		'image',
 		'container',
+		'persona',
 		'forward',
 		'ports',
 	]);
@@ -219,6 +230,15 @@ function main(argv: string[]): number {
 	// supersedes ADR-0004's "throwaway always" ONLY for this opt-in path).
 	if (args[0] === 'container') {
 		return runContainer(args.slice(1));
+	}
+
+	// `persona …` provisions dedicated persona accounts (`anon-<name>`, default
+	// `anon`), each with its own mode-700 home + its own fail-closed egress (prd
+	// `multi-persona-hardened-accounts`, superseding ADR-0006). Dispatched BEFORE
+	// the launch grammar so a bare `persona` is never parsed as a project named
+	// "persona". v1 ships only `persona add <name>`.
+	if (args[0] === 'persona') {
+		return runPersona(args.slice(1));
 	}
 
 	// The destructive cleanup verbs (replacing the old `--fresh`). Dispatched
@@ -2811,6 +2831,358 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 		}
 		if (/^skip$/i.test(cont.trim())) return false;
 		// any other input: loop and re-probe.
+	}
+}
+
+// --- `anon-pi persona add <name>`: the THIN impure wiring (prd
+// `multi-persona-hardened-accounts`, decisions 4-8, superseding ADR-0006) ------
+//
+// Provisions a persona: map <name> -> anon-<name> (personaAccount), choose the
+// per-persona fail-closed egress (Tor multi-persona via composeTorPersonaProxy,
+// or a bring-your-own socks5h endpoint + the uniqueness warning), then run the
+// RESUMABLE two-tier flow of planPersonaAdd: while the account is missing, PRINT
+// the Tier-2 copy-paste root COMMANDS (buildTier2ProvisioningScript) + wait +
+// re-probe (mirroring initHardeningStep); once the account exists, write the
+// persona's OWN ordinary v1 config.json into its mode-700 tree. anon-pi NEVER
+// runs Tier 2 and NEVER silently sudo's. Persona IDENTITY (email/git) is OUT of
+// scope (the user sets it inside the persona home). Every OS-touching bit is an
+// isolated seam here (getent account-home probe, the Tor detection probe, the
+// mode-700 write); the decision is the pure planPersonaAdd.
+
+const PERSONA_HELP = `anon-pi persona - provision dedicated persona accounts (multi-persona hardened deployment)
+
+USAGE
+  anon-pi persona add [<name>] [--tor [<host:port>] | --proxy <socks5h-url>] [--nopasswd]
+
+  Provisions the persona account \`anon-<name>\` (a bare \`add\` with no name is the
+  DEFAULT persona \`anon\`): its own mode-700 home + its own fail-closed egress.
+  Runs the same two-tier flow as \`init\`'s hardening, per persona:
+    - Tier 1 (rootless): writes the persona's OWN config.json (the ordinary v1
+      shape) with the chosen \`proxy\`, into \`~anon-<name>/.anon-pi\` at mode 0700.
+    - Tier 2 (root): PRINTS copy-paste commands (useradd/loginctl/sudoers) you
+      paste into a root shell you enter FIRST. anon-pi never runs them. When the
+      account does not exist yet it prints these; create it, then re-run.
+
+  EGRESS (fail-closed, per persona; two personas never share an exit):
+    --tor [<host:port>]   Tor multi-persona: compose
+                          \`socks5h://anon-<name>:x@<host:port>\` (default
+                          127.0.0.1:9050). Tor isolates each persona by its
+                          account name (a separate circuit/exit per persona).
+    --proxy <socks5h-url> bring-your-own socks5h endpoint you run. anon-pi prints
+                          a WARNING that it must be UNIQUE to this persona (two
+                          personas on one endpoint share an exit); it keeps NO
+                          used-endpoint list. Prefer Tor.
+    (on a TTY, with neither flag, anon-pi probes for a running Tor and OFFERS it,
+     else prompts for a bring-your-own endpoint.)
+
+  --nopasswd   emit a NOPASSWD sudoers rule in the Tier-2 commands (off by
+               default: the kept sudo password is the deliberate-crossing gate).
+
+  Re-running \`persona add <name>\` for an already-provisioned persona is an
+  idempotent no-op (a re-check). Persona IDENTITY (email/git/creds) is NOT set up
+  here; configure it inside the persona's home.
+`;
+
+/** Parsed persona-add egress flags (impure grammar layered over parsePersonaArgs). */
+interface PersonaAddFlags {
+	/** BYO socks5h endpoint (`--proxy <url>`), or undefined. */
+	proxy?: string;
+	/** Tor path chosen (`--tor [<host:port>]`); hostPort undefined = default. */
+	tor?: {hostPort?: string};
+	/** Opt-in NOPASSWD sudoers rule for the Tier-2 commands. */
+	nopasswd: boolean;
+}
+
+/**
+ * Parse the egress + nopasswd flags out of a `persona add` tail (the tokens
+ * AFTER the bare name). Kept in the CLI (not the pure parser) because these are
+ * impure-flow knobs (they gate a probe + a prompt). Errors clearly on a
+ * `--proxy` with no value or `--tor` + `--proxy` together (one egress only).
+ */
+function parsePersonaAddFlags(tail: readonly string[]): PersonaAddFlags {
+	let proxy: string | undefined;
+	let tor: {hostPort?: string} | undefined;
+	let nopasswd = false;
+	for (let i = 0; i < tail.length; i++) {
+		const a = tail[i];
+		if (a === '--proxy') {
+			const v = tail[++i];
+			if (v === undefined || v.startsWith('-'))
+				throw new AnonPiError('anon-pi: `--proxy` needs a socks5h URL.');
+			proxy = v;
+		} else if (a === '--tor') {
+			const v = tail[i + 1];
+			if (v !== undefined && !v.startsWith('-')) {
+				tor = {hostPort: v};
+				i++;
+			} else {
+				tor = {};
+			}
+		} else if (a === '--nopasswd') {
+			nopasswd = true;
+		} else {
+			throw new AnonPiError(`anon-pi: unknown \`persona add\` option: ${a}`);
+		}
+	}
+	if (proxy !== undefined && tor !== undefined) {
+		throw new AnonPiError(
+			'anon-pi: choose ONE egress: `--tor` (Tor multi-persona) OR `--proxy <url>` ' +
+				'(bring-your-own), not both.',
+		);
+	}
+	return {proxy, tor, nopasswd};
+}
+
+/**
+ * The persona-egress Tor DETECTION probe (the injected seam offerTor decides
+ * over): reuse init's `netcage detect-proxy --json` scanner (or its SOCKS
+ * fallback) to see whether a running Tor SOCKS proxy answered at the given
+ * host:port, collapsed to the tiny {open, socks5} shape. Best-effort; a probe
+ * failure => undefined (offerTor then does NOT offer Tor). This is the ONLY Tor
+ * I/O; the decision is the pure offerTor.
+ */
+function probeTorDetection(hostPort: string): TorDetection | undefined {
+	const key = hostPortKey(hostPort);
+	const [host, portStr] = key.split(':');
+	const port = Number(portStr);
+	if (!host || !Number.isFinite(port)) return undefined;
+	// Prefer netcage's scanner (same evidence engine init uses); it probes 9050.
+	const detected = detectProxyViaNetcage();
+	if (detected) {
+		const findings = findingsFromNetcageDetect(detected);
+		const match = findings.find((f) => f.port === port);
+		if (match) {
+			return {open: match.open, socks5: match.handshake?.socks5 === true};
+		}
+	}
+	// Fallback: anon-pi's own SOCKS5 handshake probe on the exact host:port.
+	const {open, handshake} = probeSocks5(host, port);
+	return {open, socks5: handshake?.socks5 === true};
+}
+
+/**
+ * Resolve the per-persona egress URL for the account, honouring the flags first
+ * and otherwise (on a TTY) probing for Tor + prompting. Returns the composed /
+ * entered socks5h URL, or undefined to ABORT (no egress could be chosen: a
+ * persona is NEVER written with no proxy - fail-closed per persona). Prints the
+ * BYO uniqueness warning on the bring-your-own path (decision 6).
+ */
+function resolvePersonaEgress(
+	account: string,
+	flags: PersonaAddFlags,
+): string | undefined {
+	// Explicit BYO endpoint: store it verbatim + WARN it must be unique.
+	if (flags.proxy !== undefined) {
+		const url = socks5hUrl(hostPortKey(flags.proxy));
+		process.stdout.write(PERSONA_BYO_UNIQUENESS_WARNING + '\n');
+		return url;
+	}
+	// Explicit Tor: compose from the account name (the SOCKS-isolation username).
+	if (flags.tor !== undefined) {
+		return flags.tor.hostPort !== undefined
+			? composeTorPersonaProxy(account, hostPortKey(flags.tor.hostPort))
+			: composeTorPersonaProxy(account);
+	}
+
+	// No flag: interactive. Probe for Tor and OFFER it; else prompt for BYO.
+	if (!process.stdin.isTTY) {
+		process.stderr.write(
+			'anon-pi: no egress chosen and no TTY to prompt. Pass `--tor` (Tor\n' +
+				'multi-persona) or `--proxy <socks5h-url>` (bring-your-own). A persona is\n' +
+				'never provisioned without its own proxy (fail-closed per persona).\n',
+		);
+		return undefined;
+	}
+
+	const detection = probeTorDetection(DEFAULT_TOR_SOCKS_HOST_PORT);
+	if (offerTor(detection)) {
+		process.stdout.write(
+			`\n  A running Tor SOCKS proxy was detected. anon-pi can give this persona\n` +
+				`  its OWN Tor circuit/exit automatically (keyed on the account name\n` +
+				`  \`${account}\`), at no setup cost.\n`,
+		);
+		const ans = promptLine('  Use Tor multi-persona for this persona? [Y/n] ');
+		if (
+			ans === undefined ||
+			/^y(es)?$/i.test(ans.trim()) ||
+			ans.trim() === ''
+		) {
+			return composeTorPersonaProxy(account);
+		}
+	}
+
+	// Bring-your-own: prompt for a socks5h endpoint + WARN it must be unique.
+	process.stdout.write(PERSONA_BYO_UNIQUENESS_WARNING + '\n');
+	const ans = promptLine(
+		'  Bring-your-own socks5h endpoint for this persona (host:port or socks5h URL): ',
+	);
+	if (ans === undefined || ans.trim() === '') {
+		process.stderr.write('anon-pi: no egress endpoint given; aborting.\n');
+		return undefined;
+	}
+	return socks5hUrl(hostPortKey(ans.trim()));
+}
+
+/**
+ * The persona's OWN anon-pi home (`~anon-<name>/.anon-pi`), resolved from the
+ * account's real home dir (getent) once the account exists, or undefined when
+ * the account does not exist yet. Mirrors anonAccountHome + the init Tier-1 home.
+ */
+function personaAnonHome(account: string): string | undefined {
+	const home = anonAccountHome(account);
+	return home ? join(home, '.anon-pi') : undefined;
+}
+
+/** True iff the persona's own config.json already carries a proxy (fully provisioned). */
+function personaAlreadyProvisioned(anonHome: string | undefined): boolean {
+	if (anonHome === undefined) return false;
+	const path = join(anonHome, 'config.json');
+	const parsed = parseConfigJson(readJsonFile(path));
+	return nonEmptyEnv(parsed.proxy);
+}
+
+/**
+ * `anon-pi persona add <name>`: the thin impure wiring around planPersonaAdd.
+ * Maps the bare name to `anon-<name>`, resolves the per-persona egress, and
+ * runs the RESUMABLE loop: account missing -> PRINT Tier-2 + wait; account
+ * exists -> write the persona's mode-700 config.json. Never runs Tier 2, never
+ * silently sudo's, never writes a persona without a proxy.
+ */
+function runPersona(personaArgs: string[]): number {
+	if (personaArgs.includes('--help') || personaArgs.includes('-h')) {
+		process.stdout.write(PERSONA_HELP);
+		return 0;
+	}
+
+	let cmd: PersonaCommand;
+	try {
+		cmd = parsePersonaArgs(personaArgs);
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+
+	// The name (when present) is the FIRST token after `add`; the flag tail is
+	// everything after it. parsePersonaAddFlags then rejects any stray positional
+	// (e.g. a second name) as an unknown option, so the grammar stays strict.
+	const afterAdd = personaArgs.slice(1);
+	const tail = cmd.name !== undefined ? afterAdd.slice(1) : afterAdd;
+
+	let flags: PersonaAddFlags;
+	let account: string;
+	try {
+		flags = parsePersonaAddFlags(tail);
+		// Map + VALIDATE the bare name (invalid name -> clear error).
+		account = personaAccount(cmd.name);
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+
+	const loginUser = currentUsername() ?? 'your-login-user';
+	const anonPiPath = anonPiBinaryPath();
+
+	// Idempotency: a fully-provisioned persona (account exists + its config has a
+	// proxy) is a no-op re-check, BEFORE we probe/prompt for an egress (re-running
+	// must not re-ask). We resolve the egress lazily, only when we will write.
+	let egress: string | undefined;
+	let egressResolved = false;
+	const ensureEgress = (): string | undefined => {
+		if (!egressResolved) {
+			try {
+				egress = resolvePersonaEgress(account, flags);
+			} catch (e) {
+				reportAnonPiError(e);
+				egress = undefined;
+			}
+			egressResolved = true;
+		}
+		return egress;
+	};
+
+	// The RESUMABLE loop: probe the account -> plan -> (print Tier-2 + wait) |
+	// write Tier-1 | already-provisioned. The state is the OS itself (getent), so
+	// a re-run just re-evaluates.
+	for (;;) {
+		const anonHome = personaAnonHome(account);
+		const accountExists = anonHome !== undefined;
+		const alreadyProvisioned = personaAlreadyProvisioned(anonHome);
+
+		// Only resolve the egress when we are actually going to write (the account
+		// exists and the persona is not already provisioned). This keeps a re-run of
+		// a done persona a silent no-op, and avoids prompting before we know we need it.
+		let config: AnonPiConfig | undefined;
+		if (accountExists && !alreadyProvisioned) {
+			const proxy = ensureEgress();
+			if (proxy === undefined) return 1; // could not choose an egress; abort.
+			config = {proxy};
+		}
+
+		let plan;
+		try {
+			plan = planPersonaAdd({
+				account,
+				loginUser,
+				anonPiPath,
+				accountExists,
+				anonHome,
+				config,
+				alreadyProvisioned,
+				nopasswd: flags.nopasswd,
+			});
+		} catch (e) {
+			return reportAnonPiError(e);
+		}
+
+		if (plan.kind === 'already-provisioned') {
+			process.stdout.write(
+				`anon-pi: persona \`${personaName(account) ?? ANON_ACCOUNT}\` (account ` +
+					`\`${account}\`) is already provisioned; nothing to do.\n`,
+			);
+			return 0;
+		}
+
+		if (plan.kind === 'continue-tier1') {
+			// Tier 1 (rootless): create the persona's workspace mode-700 and write its
+			// OWN ordinary v1 config.json (carrying the per-persona proxy) there. In
+			// tests this lands in a temp account home (getent stub), so it touches only
+			// the isolated tree. NO wrapper file; NO NETCAGE_GRAPHROOT.
+			mkdirSync(plan.anonHome, {recursive: true});
+			chmodSync(plan.anonHome, plan.mode);
+			writeFileSync(
+				join(plan.anonHome, 'config.json'),
+				serializeConfigJson(plan.config),
+			);
+			process.stdout.write(
+				`anon-pi: provisioned persona \`${personaName(account) ?? ANON_ACCOUNT}\` ` +
+					`(account \`${account}\`): wrote ${join(plan.anonHome, 'config.json')} ` +
+					`(mode 0700) with its own egress.\n` +
+					`  Persona identity (email/git/creds) is YOURS to set inside the ` +
+					`persona's home.\n`,
+			);
+			return 0;
+		}
+
+		// wait-for-account: PRINT the Tier-2 command block + instruction (anon-pi
+		// never runs it). On a TTY, wait for the human to run it and continue (loop +
+		// re-probe). Without a TTY there is no way to wait, so print + exit non-zero
+		// (re-run after creating the account).
+		process.stdout.write('\n' + plan.script + '\n');
+		process.stdout.write(plan.instruction + '\n');
+		if (!process.stdin.isTTY) {
+			process.stderr.write(
+				'\nanon-pi: the persona account does not exist yet. Run the commands\n' +
+					'above in a root shell, then re-run `anon-pi persona add` to finish.\n',
+			);
+			return 1;
+		}
+		const cont = promptLine(
+			'\n  Run the commands above in a root shell, then press Enter to re-check\n' +
+				'  (or type `abort` to stop): ',
+		);
+		if (cont !== undefined && /^abort$/i.test(cont.trim())) {
+			process.stderr.write('anon-pi: aborted; no persona written.\n');
+			return 1;
+		}
+		// Enter / anything else: loop and RE-PROBE the account.
 	}
 }
 

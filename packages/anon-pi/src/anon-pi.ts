@@ -4877,6 +4877,242 @@ export function planHardeningStep(
 	};
 }
 
+// --- `anon-pi persona add <name>`: the pure provisioning planner + parser (prd
+// `multi-persona-hardened-accounts`, decisions 4 + 5 + 6 + 7 + 8, superseding
+// ADR-0006) -------------------------------------------------------------------
+//
+// `persona add <name>` provisions a persona: the dedicated `anon-<name>` account
+// (default `anon`), its mode-700 workspace + its own fail-closed egress. Like
+// v1's init hardening it is a TWO-TIER flow, now per-persona:
+//   - Tier 2 (root): create the account (`useradd -m`, linger, scoped sudoers).
+//     anon-pi NEVER runs this: it PRINTS the copy-paste command block
+//     (buildTier2ProvisioningScript) the human pastes into a root shell entered
+//     FIRST. Because the Tier-1 in-home write needs the account to already
+//     exist, the flow is RESUMABLE (mirroring planHardeningStep): while the
+//     account is missing, emit Tier-2 + wait; once it exists, do Tier 1.
+//   - Tier 1 (rootless): write the persona's OWN ordinary v1 `config.json`
+//     (byte-identical shape, just resolved in the persona's home) carrying the
+//     chosen `proxy`, into `~anon-<name>/.anon-pi` at mode 0o700.
+// Egress is chosen at add time (Tor multi-persona via composeTorPersonaProxy, or
+// a bring-your-own socks5h endpoint with the uniqueness WARNING); the CLI does
+// the Tor probe + the prompts. This section owns only the PURE parts: the
+// `persona <verb>` grammar, the BYO warning wording, and the resumable
+// provisioning PLANNER over injected inputs (account existence + the composed
+// config). Nothing here spawns, probes Tor, or touches the fs; the CLI wires the
+// getent/probe/write around it. Persona IDENTITY (email/git) is OUT of scope.
+
+/**
+ * The EXACT one-line uniqueness WARNING printed on the bring-your-own SOCKS path
+ * of `persona add` (prd `multi-persona-hardened-accounts` decision 6). A BYO
+ * endpoint must be UNIQUE to a persona: two personas sharing one BYO endpoint
+ * share an exit IP and become linkable, defeating the isolation that matters
+ * most. anon-pi keeps NO used-endpoint list (it cannot read across personas' DAC
+ * walls), so it WARNS and leaves uniqueness to the operator, steering them to Tor
+ * (which isolates per-persona automatically by the SOCKS-isolation username).
+ * Pinned as one constant so the CLI and its test agree and it never drifts.
+ */
+export const PERSONA_BYO_UNIQUENESS_WARNING =
+	'anon-pi: this socks5h endpoint MUST be unique to this persona. Two personas ' +
+	'on one bring-your-own endpoint share an exit IP and become linkable, ' +
+	'defeating per-persona isolation. anon-pi keeps NO used-endpoint list, so ' +
+	'this is your responsibility. Prefer Tor multi-persona, which isolates each ' +
+	'persona automatically by its account name.';
+
+/**
+ * A parsed `persona <verb> …` command. A discriminated union the CLI dispatches
+ * on `verb`. v1 ships ONLY `add`:
+ *   - `add [<name>]`: provision the persona `anon-<name>`; a bare `add` (no
+ *     name) provisions/refers to the DEFAULT persona `anon` (the empty-suffix
+ *     case). The bare name is validated by personaAccount (validatePersonaName)
+ *     in the CLI, not here, so the parser stays a thin grammar; `name` is the
+ *     raw token (undefined for the default).
+ */
+export type PersonaCommand = {verb: 'add'; name?: string};
+
+/**
+ * PURE: parse the tokens AFTER `persona` into a PersonaCommand. Throws
+ * AnonPiError (printed verbatim, exit 1) for a missing/unknown subcommand. The
+ * grammar is deliberately tiny (only `add [<name>]` in v1) and the optional bare
+ * NAME, when present, comes FIRST (`persona add <name> [flags…]`): so the name
+ * is `rest[0]` iff it is a non-flag token. Everything AFTER the name is FLAGS
+ * (`--tor`/`--proxy`/`--nopasswd`, impure-flow knobs the CLI parses, since flag
+ * ARITY lives there), so this pure grammar does not try to interpret them (a
+ * flag with a value like `--proxy <url>` would otherwise look like a positional).
+ * The name is NOT charset-validated here (that is personaAccount's job in the
+ * CLI); this only splits off the verb + optional leading bare name.
+ */
+export function parsePersonaArgs(args: readonly string[]): PersonaCommand {
+	const fail = (msg: string): never => {
+		throw new AnonPiError(
+			`anon-pi: ${msg}\nRun \`anon-pi persona --help\` or \`anon-pi --help\`.`,
+		);
+	};
+
+	const verb = args[0];
+	if (verb === undefined) {
+		fail('`persona` needs a subcommand: add');
+	}
+	if (verb !== 'add') {
+		fail(
+			`unknown \`persona\` subcommand ${JSON.stringify(verb)} (only \`add\`).`,
+		);
+	}
+
+	const rest = args.slice(1);
+	// The name is the FIRST token iff it is not a flag; everything after is flags.
+	const name =
+		rest[0] !== undefined && !rest[0].startsWith('-') ? rest[0] : undefined;
+	return {verb: 'add', name};
+}
+
+/** The injected inputs the resumable `persona add` provisioning planner decides over. */
+export interface PersonaAddInputs {
+	/** The persona Unix account being provisioned (`anon-<name>`, or `anon` for the default). */
+	account: string;
+	/** The login user the Tier-2 sudoers rule is scoped to (from the impure `whoami`). */
+	loginUser: string;
+	/** The ABSOLUTE anon-pi binary path the Tier-2 sudoers rule scopes to (injected). */
+	anonPiPath: string;
+	/**
+	 * Whether the persona's Unix account ALREADY EXISTS (from the impure `getent
+	 * passwd <account>` probe). This is the resumable GATE: while it is false the
+	 * account's home does not exist to write into, so the planner emits Tier 2 and
+	 * WAITS; once true (re-probed after the human ran the root commands) it
+	 * proceeds to the Tier-1 in-home write.
+	 */
+	accountExists: boolean;
+	/**
+	 * The ABSOLUTE ANON_PI_HOME under the persona account's tree
+	 * (`~anon-<name>/.anon-pi`), resolved by the CLI from the real account home
+	 * (getent) once the account exists. Undefined while the account is missing.
+	 */
+	anonHome?: string;
+	/**
+	 * The persona's ORDINARY v1 config.json to write in Tier 1 (byte-identical
+	 * shape, just resolved in the persona's home), carrying the composed/entered
+	 * per-persona `proxy`. The planner echoes it back on continue; the CLI writes
+	 * it (serializeConfigJson) at mode 0o700.
+	 */
+	config?: AnonPiConfig;
+	/**
+	 * Whether the persona is ALREADY fully provisioned (the account exists AND its
+	 * config.json already carries a proxy). When true the planner returns
+	 * `already-provisioned` so a re-run is an idempotent no-op, never a duplicate
+	 * or a failure (decision: re-adding an existing persona re-checks).
+	 */
+	alreadyProvisioned?: boolean;
+	/**
+	 * Opt-in `--nopasswd` forwarded to the Tier-2 generator (OFF by default: the
+	 * kept sudo password is the deliberate-crossing feature, ADR-0006).
+	 */
+	nopasswd?: boolean;
+}
+
+/**
+ * `wait-for-account`: the persona's account does not exist yet. The CLI PRINTS
+ * `script` (the Tier-2 copy-paste COMMAND BLOCK, never executed by anon-pi) +
+ * `instruction`, waits for the human to run it in a root shell they entered
+ * first, then RE-PROBES the account and re-plans (resumability: the state is the
+ * OS itself, so a re-run just re-evaluates a fresh `getent`).
+ */
+export interface PersonaWaitPlan {
+	kind: 'wait-for-account';
+	/** The Tier-2 provisioning COMMAND BLOCK to print (never executed by anon-pi). */
+	script: string;
+	/** The "become root, paste the commands, then continue" instruction printed alongside the block. */
+	instruction: string;
+}
+
+/**
+ * `continue-tier1`: the account exists, so do the rootless Tier-1 in-home write:
+ * create the persona's `anonHome` (mode 0o700) and write its ordinary v1
+ * `config.json` (carrying the persona `proxy`) there. NO wrapper file, NO
+ * `NETCAGE_GRAPHROOT`. The CLI performs the real mkdir + chmod + write.
+ */
+export interface PersonaContinuePlan {
+	kind: 'continue-tier1';
+	/** The ABSOLUTE ANON_PI_HOME under the persona account's tree to create + own. */
+	anonHome: string;
+	/** The mode Tier 1 applies to `anonHome` (mode-700: only the persona reads it). */
+	mode: number;
+	/** The persona's ordinary v1 config.json to write (carrying its `proxy`). */
+	config: AnonPiConfig;
+}
+
+/**
+ * `already-provisioned`: the persona already exists AND its config.json already
+ * carries a proxy, so `persona add` is an idempotent no-op (re-check, not a
+ * failure or a duplicate).
+ */
+export interface PersonaDonePlan {
+	kind: 'already-provisioned';
+}
+
+/** The next action of the resumable `persona add` step. */
+export type PersonaAddPlan =
+	PersonaWaitPlan | PersonaContinuePlan | PersonaDonePlan;
+
+/** The mode Tier 1 applies to a persona's workspace: 0o700 (only the persona reads it). */
+export const PERSONA_HOME_MODE = HARDENED_HOME_MODE;
+
+/**
+ * PURE: decide the next action of the resumable `persona add` step over INJECTED
+ * inputs. Mirrors planHardeningStep, but the resumable GATE is simply "does the
+ * persona's account exist yet?" (its home must exist to write the Tier-1 config
+ * into). The order is:
+ *   - `alreadyProvisioned` (account exists AND its config already has a proxy)
+ *     -> `already-provisioned`: an idempotent no-op re-run (decision: re-adding
+ *     an existing persona re-checks, never duplicates or fails).
+ *   - account MISSING -> `wait-for-account`: emit the Tier-2 command block
+ *     (buildTier2ProvisioningScript) + a become-root-and-continue instruction;
+ *     the CLI prints, waits, RE-PROBES, and calls this again.
+ *   - account EXISTS -> `continue-tier1`: create `anonHome` mode-0o700 and write
+ *     the persona's ordinary v1 config.json (with its `proxy`) there.
+ * Nothing here spawns, probes, or touches the fs; the CLI wires the real
+ * getent/Tor-probe/write around it. `anonHome` + `config` are REQUIRED on the
+ * continue branch (the CLI resolves them once the account exists); a missing one
+ * there is a programming error (throws AnonPiError).
+ */
+export function planPersonaAdd(inputs: PersonaAddInputs): PersonaAddPlan {
+	const {
+		account,
+		loginUser,
+		anonPiPath,
+		accountExists,
+		anonHome,
+		config,
+		alreadyProvisioned,
+		nopasswd,
+	} = inputs;
+
+	if (alreadyProvisioned) return {kind: 'already-provisioned'};
+
+	if (!accountExists) {
+		const script = buildTier2ProvisioningScript({
+			account,
+			loginUser,
+			anonPiPath,
+			nopasswd,
+		});
+		const instruction =
+			`anon-pi: the persona account \`${account}\` does not exist yet. The ` +
+			`root-requiring steps are the COMMANDS ABOVE: review them, then become root ` +
+			`in ANOTHER terminal (\`sudo -i\` or \`su -\`; anon-pi never sudo's for you) ` +
+			`and paste them into that root shell. When they finish, come back here and ` +
+			`continue: anon-pi RE-CHECKS the account and writes the persona's config ` +
+			`once it exists.`;
+		return {kind: 'wait-for-account', script, instruction};
+	}
+
+	if (anonHome === undefined || config === undefined) {
+		throw new AnonPiError(
+			'anon-pi: internal error: persona Tier-1 continue needs a resolved home ' +
+				'and config (the account exists but one was not provided).',
+		);
+	}
+	return {kind: 'continue-tier1', anonHome, mode: PERSONA_HOME_MODE, config};
+}
+
 /** The --help text (kept here so it is covered by the same module). */
 export const HELP = `anon-pi - run pi on anonymized, jailed machines (netcage: forced egress + one direct local model)
 
