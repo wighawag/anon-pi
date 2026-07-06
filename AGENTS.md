@@ -4,27 +4,31 @@ Instructions for agents working in this repository.
 
 ## Changeset convention
 
-**A change that affects users of the published `anon-pi` package needs a
-changeset.** Run `pnpm changeset` and commit the generated `.changeset/*.md`
-file as part of that change. This is what drives the version bump + the release
-notes, so it is scoped to user-facing change, NOT to every commit.
+**A change that touches the published `anon-pi` package needs a changeset; a
+change that does not, does not.** Run `pnpm changeset` and commit the generated
+`.changeset/*.md` file as part of any change under `packages/`. The requirement
+is scoped to the package (its behaviour + release notes), NOT to every commit,
+and the gate ENFORCES exactly that scope (see below) — so this is not merely a
+convention you could forget, it is checked.
 
-- **Needs a changeset:** anything that changes the package's behaviour, CLI
-  surface, output, or public API for someone who installs `anon-pi` (a feature,
-  a fix, a breaking change, a user-visible message change). Pick the bump level
-  honestly (`patch` / `minor` / `major`) per semver.
-- **Does NOT need a changeset:** a change with no effect on the published
-  package's users, e.g. edits under `work/` (PRDs, tasks, notes), repo docs
-  (`README` excepted when it ships user guidance), CI/tooling config, or a
-  test-only / internal refactor that leaves behaviour identical. Adding an
-  empty changeset for these just clutters the release notes; skip it.
-- **The gate does NOT force a changeset.** `pnpm changeset status --since=main`
-  reports pending bumps and exits 0 whether or not a changeset is present, so a
-  changeset-free internal change still passes `verify`. (An earlier version of
-  this file wrongly claimed every change is required and that the gate fails
-  without one; neither is true.)
-- When in doubt, ask "does someone who `npm install`s anon-pi see or feel this?"
-  If no, no changeset.
+- **Needs a changeset (gate ENFORCES it):** any change to `packages/anon-pi/**`
+  (source, or the package's own files). `pnpm changeset status --since=main`
+  errors + EXITS NON-ZERO when a package changed with no changeset, so `verify`
+  FAILS and the change cannot land. Pick the bump level honestly (`patch` /
+  `minor` / `major`) per semver; a package change that genuinely needs no
+  release (e.g. a comment-only edit) still needs an entry, use
+  `pnpm changeset add --empty`.
+- **Does NOT need a changeset (gate PASSES without one):** a change that touches
+  NO package — edits under `work/` (PRDs, tasks, notes), root repo docs
+  (`AGENTS.md`, top-level docs), CI/tooling config outside `packages/`. Because
+  nothing under `packages/` changed, `changeset status` finds nothing to require
+  and exits 0, so `verify` passes with no changeset. Do NOT add an empty
+  changeset for these — it wrongly bumps the package + clutters the release
+  notes.
+- **The dividing line the gate actually uses is "did a package change", which
+  tracks "does a published-package user feel this".** They coincide: package
+  source is what ships to `npm install`, and `work/`/root-docs do not. When in
+  doubt, ask "did I touch `packages/`?" — if yes, changeset; if no, none.
 
 ## Build / test gate
 
