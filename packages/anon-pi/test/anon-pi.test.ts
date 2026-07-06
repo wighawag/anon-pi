@@ -34,6 +34,7 @@ import {
 	resolveAnonPiHome,
 	resolveLlm,
 	resolveProjectsRoot,
+	projectsRootLeaksLogin,
 	resolveProxy,
 	type AnonPiConfig,
 	type AnonPiEnv,
@@ -189,6 +190,62 @@ describe('resolveProjectsRoot (env > machine > config > built-in)', () => {
 		expect(
 			resolveProjectsRoot({env: base, config: {projects: 'rel/projects'}}),
 		).toBe(pathResolve('rel/projects'));
+	});
+});
+
+describe('projectsRootLeaksLogin (hardened projects root must avoid the login home)', () => {
+	const loginHome = '/home/wighawag';
+
+	it('is false on a NON-hardened install regardless of the path', () => {
+		expect(
+			projectsRootLeaksLogin({
+				projectsRoot: '/home/wighawag/dev',
+				loginHome,
+				hardened: false,
+			}),
+		).toBe(false);
+	});
+
+	it('LEAKS when hardened AND the root is under the login home', () => {
+		expect(
+			projectsRootLeaksLogin({
+				projectsRoot: '/home/wighawag/dev/x',
+				loginHome,
+				hardened: true,
+			}),
+		).toBe(true);
+	});
+
+	it('LEAKS when the root IS the login home itself', () => {
+		expect(
+			projectsRootLeaksLogin({
+				projectsRoot: '/home/wighawag',
+				loginHome,
+				hardened: true,
+			}),
+		).toBe(true);
+	});
+
+	it('does NOT leak for the anon account tree (a sibling home)', () => {
+		expect(
+			projectsRootLeaksLogin({
+				projectsRoot: '/home/anon/.anon-pi/projects',
+				loginHome,
+				hardened: true,
+			}),
+		).toBe(false);
+	});
+
+	it('does NOT treat a sibling PREFIX-sharing dir as under the home', () => {
+		// `/home/wighawag-old` shares the `/home/wighawag` string prefix but is NOT
+		// under it; the separator-aware check must reject the naive startsWith.
+		expect(
+			projectsRootLeaksLogin({
+				projectsRoot: '/home/wighawag-old/dev',
+				loginHome,
+				hardened: true,
+			}),
+		).toBe(false);
 	});
 });
 

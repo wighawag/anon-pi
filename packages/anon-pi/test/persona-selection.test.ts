@@ -6,6 +6,7 @@ import {
 	AnonPiError,
 	personaAccount,
 	personaName,
+	isAnonPersonaAccount,
 	validatePersonaName,
 	resolvePersonaSelection,
 	shouldRedirectToPersona,
@@ -97,6 +98,25 @@ describe('persona mapping: personaName (inverse of personaAccount)', () => {
 	it('returns undefined for a non-persona account', () => {
 		expect(personaName('root')).toBe(undefined);
 		expect(personaName('anonalice')).toBe(undefined);
+	});
+});
+
+describe('isAnonPersonaAccount (persona-aware generalization of the v1 bare-`anon` check)', () => {
+	it('is true for the default account `anon`', () => {
+		expect(isAnonPersonaAccount('anon')).toBe(true);
+	});
+
+	it('is true for a namespaced persona account `anon-<name>`', () => {
+		expect(isAnonPersonaAccount('anon-alice')).toBe(true);
+	});
+
+	it('is false for a non-persona account (login user, root, a near-miss)', () => {
+		expect(isAnonPersonaAccount('wighawag')).toBe(false);
+		expect(isAnonPersonaAccount('root')).toBe(false);
+		// `anon-` with an empty suffix is NOT a valid persona account.
+		expect(isAnonPersonaAccount('anon-')).toBe(false);
+		// `anonalice` (no hyphen) shares a prefix but is not a persona.
+		expect(isAnonPersonaAccount('anonalice')).toBe(false);
 	});
 });
 

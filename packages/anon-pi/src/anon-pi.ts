@@ -33,7 +33,7 @@
 
 import {existsSync, readFileSync} from 'node:fs';
 import {homedir} from 'node:os';
-import {dirname, join, resolve} from 'node:path';
+import {dirname, join, resolve, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 /**
@@ -710,6 +710,34 @@ export function resolveProjectsRoot(args: {
 		nonEmpty(config?.projects);
 	if (pick !== undefined) return resolve(expandTilde(pick, env.home));
 	return builtinProjectsRoot(env);
+}
+
+/**
+ * PURE: does a chosen projects root LEAK the login username on a hardened
+ * install? The projects root is the HOST bind-mount SOURCE for /projects, so its
+ * host path is part of the container's mount spec. On a hardened install anon-pi
+ * runs under the dedicated `anon`/`anon-<name>` account precisely so nothing the
+ * machine can observe carries the login user's identity; a projects root that
+ * sits UNDER the login user's home (`/home/<login>/...`) re-introduces that leak
+ * (the username in the mount-source path, plus login-user file OWNERSHIP mounted
+ * into an anon-run jail, which also defeats the mode-700 discoverability
+ * boundary). Returns true only when hardened AND the resolved root is at or under
+ * `loginHome`. A non-hardened install never leaks (there is no persona account to
+ * contrast with), so it always returns false. All inputs are injected; nothing
+ * here spawns or touches the fs.
+ */
+export function projectsRootLeaksLogin(args: {
+	/** The resolved (absolute) host projects root. */
+	projectsRoot: string;
+	/** The login user's $HOME (the account `init` was invoked from). */
+	loginHome: string;
+	/** Whether this install is (being) configured hardened. */
+	hardened: boolean;
+}): boolean {
+	if (!args.hardened) return false;
+	const root = resolve(args.projectsRoot);
+	const home = resolve(args.loginHome);
+	return root === home || root.startsWith(home + sep);
 }
 
 /**
@@ -4144,6 +4172,17 @@ export function personaName(account: string): string | undefined {
 		return account.slice(PERSONA_ACCOUNT_PREFIX.length);
 	}
 	return undefined;
+}
+
+/**
+ * PURE: is `account` ANY anon persona account, i.e. the default `anon`
+ * (ANON_ACCOUNT) OR a namespaced `anon-<name>`? This is the persona-aware
+ * generalization of the v1 `account === ANON_ACCOUNT` check: `init`'s hardening
+ * step uses it to skip re-asking when it is ALREADY running under a hardened
+ * persona account (default OR named), where v1 only recognized the bare `anon`.
+ */
+export function isAnonPersonaAccount(account: string): boolean {
+	return account === ANON_ACCOUNT || personaName(account) !== undefined;
 }
 
 /** The persona-selection flag: a plain `--as <name>` (default `anon` when absent). */

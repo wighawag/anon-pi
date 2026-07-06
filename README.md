@@ -46,7 +46,8 @@ The **first time** you launch anon-pi with no config yet, it welcomes you and ru
 1. **Proxy** — probes common SOCKS ports, confirms SOCKS5 with a real handshake, shows the findings (evidence only, it never labels the exit provider), then runs `netcage verify` and shows the real EXIT IP as proof it is not your host IP. You confirm on that evidence. (When your netcage has `detect-proxy`, init reuses netcage's own scanner for this; otherwise it probes locally.)
 2. **Local model** — captures the `host:port` of your model, probes it, then **imports models**. It merges two sources, both scoped to that endpoint: the provider in your own `~/.pi/agent/models.json` whose URL matches it (marked `[configured]` — your hand-tuned entries, with their `contextWindow`/`maxTokens`/etc.), and the endpoint's live `/v1/models` (marked `[server]`). You pick which to import (Enter/`c` = all configured, `a` = all, numbers, or `s` = skip) and which is the **default**. Because only the provider served by this endpoint (the one `--allow-direct` hole) is read, no other provider — and no other key — can ever enter the seed. It writes a **global** `models.json` + settings seed (shared by every machine, since the `llm` endpoint is global) and updates any already-seeded machine homes in place (conversations untouched). If the matching provider carries a real-looking apiKey, init **refuses** (it would put a host credential into the anon home) unless you pass `--force-allow-local-llm-api-key`.
 3. **Image** — pick a shipped `Dockerfile` (built via `podman build`), an existing image ref, or skip.
-4. **Projects root** — the host folder mounted at `/projects` (where bare `anon-pi` looks for projects). Defaults to `~/.anon-pi/projects/`; point it at your own dev folder if you want to jail pi into files you edit with host tools (`--mount <parent>` still overrides it per-launch).
+4. **Hardened deployment** — asks whether to run anon-pi's whole workspace under a dedicated `anon` account (see the hardened-deployment section below). This has **no default**: you answer `y` or `n` explicitly. It runs before the projects-root step so that step knows whether you are hardened.
+5. **Projects root** — the host folder mounted at `/projects` (where bare `anon-pi` looks for projects). Defaults to `~/.anon-pi/projects/`; point it at your own dev folder if you want to jail pi into files you edit with host tools (`--mount <parent>` still overrides it per-launch). On a **hardened** install the default lives under the `anon` account's tree, and a path under your login home is **refused**: it would leak your login username (through the mount source and file ownership) into the anon-run jail, defeating the dedicated account.
 
 It then writes `~/.anon-pi/config.json` + the `default` machine. It **never destroys** an existing home; it pre-fills your current values and only adds/updates config + the default machine.
 
@@ -312,11 +313,11 @@ Crossing into a persona account requires a sudo **password** by default (the Tie
 
 ### How you turn it on: `init` asks
 
-Hardening is driven entirely by `anon-pi init` (the same onboarding you already run). There is **no `harden` verb, no `--hardened` flag, and no separate `anon` wrapper command**: anon-pi is its own wrapper. `init`'s last step asks:
+Hardening is driven entirely by `anon-pi init` (the same onboarding you already run). There is **no `harden` verb, no `--hardened` flag, and no separate `anon` wrapper command**: anon-pi is its own wrapper. `init` asks (this step has **no default** — you answer `y` or `n` explicitly, an empty answer re-asks rather than silently declining):
 
 ```
-Step 5/5 - hardened deployment (optional)
-  Run under the dedicated `anon` account? [y/N]
+Step 4/5 - hardened deployment
+  Run under the dedicated `anon` account? (y/n, no default)
 ```
 
 This provisions the **default persona `anon`**. Answer `y` and it walks a two-tier "actively help, never silent root" flow:

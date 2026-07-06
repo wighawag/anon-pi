@@ -113,6 +113,8 @@ import {
 	planPersonaAdd,
 	personaAccount,
 	personaName,
+	isAnonPersonaAccount,
+	projectsRootLeaksLogin,
 	composeTorPersonaProxy,
 	offerTor,
 	DEFAULT_TOR_SOCKS_HOST_PORT,
@@ -2214,19 +2216,24 @@ function runInit(args: string[]): number {
 	const image = initImageStep();
 	if (image === ABORT) return 1;
 
-	// 4) PROJECTS ROOT: the host dir mounted at /projects (default ~/.anon-pi/
-	//    projects). Overridable per-launch with `--mount`; this sets the default.
-	const projects = initProjectsStep(env, current.projects);
-
-	// 5) HARDENING (docs/adr/0006): ask whether to run under the dedicated `anon`
+	// 4) HARDENING (docs/adr/0006): ask whether to run under the dedicated `anon`
 	//    account. If yes, the RESUMABLE Tier-1/Tier-2 flow runs (print the root
-	//    script -> wait -> re-check -> continue). ABORT propagates; a decline or a
-	//    non-hardened install leaves `hardened` unset. There is NO `harden` verb
-	//    and NO `--hardened` flag: hardening is this step INSIDE init. A caller
-	//    ALREADY running as `anon` (a hardened reconfigure) skips the prompt.
+	//    script -> wait -> re-check -> continue). ABORT propagates; a decline
+	//    leaves `hardened` unset. There is NO `harden` verb and NO `--hardened`
+	//    flag: hardening is this step INSIDE init. A caller ALREADY running as
+	//    `anon` (a hardened reconfigure) skips the prompt. This runs BEFORE the
+	//    projects-root step so that step knows whether we are hardened (and can
+	//    default to / guard the persona account's tree instead of the login home,
+	//    which would leak the login username through the mount source).
 	const hardenResult = initHardeningStep(env);
 	if (hardenResult === ABORT) return 1;
 	const hardened = hardenResult === true ? true : current.hardened;
+
+	// 5) PROJECTS ROOT: the host dir mounted at /projects (default ~/.anon-pi/
+	//    projects). Overridable per-launch with `--mount`; this sets the default.
+	//    On a hardened install the default lives under the `anon` account's tree
+	//    (never the login home), and a chosen login-home path is refused as a leak.
+	const projects = initProjectsStep(env, current.projects, hardened === true);
 
 	// WRITE config.json + the `default` machine (never destroying an existing
 	//    home). The proxy is always present (we only reach here on a chosen proxy).
@@ -2773,11 +2780,21 @@ function initImageStep(): string | undefined | typeof ABORT {
 function initProjectsStep(
 	env: AnonPiEnv,
 	currentProjects: string | undefined,
+	hardened: boolean,
 ): string | undefined {
 	process.stdout.write(
-		'\nStep 4/5 - projects root (the host folder mounted at /projects)\n',
+		'\nStep 5/5 - projects root (the host folder mounted at /projects)\n',
 	);
-	const builtin = builtinProjectsRoot(env);
+	// On a hardened install the projects root is the HOST bind-mount SOURCE for
+	// /projects, so a path under the login home would leak the login username
+	// (mount source + file ownership) into the anon-run jail, defeating the whole
+	// point of the dedicated account. Default to the `anon` account's tree, and
+	// REFUSE a chosen login-home path below (projectsRootLeaksLogin).
+	const accountHome = hardened ? anonAccountHome(ANON_ACCOUNT) : undefined;
+	const builtin =
+		accountHome !== undefined
+			? join(accountHome, '.anon-pi', 'projects')
+			: builtinProjectsRoot(env);
 	const shown = currentProjects ?? builtin;
 	if (currentProjects) {
 		process.stdout.write(`  current: ${currentProjects}\n`);
@@ -2788,16 +2805,40 @@ function initProjectsStep(
 			'  <parent>` still overrides it per-launch. Leave it at the default if\n' +
 			"  you're unsure.\n",
 	);
-	const ans = promptLine(`  Projects root (Enter to keep ${shown}): `);
-	if (ans === undefined) return currentProjects;
-	const trimmed = ans.trim();
-	if (trimmed === '') return currentProjects;
-	// Expand a leading `~` (path.resolve does NOT — it would make a literal `~`
-	// dir), then absolutize. Store the built-in as "unset" (undefined) so
-	// config.json stays clean when the user just accepts the default path.
-	const chosen = resolve(expandTilde(trimmed, env.home));
-	if (chosen === builtin) return undefined;
-	return chosen;
+	if (hardened) {
+		process.stdout.write(
+			`  HARDENED: keep this under the \`${ANON_ACCOUNT}\` account (the default), NOT\n` +
+				`  under your login home ${env.home} - a login-home path leaks your\n` +
+				'  username through the mount source and file ownership into the jail.\n',
+		);
+	}
+	for (;;) {
+		const ans = promptLine(`  Projects root (Enter to keep ${shown}): `);
+		if (ans === undefined) return currentProjects;
+		const trimmed = ans.trim();
+		if (trimmed === '') return currentProjects;
+		// Expand a leading `~` (path.resolve does NOT — it would make a literal `~`
+		// dir), then absolutize. Store the built-in as "unset" (undefined) so
+		// config.json stays clean when the user just accepts the default path.
+		const chosen = resolve(expandTilde(trimmed, env.home));
+		// A hardened install must NOT mount a login-home path (the leak). Re-prompt.
+		if (
+			projectsRootLeaksLogin({
+				projectsRoot: chosen,
+				loginHome: env.home,
+				hardened,
+			})
+		) {
+			process.stdout.write(
+				`  refused: ${chosen} is under your login home ${env.home}. On a hardened\n` +
+					`  install the projects root must live under the \`${ANON_ACCOUNT}\` account (e.g.\n` +
+					`  ${builtin}) so the mount source carries no login username. Choose another path.\n`,
+			);
+			continue;
+		}
+		if (chosen === builtin) return undefined;
+		return chosen;
+	}
 }
 
 /**
@@ -2806,9 +2847,12 @@ function initProjectsStep(
  * Returns:
  *   - `true`  hardening was chosen AND completed (the account is provisioned +
  *             the Tier-1 rootless setup ran) -> init marks `hardened: true`.
- *   - `false` the user declined (or is already running as `anon`, or a probe is
- *             unavailable) -> leave the install non-hardened.
- *   - ABORT   the user aborted the flow (Ctrl-C / an empty prompt) -> init exits.
+ *   - `false` the user explicitly declined (`n`) -> leave the install
+ *             non-hardened. (Already running under a hardened persona account
+ *             returns `true`, not `false`.)
+ *   - ABORT   the user aborted (Ctrl-C / EOF at the y/n prompt or the resumable
+ *             loop) -> init exits. There is NO default: an empty answer at the
+ *             y/n prompt re-asks, it does NOT silently decline.
  *
  * The DECISION is the pure planHardeningStep over evaluateHardenedPreflight; this
  * function is the thin loop that PROBES (probeHardenedPreflight), PRINTS the
@@ -2818,7 +2862,7 @@ function initProjectsStep(
  */
 function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 	process.stdout.write(
-		'\nStep 5/5 - hardened deployment (optional)\n' +
+		'\nStep 4/5 - hardened deployment\n' +
 			`  Run anon-pi's whole workspace under a dedicated \`${ANON_ACCOUNT}\` Unix\n` +
 			'  account (mode-700 home), so a host coding agent running as your login\n' +
 			'  user cannot casually `find`/`grep` your anonymized session transcripts.\n' +
@@ -2829,20 +2873,34 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 			'`.\n',
 	);
 
-	// A caller ALREADY running as `anon` (a hardened reconfigure) does not re-ask;
-	// the install is hardened by definition.
-	if (currentUsername() === ANON_ACCOUNT) {
+	// A caller ALREADY running under a hardened persona account (the default
+	// `anon` OR a namespaced `anon-<name>`) does not re-ask; the install is
+	// hardened by definition. (isAnonPersonaAccount generalizes the v1 bare-`anon`
+	// check so a persona reconfigure is recognized too.)
+	const who = currentUsername();
+	if (who !== undefined && isAnonPersonaAccount(who)) {
 		process.stdout.write(
-			`  (already running as \`${ANON_ACCOUNT}\`; keeping the hardened deployment.)\n`,
+			`  (already running as \`${who}\`; keeping the hardened deployment.)\n`,
 		);
 		return true;
 	}
 
-	const ans = promptLine(
-		`  Run under the dedicated \`${ANON_ACCOUNT}\` account? [y/N] `,
-	);
-	if (ans === undefined) return false; // Enter = keep the default (no hardening).
-	if (!/^y(es)?$/i.test(ans.trim())) return false;
+	// NO DEFAULT: hardening is a deliberate security posture, so require an
+	// explicit y/n. Enter/blank/garbage re-prompts (it does NOT silently mean no).
+	// Ctrl-C (promptLine -> undefined) still aborts init, as everywhere. On `n` we
+	// return early (non-hardened); on `y` we fall through to the provisioning flow.
+	for (;;) {
+		const ans = promptLine(
+			`  Run under the dedicated \`${ANON_ACCOUNT}\` account? (y/n, no default) `,
+		);
+		if (ans === undefined) return ABORT; // Ctrl-C / EOF: abort init.
+		const t = ans.trim();
+		if (/^y(es)?$/i.test(t)) break;
+		if (/^n(o)?$/i.test(t)) return false;
+		process.stdout.write(
+			'  Please answer `y` or `n` (there is no default for this choice).\n',
+		);
+	}
 
 	const loginUser = currentUsername() ?? 'your-login-user';
 	const anonPiPath = anonPiBinaryPath();
