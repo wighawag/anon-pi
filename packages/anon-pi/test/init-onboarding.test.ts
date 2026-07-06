@@ -316,4 +316,18 @@ describe('serializeConfigJson', () => {
 		);
 		expect(parsed).toEqual({proxy: 'socks5h://x:1', llm: 'y:2'});
 	});
+
+	it('writes `hardened: true` only when hardened; omits it otherwise (docs/adr/0006)', () => {
+		const hardened = JSON.parse(
+			serializeConfigJson({proxy: 'socks5h://x:1', hardened: true}),
+		);
+		expect(hardened).toEqual({proxy: 'socks5h://x:1', hardened: true});
+		// a normal install keeps config.json clean (no `hardened` key).
+		expect(
+			serializeConfigJson({proxy: 'socks5h://x:1', hardened: false}),
+		).not.toContain('hardened');
+		expect(serializeConfigJson({proxy: 'socks5h://x:1'})).not.toContain(
+			'hardened',
+		);
+	});
 });

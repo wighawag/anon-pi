@@ -119,6 +119,15 @@ describe('parseConfigJson (config.json shape)', () => {
 		expect(c.projects).toBeUndefined();
 		expect(c.defaultMachine).toBeUndefined();
 	});
+
+	it('parses the `hardened` boolean marker (docs/adr/0006), ignoring non-booleans', () => {
+		expect(parseConfigJson({hardened: true}).hardened).toBe(true);
+		expect(parseConfigJson({hardened: false}).hardened).toBe(false);
+		// absent = non-hardened (undefined, not false-by-coercion).
+		expect(parseConfigJson({}).hardened).toBeUndefined();
+		// a hand-edited non-boolean is ignored.
+		expect(parseConfigJson({hardened: 'yes'}).hardened).toBeUndefined();
+	});
 });
 
 describe('parseMachineJson (machine.json shape)', () => {
