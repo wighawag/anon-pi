@@ -11,24 +11,42 @@ is scoped to the package (its behaviour + release notes), NOT to every commit,
 and the gate ENFORCES exactly that scope (see below) — so this is not merely a
 convention you could forget, it is checked.
 
-- **Needs a changeset (gate ENFORCES it):** any change to `packages/anon-pi/**`
-  (source, or the package's own files). `pnpm changeset status --since=main`
-  errors + EXITS NON-ZERO when a package changed with no changeset, so `verify`
-  FAILS and the change cannot land. Pick the bump level honestly (`patch` /
-  `minor` / `major`) per semver; a package change that genuinely needs no
-  release (e.g. a comment-only edit) still needs an entry, use
-  `pnpm changeset add --empty`.
-- **Does NOT need a changeset (gate PASSES without one):** a change that touches
-  NO package — edits under `work/` (PRDs, tasks, notes), root repo docs
-  (`AGENTS.md`, top-level docs), CI/tooling config outside `packages/`. Because
-  nothing under `packages/` changed, `changeset status` finds nothing to require
-  and exits 0, so `verify` passes with no changeset. Do NOT add an empty
-  changeset for these — it wrongly bumps the package + clutters the release
-  notes.
-- **The dividing line the gate actually uses is "did a package change", which
-  tracks "does a published-package user feel this".** They coincide: package
-  source is what ships to `npm install`, and `work/`/root-docs do not. When in
-  doubt, ask "did I touch `packages/`?" — if yes, changeset; if no, none.
+**Why this rule exists:** primarily to stop an autonomous (dorfl) agent from
+cutting a `work/<slug>` branch that IMPLEMENTS code without a release note. It
+applies equally to a human-in-loop session THAT CHANGES CODE (a human code
+change also gets its changeset). It does NOT apply to a change with no package
+code in it.
+
+**Corollary — a docs-only / `work/`-only change needs NEITHER a changeset NOR a
+gate run.** Because the whole gate keys on `git diff` under `packages/`, a commit
+that touches only `work/`, root docs (`AGENTS.md`, top-level docs), or tooling
+has nothing for `verify` to check: no build to break, no test to fail, no
+changeset to require. Do not add a changeset AND do not bother running
+`pnpm -r build && pnpm -r test` for it — there is nothing it can catch. Run the
+gate when you changed code.
+
+- **Needs a changeset (gate ENFORCES it):** any git-tracked change under
+  `packages/anon-pi/` — NOT just published source (keys on the package
+  DIRECTORY, not the `files` publish list; see the detailed rule under the gate
+  below). `pnpm changeset status --since=main` errors + EXITS NON-ZERO when such
+  a file changed with no changeset, so `verify` FAILS and the change cannot
+  land. Pick the bump level honestly (`patch` / `minor` / `major`) per semver; a
+  package change that genuinely needs no release (a test/tsconfig/comment-only
+  edit) still needs an entry — use `pnpm changeset add --empty`.
+- **Does NOT need a changeset (gate PASSES without one), and needs no gate run:**
+  a change with NO git-tracked file under `packages/anon-pi/` — edits under
+  `work/` (PRDs, tasks, notes), root repo docs (`AGENTS.md`, top-level docs),
+  CI/tooling config outside the package. Also gitignored package files
+  (`dist/**`, the build-copied `packages/anon-pi/README.md`) do NOT count
+  (`git diff` cannot see them). `changeset status` finds nothing to require and
+  exits 0. Do NOT add an empty changeset for these (it wrongly bumps the package
+  + clutters release notes), and do not bother running the gate.
+- **The exact test is NOT "would a user feel this" — it is "did I change a tracked
+  file under `packages/`".** These do NOT fully coincide: a `test/**` or
+  `tsconfig.json` edit that no `npm install` user ever sees STILL needs a
+  changeset, because it lives under the package dir. When in doubt, ask "did I
+  change a tracked file under `packages/anon-pi/`?" — if yes, changeset (possibly
+  `--empty`) + run the gate; if no, neither.
 
 ## Build / test gate
 
