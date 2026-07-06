@@ -107,6 +107,9 @@ import {
 	resolvePersonaSelection,
 	stripAsFlag,
 	buildAnonSudoArgv,
+	INIT_APPLY_SUBCOMMAND,
+	HARDENED_HOME_MODE,
+	type InitApplyPayload,
 	evaluateHardenedPreflight,
 	planHardeningStep,
 	parsePersonaArgs,
@@ -181,6 +184,16 @@ function main(argv: string[]): number {
 	if (rawArgs[0] === '--version' || rawArgs[0] === '-V') {
 		process.stdout.write(`anon-pi ${anonPiVersion() ?? '(unknown)'}\n`);
 		return 0;
+	}
+
+	// INTERNAL: the as-account workspace-write handoff (hardened `init` / `persona
+	// add`). We are ALREADY the account here (the parent SPAWNED `sudo -u <account>
+	// -i anon-pi __init-apply`), so we do NOT redirect (that would loop) and we do
+	// NOT parse `--as`/the launch grammar: we just read the piped payload and write
+	// the workspace into THIS account's own ~/.anon-pi. Dispatched before persona
+	// selection/redirect so it can never be mistaken for a project or re-crossed.
+	if (rawArgs[0] === INIT_APPLY_SUBCOMMAND) {
+		return runInitApply();
 	}
 
 	// MULTI-PERSONA SELF-RE-EXEC (prd `multi-persona-hardened-accounts`,
@@ -494,6 +507,90 @@ function anonAccountHome(account: string): string | undefined {
 	// passwd: name:passwd:uid:gid:gecos:home:shell
 	const home = fields[5];
 	return home && home.trim() !== '' ? home : undefined;
+}
+
+/**
+ * Cross into `account` and let IT write the init workspace, because the account's
+ * home is mode-700 and owned by the account (the login user cannot write it,
+ * ADR-0006). anon-pi never setuids; it SPAWNS `sudo -u <account> -i anon-pi
+ * __init-apply` (the scoped sudoers rule permits running the anon-pi binary as
+ * the account) and pipes the resolved payload on STDIN, so nothing sensitive is
+ * in argv/`ps` and there is no world-readable temp file (this matters for the
+ * `--force-allow-local-llm-api-key` case, whose config carries a real key). The
+ * child runs non-interactively and performs the writes into its OWN `~/.anon-pi`.
+ * Returns the child's exit code (0 on success). sudo may prompt for the login
+ * user's password on the controlling TTY (the payload is on stdin, not the TTY),
+ * which is the deliberate-crossing gate.
+ */
+function applyWorkspaceAsAccount(
+	account: string,
+	payload: InitApplyPayload,
+): number {
+	const argv = buildAnonSudoArgv({
+		anonPiPath: anonPiBinaryPath(),
+		forwardedArgs: [INIT_APPLY_SUBCOMMAND],
+		account,
+	});
+	const [cmd, ...rest] = argv;
+	const res = spawnSync(cmd, rest, {
+		// stdin: pipe the payload; stdout/stderr inherit so the child's progress and
+		// any sudo password prompt (sudo reads the password from /dev/tty, not stdin)
+		// reach the user.
+		stdio: ['pipe', 'inherit', 'inherit'],
+		input: JSON.stringify(payload),
+	});
+	if (res.error) {
+		process.stderr.write(
+			`anon-pi: failed to write the workspace as \`${account}\` via sudo ` +
+				`(${res.error.message}).\n` +
+				`This is a hardened install; the workspace lives under the account's\n` +
+				`mode-700 home, so the write must run as \`${account}\`. Ensure the Tier-2\n` +
+				`sudoers rule is installed, or run: \`sudo -u ${account} -i anon-pi ${INIT_APPLY_SUBCOMMAND}\`\n` +
+				`with the config on stdin.\n`,
+		);
+		return 1;
+	}
+	return res.status ?? 1;
+}
+
+/**
+ * The as-account `__init-apply` handler: read an InitApplyPayload on STDIN and
+ * perform the init workspace writes into THIS process's own `~/.anon-pi`. It is
+ * only ever reached inside the `sudo -u <account> -i anon-pi __init-apply`
+ * crossing (so `os.userInfo()` is the account and `resolveAnonPiHome` resolves to
+ * the account's home). Non-interactive by construction (stdin is a pipe). It
+ * NEVER re-crosses (the redirect guard already returns false when running as the
+ * account). Returns an exit code.
+ */
+function runInitApply(): number {
+	let raw = '';
+	try {
+		raw = readFileSync(0, 'utf8'); // fd 0 = stdin (the piped payload).
+	} catch (e) {
+		process.stderr.write(
+			`anon-pi: ${INIT_APPLY_SUBCOMMAND} could not read the payload on stdin ` +
+				`(${(e as Error).message}).\n`,
+		);
+		return 1;
+	}
+	let payload: InitApplyPayload;
+	try {
+		payload = JSON.parse(raw) as InitApplyPayload;
+	} catch (e) {
+		process.stderr.write(
+			`anon-pi: ${INIT_APPLY_SUBCOMMAND} got an unparseable payload ` +
+				`(${(e as Error).message}).\n`,
+		);
+		return 1;
+	}
+	if (payload === null || typeof payload !== 'object' || !payload.config) {
+		process.stderr.write(
+			`anon-pi: ${INIT_APPLY_SUBCOMMAND} payload is missing \`config\`.\n`,
+		);
+		return 1;
+	}
+	applyInitWorkspace(envFromProcess(process.env), payload);
+	return 0;
 }
 
 /**
@@ -2235,12 +2332,10 @@ function runInit(args: string[]): number {
 	//    (never the login home), and a chosen login-home path is refused as a leak.
 	const projects = initProjectsStep(env, current.projects, hardened === true);
 
-	// WRITE config.json + the `default` machine (never destroying an existing
-	//    home). The proxy is always present (we only reach here on a chosen proxy).
-	//    `hardened` is written only when the hardening step above completed.
-	const anonHome = resolveAnonPiHome(env);
-	mkdirSync(anonHome, {recursive: true});
-	const configPath = join(anonHome, 'config.json');
+	// COMPOSE the workspace payload (config.json + the `default` machine image +
+	// the generated models/settings), then WRITE it. The proxy is always present
+	// (we only reach here on a chosen proxy); `hardened` is written only when the
+	// hardening step above completed.
 	const nextConfig: AnonPiConfig = {
 		proxy: proxyUrl,
 		llm: llm ?? current.llm,
@@ -2248,28 +2343,98 @@ function runInit(args: string[]): number {
 		projects: projects ?? current.projects,
 		hardened: hardened === true ? true : undefined,
 	};
-	writeFileSync(configPath, serializeConfigJson(nextConfig));
-	process.stdout.write(`\nanon-pi: wrote ${configPath}.\n`);
-
-	// The `default` machine: create it if absent (NEVER wipe an existing home),
-	// pin/re-pin its image when one was chosen. Its home seeds on first launch.
-	initWriteDefaultMachine(env, image);
 
 	// The GLOBAL local-model models.json + settings seed, generated from the
-	// captured endpoint + the CHOSEN models (this is the `import` replacement).
+	// captured endpoint + the CHOSEN models (this is the `import` replacement). We
+	// GENERATE the bytes here (login-side); the WRITE happens in applyInitWorkspace
+	// (locally, or handed to the as-account child on a hardened install).
 	const endpoint = llm ?? current.llm;
+	let modelsBody: string | undefined;
+	let selection: ModelSelection | undefined;
 	if (endpoint !== undefined) {
 		const models = generateModelsJson(
 			endpoint,
 			llmResult.models,
 			llmResult.apiKey,
 		);
-		const modelsBody = JSON.stringify(models, null, '\t') + '\n';
+		modelsBody = JSON.stringify(models, null, '\t') + '\n';
+		selection =
+			llmResult.defaultId !== undefined && llmResult.models.length > 0
+				? generateModelSelection(
+						llmResult.models.map((m) => m.id),
+						llmResult.defaultId,
+					)
+				: undefined;
+	}
+
+	const payload: InitApplyPayload = {
+		config: nextConfig,
+		machineImage: image,
+		machine: DEFAULT_MACHINE,
+		modelsBody,
+		selection,
+	};
+
+	// On a hardened install the workspace lives in the `anon` account's mode-700
+	// home, which the LOGIN USER cannot write (ADR-0006). Cross to the account and
+	// let IT do the writes (payload piped on stdin). Otherwise write locally.
+	if (hardened === true && currentUsername() !== ANON_ACCOUNT) {
+		const rc = applyWorkspaceAsAccount(ANON_ACCOUNT, payload);
+		if (rc !== 0) return rc;
+		process.stdout.write(
+			'\nanon-pi: onboarding complete (workspace written under the `' +
+				ANON_ACCOUNT +
+				'` account). Launch with `anon-pi <project>` or `anon-pi --shell`.\n',
+		);
+		return 0;
+	}
+
+	applyInitWorkspace(env, payload);
+	process.stdout.write(
+		'\nanon-pi: onboarding complete. Launch with `anon-pi <project>` or ' +
+			'`anon-pi --shell`.\n',
+	);
+	return 0;
+}
+
+/**
+ * Perform the actual init workspace WRITES into `resolveAnonPiHome(env)`: the
+ * config.json, the `default` machine (image pin), and the global models.json +
+ * settings seed (with the models-to-seeded-homes reconcile). Factored so it can
+ * run EITHER locally (non-hardened, as the login user) OR inside the as-account
+ * `__init-apply` child (hardened: the child runs as the account, so its `$HOME`
+ * is the account's and these writes land in the account's own mode-700 tree).
+ * All values are pre-resolved in the payload; this NEVER prompts.
+ */
+function applyInitWorkspace(env: AnonPiEnv, payload: InitApplyPayload): void {
+	const anonHome = resolveAnonPiHome(env);
+	mkdirSync(anonHome, {recursive: true});
+	// A hardened workspace is mode-700 (only the account may read its transcripts):
+	// applied HERE because the write runs as the account, so the ownership is right.
+	if (payload.config.hardened === true) {
+		chmodSync(anonHome, HARDENED_HOME_MODE);
+	}
+	const configPath = join(anonHome, 'config.json');
+	writeFileSync(configPath, serializeConfigJson(payload.config));
+	process.stdout.write(`\nanon-pi: wrote ${configPath}.\n`);
+
+	// The `default` machine + the models/settings seed are an `init`-only concern
+	// (a persona payload sends neither `machine` nor a models body: a persona gets
+	// only its config.json, its identity/config is the user's to set inside the
+	// home). Gate the machine write on `payload.machine` so `persona add` does not
+	// create a `default` machine under the persona.
+	if (payload.machine === undefined) return;
+
+	// The `default` machine: create it if absent (NEVER wipe an existing home),
+	// pin/re-pin its image when one was chosen. Its home seeds on first launch.
+	initWriteDefaultMachine(env, payload.machineImage);
+
+	if (payload.modelsBody !== undefined) {
+		const modelsBody = payload.modelsBody;
 		// GLOBAL seed: the local model is a workspace-level thing (config.llm is
 		// global), so its models.json lives once at the workspace root and seeds
 		// EVERY machine's fresh home. A machine may still override with its own
 		// machines/<M>/models.json.
-		mkdirSync(resolveAnonPiHome(env), {recursive: true});
 		writeFileSync(globalModelsSeedPath(env), modelsBody);
 
 		// Migration: earlier versions wrote this seed under machines/default/. Now
@@ -2285,28 +2450,16 @@ function runInit(args: string[]): number {
 			if (existsSync(stale)) rmSync(stale, {force: true});
 		}
 		process.stdout.write(
-			`anon-pi: wrote the global local-model models.json ` +
-				`(${llmResult.models.length} model${llmResult.models.length === 1 ? '' : 's'}; shared by all machines).\n`,
+			`anon-pi: wrote the global local-model models.json.\n`,
 		);
 
-		// settings.json seed: the default model + enabledModels for the imported
-		// set. The first-launch promotion merges it into each home's settings (so
-		// image-staged packages/extensions survive). Only when the user picked at
-		// least one model + a default.
-		const selection =
-			llmResult.defaultId !== undefined && llmResult.models.length > 0
-				? generateModelSelection(
-						llmResult.models.map((m) => m.id),
-						llmResult.defaultId,
-					)
-				: undefined;
-		if (selection) {
+		if (payload.selection) {
 			writeFileSync(
 				globalSettingsSeedPath(env),
-				JSON.stringify(selection, null, '\t') + '\n',
+				JSON.stringify(payload.selection, null, '\t') + '\n',
 			);
 			process.stdout.write(
-				`anon-pi: default model set to "${llmResult.defaultId}".\n`,
+				`anon-pi: default model set to "${payload.selection.defaultModel}".\n`,
 			);
 		}
 
@@ -2314,10 +2467,13 @@ function runInit(args: string[]): number {
 		// (the first-launch promotion is marker-guarded). Apply the new
 		// models.json + settings selection DIRECTLY to EVERY already-seeded machine
 		// home now, so re-running `init` updates existing environments without
-		// wiping conversations (init runs on the host; homes are host dirs). Fresh
-		// (unseeded) homes are left to the launch-time seed. A machine with its OWN
-		// per-machine models.json override is skipped (its local model differs).
-		const updated = applyModelsToSeededHomes(env, modelsBody, selection);
+		// wiping conversations. Fresh (unseeded) homes are left to the launch-time
+		// seed. A machine with its OWN per-machine models.json override is skipped.
+		const updated = applyModelsToSeededHomes(
+			env,
+			modelsBody,
+			payload.selection,
+		);
 		if (updated.length > 0) {
 			process.stdout.write(
 				`anon-pi: updated ${updated.length} existing machine home${updated.length === 1 ? '' : 's'} ` +
@@ -2325,12 +2481,6 @@ function runInit(args: string[]): number {
 			);
 		}
 	}
-
-	process.stdout.write(
-		'\nanon-pi: onboarding complete. Launch with `anon-pi <project>` or ' +
-			'`anon-pi --shell`.\n',
-	);
-	return 0;
 }
 
 /**
@@ -2926,15 +3076,17 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 		});
 
 		if (plan.kind === 'continue-tier1') {
-			// Tier 1 (rootless): create the account's workspace mode-700. NO wrapper
-			// file is written; NETCAGE_GRAPHROOT is never set (the uid-scoped store
-			// handles itself). In tests ANON_PI_HOME is a temp dir, so this touches
-			// only the isolated workspace.
-			mkdirSync(plan.anonHome, {recursive: true});
-			chmodSync(plan.anonHome, plan.mode);
+			// Tier 1 (rootless): the account is provisioned. We do NOT create the
+			// account's mode-700 workspace HERE: this code runs as the LOGIN USER, who
+			// cannot write into the account's mode-700 home (that was the EACCES bug).
+			// The workspace dir + config/machine/models are written LATER as the
+			// account itself (applyWorkspaceAsAccount -> the __init-apply child ->
+			// applyInitWorkspace, which mkdir+chmod-700s the account's ~/.anon-pi). NO
+			// wrapper file; NETCAGE_GRAPHROOT is never set (the uid-scoped store handles
+			// itself).
 			process.stdout.write(
-				`  anon-pi: hardened workspace ready at ${plan.anonHome} (mode 0700).\n` +
-					`  Day-to-day \`anon-pi …\` now self-re-execs as \`${ANON_ACCOUNT}\`.\n`,
+				`  anon-pi: \`${ANON_ACCOUNT}\` account is provisioned; the workspace will be\n` +
+					`  written under it. Day-to-day \`anon-pi …\` now self-re-execs as \`${ANON_ACCOUNT}\`.\n`,
 			);
 			return true;
 		}
@@ -3268,20 +3420,28 @@ function runPersona(personaArgs: string[]): number {
 		}
 
 		if (plan.kind === 'continue-tier1') {
-			// Tier 1 (rootless): create the persona's workspace mode-700 and write its
-			// OWN ordinary v1 config.json (carrying the per-persona proxy) there. In
-			// tests this lands in a temp account home (getent stub), so it touches only
-			// the isolated tree. NO wrapper file; NO NETCAGE_GRAPHROOT.
-			mkdirSync(plan.anonHome, {recursive: true});
-			chmodSync(plan.anonHome, plan.mode);
-			writeFileSync(
-				join(plan.anonHome, 'config.json'),
-				serializeConfigJson(plan.config),
-			);
+			// Tier 1 (rootless): write the persona's OWN ordinary config.json (carrying
+			// its per-persona proxy) into its mode-700 home. The persona home is owned
+			// by the persona account and mode-700, so the LOGIN USER cannot write it: we
+			// cross to the account and let IT write (applyWorkspaceAsAccount -> the
+			// __init-apply child -> applyInitWorkspace). We are already the account only
+			// in a same-user reconfigure; then we write locally. `config.hardened: true`
+			// makes the child chmod the workspace 0700. NO machine/models for a persona
+			// (identity/config is the user's to set inside the home). NO wrapper file;
+			// NO NETCAGE_GRAPHROOT.
+			const personaPayload: InitApplyPayload = {
+				config: {...plan.config, hardened: true},
+			};
+			if (currentUsername() !== account) {
+				const rc = applyWorkspaceAsAccount(account, personaPayload);
+				if (rc !== 0) return rc;
+			} else {
+				applyInitWorkspace(envFromProcess(process.env), personaPayload);
+			}
 			process.stdout.write(
 				`anon-pi: provisioned persona \`${personaName(account) ?? ANON_ACCOUNT}\` ` +
-					`(account \`${account}\`): wrote ${join(plan.anonHome, 'config.json')} ` +
-					`(mode 0700) with its own egress.\n` +
+					`(account \`${account}\`): wrote its config.json (mode 0700) with its own ` +
+					`egress.\n` +
 					`  Persona identity (email/git/creds) is YOURS to set inside the ` +
 					`persona's home.\n`,
 			);

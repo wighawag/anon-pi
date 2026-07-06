@@ -4042,6 +4042,55 @@ export function buildAnonSudoArgv(inv: HardenedInvocation): string[] {
 	];
 }
 
+// --- The as-account workspace-write handoff (hardened `init` / `persona add`) --
+//
+// On a hardened install the workspace (mode-700 dir + config.json + optionally
+// the default machine + models/settings seeds) MUST be written AS the account,
+// because the account's home is mode-700 and owned by the account: the login
+// user cannot write into it (ADR-0006: "the login user must not write the
+// workspace"). anon-pi never setuids; it crosses the SAME way a launch does, by
+// SPAWNING `sudo -u <account> -i anon-pi <INIT_APPLY_SUBCOMMAND>` (permitted by
+// the scoped sudoers rule, which allows running the anon-pi BINARY as the
+// account with any args). The resolved values are handed to the as-account child
+// on STDIN (not an argv path + not a temp file): nothing sensitive lands in
+// `ps`, there is no world-readable temp window, and the `--force-allow-local-llm
+// -api-key` case (whose config carries a real key) does not leak. The child runs
+// non-interactively (piped stdin, no TTY) and performs the identical writes it
+// would have done locally, into ITS OWN `$HOME/.anon-pi`.
+
+/**
+ * The internal subcommand the hardened crossing invokes on the as-account child:
+ * `anon-pi __init-apply`. It reads an InitApplyPayload (JSON) on stdin and writes
+ * the workspace into the account's own `~/.anon-pi`. INTERNAL (double-underscore,
+ * not in help): a human never runs it; only the `sudo -u <account> -i anon-pi`
+ * handoff does. Kept as ONE named constant so the emit site + the dispatch site
+ * can never drift.
+ */
+export const INIT_APPLY_SUBCOMMAND = '__init-apply';
+
+/**
+ * The JSON payload the login-user side serializes and pipes (on stdin) to the
+ * as-account `__init-apply` child. It carries ONLY already-resolved values (the
+ * interactive answers are gathered login-side; the child never prompts). Both
+ * hardened `init` and hardened `persona add` use it: `persona add` sends only
+ * `config` (no machine/models), `init` sends all of it.
+ */
+export interface InitApplyPayload {
+	/** The config.json to write into the account's `~/.anon-pi/config.json`. */
+	config: AnonPiConfig;
+	/**
+	 * `init` only: create/update the `default` machine pinned to this image (absent
+	 * / undefined = no machine write, e.g. `persona add`, or an imageless `init`).
+	 */
+	machineImage?: string;
+	/** `init` only: the default machine name to create/pin (`init` passes DEFAULT_MACHINE). */
+	machine?: string;
+	/** `init` only: the serialized global models.json body (already generated), if any. */
+	modelsBody?: string;
+	/** `init` only: the model selection (default + enabled) for the global settings seed, if any. */
+	selection?: ModelSelection;
+}
+
 /**
  * PURE: single-quote a token for a POSIX `sh -c` command string (the `su -c`
  * fallback runs one string through a login shell). Wraps in `'…'` and escapes an

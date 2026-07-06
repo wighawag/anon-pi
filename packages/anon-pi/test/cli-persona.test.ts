@@ -96,8 +96,47 @@ function fakeBin(opts: {accountHome?: string; torSocks5?: boolean}): string {
 			`if [ "$1" = --version ]; then echo 'netcage 0.11.0'; exit 0; fi\n` +
 			`echo "TRIPWIRE: real netcage $1 was invoked" >&2\nexit 97\n`,
 	);
+	// `sudo` is the AS-ACCOUNT crossing (real: `sudo -u <account> -i <anon-pi>
+	// __init-apply` with the payload on stdin). We STUB it to EMULATE the crossing
+	// so the Tier-1 write lands in the account's (temp) home like the real login
+	// shell would: skip `-u <account> -i`, then run the remaining command
+	// (`<anon-pi-path> __init-apply …`) as node, with HOME set to the account home
+	// and ANON_PI_HOME UNSET (real `sudo -i` resets the env, so the child resolves
+	// its workspace from the account's $HOME), forwarding our stdin. This is NOT a
+	// tripwire: crossing to the account to write its OWN mode-700 home is the
+	// CORRECT behaviour (the login user cannot write there). The ROOT-provisioning
+	// tools below stay tripwires: anon-pi must NEVER self-provision root.
+	// A REAL `anon-pi` on the fake PATH: runs the BUILT dist/cli.js under test via
+	// node. So `command -v anon-pi` (in anonPiBinaryPath) resolves to THIS, and the
+	// as-account crossing re-execs the code under test (not any installed anon-pi).
+	writeFileSync(
+		join(bin, 'anon-pi'),
+		`#!/bin/sh\nexec '${process.execPath}' '${cli}' "$@"\n`,
+	);
+	if (home !== '') {
+		writeFileSync(
+			join(bin, 'sudo'),
+			`#!/bin/sh\n` +
+				`# emulate: sudo -u <account> -i <anon-pi> <args...> (payload on stdin).\n` +
+				`# drop the leading \`-u <account> -i\` sudo flags, keep the command, then\n` +
+				`# run it with HOME=<account home> and ANON_PI_HOME unset (real \`sudo -i\`\n` +
+				`# resets the env), forwarding our stdin (the piped payload).\n` +
+				`while [ "$1" = -u ] || [ "$1" = -i ]; do\n` +
+				`  if [ "$1" = -u ]; then shift 2; else shift; fi\n` +
+				`done\n` +
+				`unset ANON_PI_HOME\n` +
+				`HOME='${home}'\n` +
+				`export HOME\n` +
+				`exec "$@"\n`,
+		);
+	} else {
+		// No account home configured: sudo should never be invoked; keep it a tripwire.
+		writeFileSync(
+			join(bin, 'sudo'),
+			`#!/bin/sh\necho "TRIPWIRE: real sudo was invoked" >&2\nexit 97\n`,
+		);
+	}
 	for (const tripwire of [
-		'sudo',
 		'su',
 		'useradd',
 		'loginctl',
@@ -112,6 +151,7 @@ function fakeBin(opts: {accountHome?: string; torSocks5?: boolean}): string {
 		);
 	}
 	for (const f of [
+		'anon-pi',
 		'getent',
 		'netcage',
 		'sudo',
