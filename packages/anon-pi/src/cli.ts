@@ -3376,10 +3376,45 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 			return true;
 		}
 
-		// wait-for-account: PRINT what is missing (the checks), then the reviewable
-		// Tier-2 commands (filtered to only what is needed), then wait for the human to
-		// run them and continue. On continue we loop and RE-PROBE (resumability: the
-		// state is the OS, not a flag).
+		// SEPARATE STEP: the anon-pi-binary requirement. This is a precondition on
+		// anon-pi ITSELF (it must be system-installed so the account can run it), NOT
+		// a root-shell command. Re-checking in this SAME init session cannot fix it
+		// (the running process is still the unsuitable binary), so we do NOT enter the
+		// "paste root commands + press Enter to re-check" loop for it: we print its own
+		// remediation and ask the user to reinstall + RE-RUN init (or skip).
+		const binaryFailure = plan.failures.find((f) => f.id === 'anon-pi-binary');
+		if (binaryFailure !== undefined) {
+			process.stdout.write(
+				'\n' +
+					c.warn(c.bold('  anon-pi must be installed system-wide first')) +
+					'\n',
+			);
+			process.stdout.write(`  ${binaryFailure.remediation}\n`);
+			// The account-provisioning failures (if any) are shown too, but as a
+			// "you'll do these after reinstalling + re-running" note, not a paste-now
+			// prompt (the root commands need the system-installed binary in their
+			// sudoers rule anyway).
+			const others = plan.failures.filter((f) => f.id !== 'anon-pi-binary');
+			if (others.length > 0) {
+				process.stdout.write(
+					c.dim(
+						`\n  (After that, re-running init will print the remaining root commands\n` +
+							`  to provision the account. ${others.length} other check${others.length === 1 ? '' : 's'} still pending.)`,
+					) + '\n',
+				);
+			}
+			const cont = promptLine(
+				`\n  Install anon-pi system-wide + remove the per-user one, then ${c.bold('re-run `anon-pi init`')}.\n` +
+					`  Press Enter to abort init now, or type ${c.bold('skip')} to install non-hardened: `,
+			);
+			if (cont !== undefined && /^skip$/i.test(cont.trim())) return false;
+			return ABORT; // reinstall needed; a re-check in this session cannot help.
+		}
+
+		// wait-for-account (binary IS suitable): PRINT what is missing (the checks),
+		// then the reviewable Tier-2 commands (filtered to only what is needed), then
+		// wait for the human to run them and continue. On continue we loop and RE-PROBE
+		// (resumability: the state is the OS, not a flag).
 		process.stdout.write(
 			'\n' + c.warn(c.bold('  What is still needed:')) + '\n',
 		);

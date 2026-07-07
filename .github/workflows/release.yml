@@ -18,7 +18,16 @@ on:
   push:
     branches: [main]
 
-concurrency: ${{ github.workflow }}-${{ github.ref }}
+# Serialize release runs on main, but NEVER cancel an in-progress one:
+# `changeset publish` may be mid-publish, and cancelling it would drop the
+# release. `changeset publish` is idempotent (it skips versions already on npm),
+# so letting each queued run finish is always safe, and the run for the latest
+# `main` state always publishes the current version. Without
+# `cancel-in-progress: false` a fast feature-push + Version-PR-merge could cancel
+# the publish run and leave the bumped version unpublished.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
