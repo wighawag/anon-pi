@@ -2600,6 +2600,16 @@ function runInit(args: string[]): number {
 	if (hardened === true && currentUsername() !== ANON_ACCOUNT) {
 		const rc = applyWorkspaceAsAccount(ANON_ACCOUNT, payload);
 		if (rc !== 0) return rc;
+		// The launch REDIRECT decision (isHardenedInstall) runs as the LOGIN USER,
+		// BEFORE crossing, so it reads the LOGIN user's config - which cannot see the
+		// `hardened: true` we just wrote into the ACCOUNT's mode-700 home. Write a
+		// MINIMAL login-side marker (`{ "hardened": true }`) so every future launch
+		// redirects into `anon`. It carries NOTHING sensitive (no proxy/llm/projects,
+		// no transcripts): the real workspace config lives under the account and is
+		// read AFTER the crossing. This overwrites any stale non-hardened login config,
+		// which is correct: on a hardened box the login home is vestigial (only the
+		// redirect flag matters; ADR-0006 keeps the workspace out of ~/.anon-pi).
+		writeHardenedLoginMarker(env);
 		process.stdout.write(
 			'\nanon-pi: onboarding complete (workspace written under the `' +
 				ANON_ACCOUNT +
@@ -2614,6 +2624,26 @@ function runInit(args: string[]): number {
 			'`anon-pi --shell`.\n',
 	);
 	return 0;
+}
+
+/**
+ * Write the MINIMAL login-user marker that tells the launch entry "this box is
+ * hardened, redirect into `anon`". The redirect decision (isHardenedInstall)
+ * runs as the login user BEFORE crossing, so it must read this from the LOGIN
+ * user's own `~/.anon-pi/config.json` (it cannot read the account's mode-700
+ * home). We write ONLY `{ "hardened": true }` (via serializeConfigJson, which
+ * omits everything else): no proxy/llm/projects, nothing sensitive - the real
+ * workspace config lives under the account and is read after the crossing. This
+ * deliberately overwrites any stale login-side config (on a hardened box the
+ * login home is vestigial; ADR-0006 keeps the workspace out of ~/.anon-pi).
+ */
+function writeHardenedLoginMarker(env: AnonPiEnv): void {
+	const home = resolveAnonPiHome(env);
+	mkdirSync(home, {recursive: true});
+	writeFileSync(
+		join(home, 'config.json'),
+		serializeConfigJson({hardened: true}),
+	);
 }
 
 /**

@@ -419,4 +419,12 @@ describe('serializeConfigJson', () => {
 			'hardened',
 		);
 	});
+
+	it('the login-side hardened MARKER is minimal: only { hardened: true }', () => {
+		// On a hardened install the login home gets ONLY this marker (the redirect
+		// flag the launch entry reads before crossing); nothing sensitive leaks there.
+		const marker = JSON.parse(serializeConfigJson({hardened: true}));
+		expect(marker).toEqual({hardened: true});
+		expect(Object.keys(marker)).toEqual(['hardened']);
+	});
 });
