@@ -579,8 +579,8 @@ export interface AnonPiConfig {
 	projects?: string;
 	/**
 	 * True iff this install is CONFIGURED-HARDENED: the whole workspace runs under
-	 * the dedicated `anon` account and every login-user invocation self-re-execs
-	 * as `anon` (docs/adr/0006). Set by `init`'s hardening step; read by the launch
+	 * the dedicated `anonpi` account and every login-user invocation self-re-execs
+	 * as `anonpi` (docs/adr/0006). Set by `init`'s hardening step; read by the launch
 	 * entry (shouldRedirectToAnon). Absent/false = a normal (non-hardened) install.
 	 */
 	hardened?: boolean;
@@ -716,7 +716,7 @@ export function resolveProjectsRoot(args: {
  * PURE: does a chosen projects root LEAK the login username on a hardened
  * install? The projects root is the HOST bind-mount SOURCE for /projects, so its
  * host path is part of the container's mount spec. On a hardened install anon-pi
- * runs under the dedicated `anon`/`anon-<name>` account precisely so nothing the
+ * runs under the dedicated `anonpi`/`anonpi-<name>` account precisely so nothing the
  * machine can observe carries the login user's identity; a projects root that
  * sits UNDER the login user's home (`/home/<login>/...`) re-introduces that leak
  * (the username in the mount-source path, plus login-user file OWNERSHIP mounted
@@ -763,7 +763,7 @@ export function projectsRootLeaksLogin(args: {
  */
 /**
  * The per-user directory NAMES a Node/tool version-manager keeps its shims/tools
- * under. A resolved binary that traverses one of these is per-user (the `anon`
+ * under. A resolved binary that traverses one of these is per-user (the `anonpi`
  * account cannot execute it from its own clean login shell), even in the rare
  * case the dir is not under $HOME. This is a SECONDARY, best-effort signal: the
  * PRIMARY rule is `under-login-home` (which already covers all of these on a
@@ -786,9 +786,9 @@ export type CrossAccountBinaryReason =
 	'no-binary' | 'under-login-home' | 'version-manager-shim';
 
 /**
- * PURE: is a resolved binary path UNSUITABLE to run as the dedicated `anon`
- * account? On a hardened install anon-pi crosses into `anon` by spawning `sudo
- * -u anon -i <path> ...`, so `<path>` must be an executable the `anon` account
+ * PURE: is a resolved binary path UNSUITABLE to run as the dedicated `anonpi`
+ * account? On a hardened install anon-pi crosses into `anonpi` by spawning `sudo
+ * -u anonpi -i <path> ...`, so `<path>` must be an executable the `anonpi` account
  * can reach + run from its OWN clean login shell. It CANNOT run:
  *   - `no-binary`: an empty/undefined path (nothing resolved).
  *   - `under-login-home`: anything under the login user's $HOME. The login home
@@ -798,11 +798,11 @@ export type CrossAccountBinaryReason =
  *     so `/home/u-old` is not treated as under `/home/u`).
  *   - `version-manager-shim`: a path with a `VERSION_MANAGER_DIRS` segment (a
  *     per-user Volta/nvm/asdf/... shim that also needs that manager's env to
- *     resolve the real tool, which `anon`'s clean `sudo -i` login shell lacks).
+ *     resolve the real tool, which `anonpi`'s clean `sudo -i` login shell lacks).
  *     Secondary/best-effort; `under-login-home` already catches the common case.
  * A system npm-global install is a `bin` SYMLINK pointing at a shebang'd
  * `dist/cli.js` (e.g. `/usr/local/bin/anon-pi -> ../lib/node_modules/anon-pi/dist/
- * cli.js`); that is a PERFECTLY RUNNABLE target for `anon` (root-owned,
+ * cli.js`); that is a PERFECTLY RUNNABLE target for `anonpi` (root-owned,
  * world-executable, `#!/usr/bin/env node`), so a `.js` suffix is NOT a
  * disqualifier - the caller passes the stable bin path (not its realpath), and
  * even a realpath'd cli.js is fine as long as it is not under the login home.
@@ -4142,46 +4142,51 @@ export function envFromProcess(
 // --- The hardened self-re-exec invocation (docs/adr/0006) --------------------
 //
 // On a HARDENED install anon-pi's whole workspace lives under a single dedicated
-// Unix account named `anon` (a DAC discoverability boundary: a host agent running
-// as the login user cannot casually `find`/`grep` the session transcripts). There
-// is NO wrapper script: anon-pi is its OWN wrapper. When the login user runs
-// anon-pi on a hardened box, it RE-EXECS ITSELF as `anon` by SPAWNING `sudo`
-// (never setuid, never a raw uid change; anon-pi ships no setuid binary and sets
-// no uid). Auto-redirect is ALWAYS on a hardened install (option A): every
-// login-user invocation redirects; only a caller that already IS `anon` skips it
-// (the loop guard). This module owns ONLY the PURE decision + argv/string
-// composition: the "am I anon?" identity probe and the anon-pi path are INJECTED
+// Unix account named `anonpi` (a DAC discoverability boundary: a host agent
+// running as the login user cannot casually `find`/`grep` the session
+// transcripts). There is NO wrapper script: anon-pi is its OWN wrapper. When the
+// login user runs anon-pi on a hardened box, it RE-EXECS ITSELF as `anonpi` by
+// SPAWNING `sudo` (never setuid, never a raw uid change; anon-pi ships no setuid
+// binary and sets no uid). Auto-redirect is ALWAYS on a hardened install (option
+// A): every login-user invocation redirects; only a caller that already IS
+// `anonpi` skips it (the loop guard). This module owns ONLY the PURE decision +
+// argv/string composition: the "am I anonpi?" identity probe and the anon-pi path are INJECTED
 // seams (like the `exists` probe elsewhere), so nothing here spawns or touches
 // the process. cli.ts (a later task) does the actual exec.
 
 /**
  * The DEFAULT persona's dedicated Unix account name (prd
- * `hardened-dedicated-account-deployment`, docs/adr/0006). In v1 this was the
- * ONLY account; multi-persona (prd `multi-persona-hardened-accounts`,
- * superseding ADR-0006) makes it the DEFAULT of N personas: it is the account
- * for the empty-suffix persona (`personaAccount(undefined) === 'anon'`), so an
- * existing v1 install is a multi-persona install with exactly one persona named
- * `anon`. One canonical default name, pinned here so it can never be re-forked
- * (the old idea note drifted `netuser` vs `anon`).
+ * `hardened-dedicated-account-deployment`, docs/adr/0006). It is the account for
+ * the empty-suffix persona (`personaAccount(undefined) === 'anonpi'`); named
+ * personas map to `anonpi-<name>` (PERSONA_ACCOUNT_PREFIX).
+ *
+ * NAMESPACE (why `anonpi`, NOT `anon`): the sibling tool `anonctl` OWNS the
+ * generic account namespace (bare `anon` + `anon-<name>`) for its own
+ * anonymization model. anon-pi therefore lives in a DISJOINT namespace: `anonpi`
+ * has no hyphen after `anon`, so it is not the bare `anon` and never starts with
+ * the `anon-` prefix, and no persona `anonpi-<name>` can equal `anon` or
+ * `anon-<x>` either. `anonpi` is also self-documenting (it names this tool) and
+ * not a common real-world username (unlike `pi`). One canonical default name,
+ * pinned here so it can never be re-forked.
  */
-export const ANON_ACCOUNT = 'anon';
+export const ANON_ACCOUNT = 'anonpi';
 
 /** The injected identity + hardened-flag inputs for the should-redirect predicate. */
 export interface RedirectInputs {
-	/** Whether THIS install is configured-hardened (runs under the `anon` account). */
+	/** Whether THIS install is configured-hardened (runs under the `anonpi` account). */
 	hardened: boolean;
 	/**
-	 * Whether the current effective user already IS the `anon` account. INJECTED
+	 * Whether the current effective user already IS the `anonpi` account. INJECTED
 	 * (the impure `getuid`/username probe lives in cli.ts), so this stays pure.
 	 */
 	isAnon: boolean;
 }
 
 /**
- * PURE: decide whether anon-pi must re-exec itself as the dedicated `anon`
+ * PURE: decide whether anon-pi must re-exec itself as the dedicated `anonpi`
  * account. On a HARDENED install redirect is ALWAYS chosen when the caller is
- * NOT already `anon` (option A: there is no non-hardened bypass on a hardened
- * box). When the caller already IS `anon` it must NOT redirect (else an infinite
+ * NOT already `anonpi` (option A: there is no non-hardened bypass on a hardened
+ * box). When the caller already IS `anonpi` it must NOT redirect (else an infinite
  * self-re-exec loop). A non-hardened install never redirects. Both inputs are
  * injected (RedirectInputs), so this calls no `getuid`/`whoami` and spawns
  * nothing; the actual exec is cli.ts's job.
@@ -4203,9 +4208,9 @@ export interface HardenedInvocation {
 	forwardedArgs: readonly string[];
 	/**
 	 * The dedicated persona account to re-exec into. DEFAULTS to ANON_ACCOUNT
-	 * (`anon`) so v1's single-account callers stay byte-identical; multi-persona
-	 * passes the SELECTED account (`anon-<name>`, from resolvePersonaSelection) so
-	 * the crossing lands in the right persona. INJECTED, so this stays pure.
+	 * (`anonpi`); a named persona passes the SELECTED account (`anonpi-<name>`, from
+	 * resolvePersonaSelection) so the crossing lands in the right persona. INJECTED,
+	 * so this stays pure.
 	 */
 	account?: string;
 }
@@ -4213,9 +4218,9 @@ export interface HardenedInvocation {
 /**
  * PURE: compose the PRIMARY re-exec argv, the login `-i` form:
  *   `['sudo', '-u', '<account>', '-i', '<abs-anon-pi-path>', ...forwardedArgs]`
- * The account DEFAULTS to `anon` (v1's single account); multi-persona passes the
- * SELECTED persona account (`anon-<name>`), so the crossing lands in the right
- * persona. The `-i` (login) shell so `$HOME`/`$XDG_RUNTIME_DIR`/env become the
+ * The account DEFAULTS to `anonpi`; a named persona passes the SELECTED persona
+ * account (`anonpi-<name>`), so the crossing lands in the right persona. The `-i`
+ * (login) shell so `$HOME`/`$XDG_RUNTIME_DIR`/env become the
  * account's (which rootless podman under a lingering account needs). anon-pi
  * re-execs by SPAWNING
  * `sudo` only: this builder EMITS a plain argv (the first token is always
@@ -4328,8 +4333,8 @@ export function shellQuote(token: string): string {
  * PURE: compose the documented FALLBACK re-exec argv, the
  * `su - <account> -c '<cmd>'` form for boxes where sudoers is not configured:
  *   `['su', '-', '<account>', '-c', "'<abs-anon-pi>' '<arg>' …"]`
- * The account DEFAULTS to `anon` (v1) and is the SELECTED persona account under
- * multi-persona.
+ * The account DEFAULTS to `anonpi` and is the SELECTED persona account for a
+ * named persona.
  * The command STRING is the shell-quoted anon-pi path followed by each
  * shell-quoted forwarded arg (shellQuote), so the login shell re-runs anon-pi
  * safely. Like the sudo form this only ever EMITS an argv (first token always
@@ -4344,12 +4349,10 @@ export function buildAnonSuFallback(inv: HardenedInvocation): string[] {
 
 // --- Multi-persona: name<->account mapping, --as selection, generalized guard -
 //
-// v1 hard-coded ONE dedicated account `anon`. Multi-persona (prd
-// `multi-persona-hardened-accounts`, superseding ADR-0006) makes it N accounts:
-// a user-typed BARE name (`alice`) maps to the namespaced Unix account
-// `anon-<name>` (`anon-alice`), and the DEFAULT (empty/absent name) is the bare
-// `anon` (the empty-suffix case), so a v1 install is a multi-persona install
-// with exactly one persona named `anon` (byte-behaviour-identical default). This
+// Multi-persona (prd `multi-persona-hardened-accounts`, superseding ADR-0006)
+// maps N accounts: a user-typed BARE name (`alice`) maps to the namespaced Unix
+// account `anonpi-<name>` (`anonpi-alice`), and the DEFAULT (empty/absent name)
+// is the bare `anonpi` (ANON_ACCOUNT). This
 // section is the PURE core only: the mapping + validation, the `--as` selection
 // resolver over an INJECTED persona list, and the generalized self-re-exec loop
 // guard ("am I the TARGET persona?"). Everything OS-touching (whoami, the real
@@ -4358,33 +4361,45 @@ export function buildAnonSuFallback(inv: HardenedInvocation): string[] {
 
 /**
  * The account-name PREFIX every persona carries: a bare name `<name>` maps to
- * the Unix account `anon-<name>`. Namespacing (over a bare `<name>` account) is
+ * the Unix account `anonpi-<name>`. Namespacing (over a bare `<name>` account) is
  * deliberate: a persona `alice` as a bare `alice` account could collide with a
- * real system/human account, whereas `anon-alice` is collision-safe and
- * self-labelling in `/etc/passwd` (it reveals only "this box runs anonymization
- * tooling", already true of v1's `anon`, never persona linkage). The default
- * persona is this prefix with an EMPTY suffix, i.e. the bare `anon`
- * (ANON_ACCOUNT), so `anon-` without a trailing hyphen is the default account.
+ * real system/human account, whereas `anonpi-alice` is collision-safe and
+ * self-labelling in `/etc/passwd` (it reveals only "this box runs anon-pi", never
+ * persona linkage). The prefix intentionally has NO hyphen after `anon`, so it
+ * cannot be confused with (or parse into) `anonctl`'s `anon-<name>` namespace.
+ * The default persona is ANON_ACCOUNT (`anonpi`); a named persona's account is
+ * this prefix + name (`anonpi-<name>`). Note the default `anonpi` is NOT this
+ * prefix with an empty suffix (that would be `anonpi-`); it is the bare
+ * ANON_ACCOUNT, and no `<name>` can make `anonpi-<name>` equal it.
  */
-export const PERSONA_ACCOUNT_PREFIX = 'anon-';
+export const PERSONA_ACCOUNT_PREFIX = 'anonpi-';
 
 /**
  * PURE: validate a user-facing BARE persona name as a safe Unix-username SUFFIX,
  * returning it TRIMMED on success. The bare name becomes the account
- * `anon-<name>` (personaAccount), so it must be a safe, collision-free suffix.
+ * `anonpi-<name>` (personaAccount), so it must be a safe, collision-free suffix.
  *
  * The accepted charset is a conservative Unix-username subset: lowercase
  * `[a-z0-9]` plus internal hyphens, and it must START with an alphanumeric
  * (`^[a-z0-9][a-z0-9-]*$`). This is intentionally NARROWER than the full POSIX
  * portable-username set (no underscore, no `$`, no uppercase): the resulting
- * account is `anon-<name>`, so `<name>` only needs to be a clean, lowercase,
+ * account is `anonpi-<name>`, so `<name>` only needs to be a clean, lowercase,
  * hyphen-joinable label; a narrow charset keeps it obviously safe for passwd /
  * sudoers / home-path / the `socks5h://<account>:x@…` Tor isolation username
  * with no quoting surprises.
  *
+ * NAMESPACE GUARD (keep anon-pi + anonctl account spaces DISJOINT): a name is
+ * also rejected if it is exactly `anon`, or starts with the `anon-` prefix that
+ * the sibling tool `anonctl` owns. Structurally `anonpi-<name>` can never equal
+ * `anon`/`anon-<x>` (the guard is belt-and-suspenders), but it also stops a
+ * confusing account like `anonpi-anon` / `anonpi-anon-bob` that reads as if it
+ * re-entered anonctl's namespace, and it documents the disjointness invariant at
+ * the one place a name enters the system.
+ *
  * Rejects (with AnonPiError):
  *   - empty / whitespace-only (a name was required, none given);
- *   - a name already carrying the `anon-` prefix (double-prefix -> `anon-anon-…`);
+ *   - a name already carrying the `anonpi-` prefix (double-prefix -> `anonpi-anonpi-…`);
+ *   - a name that is `anon` or starts with `anon-` (anonctl's namespace);
  *   - anything outside `^[a-z0-9][a-z0-9-]*$` (uppercase, `_`, `/`, `\`, `:`,
  *     whitespace, a leading hyphen, ...).
  */
@@ -4394,7 +4409,7 @@ export function validatePersonaName(name: string): string {
 		throw new AnonPiError(
 			`anon-pi: invalid persona name ${JSON.stringify(name)}: ${why}. ` +
 				`A persona name must be a single lowercase label (a-z 0-9 and internal ` +
-				`hyphens, starting alphanumeric), with no \`anon-\` prefix (anon-pi adds it).`,
+				`hyphens, starting alphanumeric), with no \`anonpi-\` prefix (anon-pi adds it).`,
 		);
 	};
 	if (trimmed === '') return bad('it is empty');
@@ -4402,6 +4417,13 @@ export function validatePersonaName(name: string): string {
 		return bad(
 			`it already starts with the \`${PERSONA_ACCOUNT_PREFIX}\` account prefix ` +
 				`(pass the BARE name; anon-pi maps it to \`${PERSONA_ACCOUNT_PREFIX}<name>\`)`,
+		);
+	}
+	if (trimmed === 'anon' || trimmed.startsWith('anon-')) {
+		return bad(
+			"it re-enters the sibling tool anonctl's account namespace (the bare " +
+				'`anon` or the `anon-` prefix); pick a name that is not `anon` and does ' +
+				'not start with `anon-`, so anon-pi and anonctl accounts stay disjoint',
 		);
 	}
 	if (!/^[a-z0-9][a-z0-9-]*$/.test(trimmed)) {
@@ -4415,12 +4437,12 @@ export function validatePersonaName(name: string): string {
 
 /**
  * PURE: map a user-facing BARE persona name to its dedicated Unix account. The
- * DEFAULT (undefined / empty / whitespace-only) maps to the bare `anon`
- * (ANON_ACCOUNT) so v1 installs are unchanged; a real name `<name>` maps to
- * `anon-<name>` (via PERSONA_ACCOUNT_PREFIX), validating the bare name first
- * (validatePersonaName) so an invalid name yields a clear error rather than a
- * broken account. The `anon` default is NOT special-cased in provisioning: it is
- * simply the empty-suffix persona.
+ * DEFAULT (undefined / empty / whitespace-only) maps to the bare `anonpi`
+ * (ANON_ACCOUNT); a real name `<name>` maps to `anonpi-<name>` (via
+ * PERSONA_ACCOUNT_PREFIX), validating the bare name first (validatePersonaName)
+ * so an invalid name yields a clear error rather than a broken account. The
+ * `anonpi` default is NOT special-cased in provisioning: it is simply the
+ * default persona.
  */
 export function personaAccount(name?: string): string {
 	if (name === undefined || name.trim() === '') return ANON_ACCOUNT;
@@ -4429,11 +4451,10 @@ export function personaAccount(name?: string): string {
 
 /**
  * PURE: the inverse of personaAccount, the BARE persona name a dedicated account
- * carries. The default account `anon` maps back to the DEFAULT (undefined bare
- * name, since the default persona is the empty-suffix one). A namespaced account
- * `anon-<name>` maps to `<name>`. A non-persona account (anything not `anon` and
- * not `anon-<nonempty>`) returns undefined. Used where anon-pi must display the
- * bare name a running account represents.
+ * carries. The default account `anonpi` maps back to the DEFAULT (undefined bare
+ * name). A namespaced account `anonpi-<name>` maps to `<name>`. A non-persona
+ * account (anything not `anonpi` and not `anonpi-<nonempty>`) returns undefined.
+ * Used where anon-pi must display the bare name a running account represents.
  */
 export function personaName(account: string): string | undefined {
 	if (account === ANON_ACCOUNT) return undefined;
@@ -4447,17 +4468,16 @@ export function personaName(account: string): string | undefined {
 }
 
 /**
- * PURE: is `account` ANY anon persona account, i.e. the default `anon`
- * (ANON_ACCOUNT) OR a namespaced `anon-<name>`? This is the persona-aware
- * generalization of the v1 `account === ANON_ACCOUNT` check: `init`'s hardening
- * step uses it to skip re-asking when it is ALREADY running under a hardened
- * persona account (default OR named), where v1 only recognized the bare `anon`.
+ * PURE: is `account` ANY anon-pi persona account, i.e. the default `anonpi`
+ * (ANON_ACCOUNT) OR a namespaced `anonpi-<name>`? `init`'s hardening step uses it
+ * to skip re-asking when it is ALREADY running under a hardened persona account
+ * (default OR named).
  */
 export function isAnonPersonaAccount(account: string): boolean {
 	return account === ANON_ACCOUNT || personaName(account) !== undefined;
 }
 
-/** The persona-selection flag: a plain `--as <name>` (default `anon` when absent). */
+/** The persona-selection flag: a plain `--as <name>` (default `anonpi` when absent). */
 export const AS_FLAG = '--as';
 
 /** The injected inputs for the pure `--as` selection resolver. */
@@ -4468,11 +4488,11 @@ export interface PersonaSelectionInputs {
 	 */
 	args: readonly string[];
 	/**
-	 * The KNOWN persona ACCOUNTS (e.g. `['anon', 'anon-alice']`), injected by the
-	 * impure layer (which enumerates the real accounts). When OMITTED the resolver
-	 * does NO existence check (there is no persona list to check against, so
-	 * `known` is undefined and no unknown-persona error is raised): this task does
-	 * no I/O. The default `anon` is always treated as known (it is the built-in
+	 * The KNOWN persona ACCOUNTS (e.g. `['anonpi', 'anonpi-alice']`), injected by
+	 * the impure layer (which enumerates the real accounts). When OMITTED the
+	 * resolver does NO existence check (there is no persona list to check against,
+	 * so `known` is undefined and no unknown-persona error is raised): this task
+	 * does no I/O. The default `anonpi` is always treated as known (it is the built-in
 	 * default persona), whether or not a list is injected.
 	 */
 	personas?: readonly string[];
@@ -4480,7 +4500,7 @@ export interface PersonaSelectionInputs {
 
 /**
  * The resolved persona selection. Pure data the impure layer acts on: `account`
- * is the selected Unix account (`anon-<name>`, or the default `anon`); `name` is
+ * is the selected Unix account (`anonpi-<name>`, or the default `anonpi`); `name` is
  * the bare name (undefined for the default); `known` is the existence predicate
  * over the injected persona list (undefined when no list was injected, since
  * this task does no I/O); `error` is a NON-thrown AnonPiError the impure layer
@@ -4489,7 +4509,7 @@ export interface PersonaSelectionInputs {
  * selection problem: it RETURNS the error so the caller owns the failure.
  */
 export interface PersonaSelection {
-	/** The selected persona Unix account (`anon-<name>`, or `anon` for the default). */
+	/** The selected persona Unix account (`anonpi-<name>`, or `anonpi` for the default). */
 	account: string;
 	/** The bare persona name (`<name>`), or undefined for the default persona. */
 	name?: string;
@@ -4508,8 +4528,8 @@ export interface PersonaSelection {
 
 /**
  * PURE: resolve the persona a launch selects from `--as <name>`, over an
- * INJECTED persona list. Absent `--as` selects the DEFAULT `anon` (byte-behaviour
- * -identical to v1); `--as <name>` selects `anon-<name>`. The resolver does NO
+ * INJECTED persona list. Absent `--as` selects the DEFAULT `anonpi`; `--as
+ * <name>` selects `anonpi-<name>`. The resolver does NO
  * I/O: it returns a PersonaSelection (account + bare name + known-predicate +
  * a non-thrown error) the impure layer acts on. The name is a plain argument
  * (accepted: it may appear in argv/history/`ps`).
@@ -4518,8 +4538,8 @@ export interface PersonaSelection {
  *   - `--as` with no following value (or a following flag) -> a clear error;
  *   - `--as <name>` with an invalid bare name (charset) -> the validation error;
  *   - `--as <name>` naming a persona NOT in the injected list -> an unknown
- *     -persona error (only when a list is injected; the default `anon` is always
- *     known). `account` is still the resolved `anon-<name>` so the caller can
+ *     -persona error (only when a list is injected; the default `anonpi` is always
+ *     known). `account` is still the resolved `anonpi-<name>` so the caller can
  *     quote it in a "create it with `anon-pi persona add <name>`" message.
  */
 export function resolvePersonaSelection(
@@ -4528,7 +4548,7 @@ export function resolvePersonaSelection(
 	const {args, personas} = inputs;
 	const idx = args.indexOf(AS_FLAG);
 
-	// No --as: the DEFAULT persona `anon`. Known unless a list is injected that
+	// No --as: the DEFAULT persona `anonpi`. Known unless a list is injected that
 	// somehow omits it (the caller then decides); with no list, always known.
 	if (idx === -1) {
 		const known = personas ? personas.includes(ANON_ACCOUNT) : true;
@@ -4610,20 +4630,18 @@ export interface PersonaRedirectInputs {
 	currentAccount: string;
 	/**
 	 * The SELECTED persona account this invocation targets (from
-	 * resolvePersonaSelection). The default is `anon`, preserving v1.
+	 * resolvePersonaSelection). The default is `anonpi`.
 	 */
 	selectedAccount: string;
 }
 
 /**
- * PURE: the generalized self-re-exec loop guard. v1 asked "am I `anon`?"
- * (shouldRedirectToAnon); with N personas it asks "am I already the TARGET
- * persona account?". On a HARDENED install, redirect when the current account
- * is NOT the selected persona account, and do NOT when it already IS (the loop
- * guard, else infinite self-re-exec). A non-hardened install never redirects.
- * Because a login-user call selecting the default `anon` has
- * currentAccount != `anon`, this is byte-behaviour-identical to v1's
- * shouldRedirectToAnon for the default persona. A persona is never auto
+ * PURE: the generalized self-re-exec loop guard. It asks "am I already the
+ * TARGET persona account?". On a HARDENED install, redirect when the current
+ * account is NOT the selected persona account, and do NOT when it already IS (the
+ * loop guard, else infinite self-re-exec). A non-hardened install never
+ * redirects. A login-user call selecting the default `anonpi` has
+ * currentAccount != `anonpi`, so it redirects into the default persona. A persona is never auto
  * -redirected to a DIFFERENT persona: the impure layer only ever passes the
  * SELECTED account, and once running as it this returns false. Both identities
  * are injected; nothing here spawns or probes.
@@ -4760,7 +4778,7 @@ export function offerTor(detection: TorDetection | undefined): boolean {
 // anon-pi does itself; Tier 2 (root) anon-pi must NEVER do silently. So anon-pi
 // GENERATES the root-requiring steps and PRINTS them; the HUMAN runs them. v1
 // emitted a `#!/bin/sh` script FILE the human saved + ran with sudo. This is
-// RETIRED (for both the default `anon` and every `anon-<name>` persona): anon-pi
+// RETIRED (for both the default `anonpi` and every `anonpi-<name>` persona): anon-pi
 // now emits COPY-PASTE COMMANDS the human pastes into a root shell they enter
 // FIRST. Rationale (decision 8): no on-disk script to leak the persona name and
 // nothing to save; entering ONE root shell (`sudo -i`/`su -`) keeps the persona
@@ -4788,7 +4806,7 @@ export function offerTor(detection: TorDetection | undefined): boolean {
 
 /** The injected inputs for the Tier-2 root-provisioning command generator. */
 export interface Tier2ProvisioningInputs {
-	/** The dedicated Unix account to create (canonically ANON_ACCOUNT = `anon`). */
+	/** The dedicated Unix account to create (canonically ANON_ACCOUNT = `anonpi`). */
 	account: string;
 	/**
 	 * The LOGIN user granted the scoped sudoers rule (may run ONLY the anon-pi
@@ -4869,7 +4887,7 @@ export const NETCAGE_SYSTEM_INSTALL_CMD =
 /**
  * The internal forwarded flag the hardened redirect uses to carry the LOGIN-side
  * anon-pi version across `sudo -u <account> -i anon-pi` (which strips the env, so
- * a flag is the only reliable channel). The `anon` child reads it, compares to
+ * a flag is the only reliable channel). The `anonpi` child reads it, compares to
  * its OWN version (anonPiVersionMismatch), and strips it before any dispatch
  * (mirroring `--as`). INTERNAL: a human never types it.
  */
@@ -4998,8 +5016,8 @@ ${numbered}
 
 // --- The hardened-deployment PREFLIGHT (docs/adr/0006, prd story 6) -----------
 //
-// A half-provisioned `anon` account must fail LOUDLY with remediation, not
-// cryptically. So before a hardened install runs anything as `anon`, anon-pi
+// A half-provisioned `anonpi` account must fail LOUDLY with remediation, not
+// cryptically. So before a hardened install runs anything as `anonpi`, anon-pi
 // CHECKS the account is set up correctly and, when it is not, prints EXACTLY
 // what is missing and how to fix it. This module owns only the PURE evaluation:
 // each check is a predicate over an INJECTED probe result (a boolean the impure
@@ -5010,7 +5028,7 @@ ${numbered}
 // this module uses (resolveModelsSeedPath etc.).
 //
 // The netcage dependency is the UID-SCOPED store (netcage ADR-0017): running
-// netcage as `anon` auto-scopes its store to that uid, so anon-pi sets NO
+// netcage as `anonpi` auto-scopes its store to that uid, so anon-pi sets NO
 // `NETCAGE_GRAPHROOT`. The preflight only ASSERTS netcage is new enough to have
 // that store (>= NETCAGE_MIN_VERSION); it never weakens forced egress and never
 // introduces a graphroot knob.
@@ -5018,7 +5036,7 @@ ${numbered}
 /**
  * The netcage version FLOOR the hardened deployment requires: `0.11.0`, the
  * release that shipped the UID-SCOPED store (netcage ADR-0017 / prd
- * `uid-scoped-graphroot-multi-user-fix`). Running netcage as `anon` needs this so
+ * `uid-scoped-graphroot-multi-user-fix`). Running netcage as `anonpi` needs this so
  * its store lands in the account's own uid-scoped path (`netcage-storage-<uid>`)
  * instead of colliding on the shared `/var/tmp/netcage-storage` of pre-0.11.0.
  * CONFIRMED (verified against the installed 0.10.0 vs 0.11.0 binaries). Kept as
@@ -5090,13 +5108,13 @@ export function netcageVersionSatisfies(
  * and no real system path.
  */
 export interface HardenedPreflightProbes {
-	/** True iff the `anon` account has BOTH an /etc/subuid and an /etc/subgid range. */
+	/** True iff the `anonpi` account has BOTH an /etc/subuid and an /etc/subgid range. */
 	subidRangesPresent: boolean;
-	/** True iff linger is ON for `anon` (`loginctl enable-linger`, so $XDG_RUNTIME_DIR exists without a login). */
+	/** True iff linger is ON for `anonpi` (`loginctl enable-linger`, so $XDG_RUNTIME_DIR exists without a login). */
 	lingerEnabled: boolean;
 	/** True iff `/dev/net/tun` is present + accessible (netcage needs it). */
 	tunAccessible: boolean;
-	/** True iff the `anon` account's `$XDG_RUNTIME_DIR` is present (podman runroot lands there). */
+	/** True iff the `anonpi` account's `$XDG_RUNTIME_DIR` is present (podman runroot lands there). */
 	xdgRuntimeDirPresent: boolean;
 	/**
 	 * The `netcage --version` output STRING, or undefined when netcage is ABSENT
@@ -5107,8 +5125,8 @@ export interface HardenedPreflightProbes {
 	/**
 	 * The RESOLVED anon-pi binary path (realpath of `command -v anon-pi`, else the
 	 * cli.js fallback) the hardened crossing WOULD scope its sudoers rule to and
-	 * exec as `anon`. Fed to crossAccountBinaryUnsuitable: a per-user (Volta/nvm)
-	 * shim or a login-home path FAILS (the `anon` account cannot run it). undefined
+	 * exec as `anonpi`. Fed to crossAccountBinaryUnsuitable: a per-user (Volta/nvm)
+	 * shim or a login-home path FAILS (the `anonpi` account cannot run it). undefined
 	 * = nothing resolved (also a failure). See anonPiBinaryRemediation.
 	 */
 	anonPiResolvedPath?: string;
@@ -5340,14 +5358,14 @@ export function evaluateHardenedPreflight(
 // injected preflight RESULT (over real probes computed by cli.ts) plus the
 // account/login-user/binary inputs, it decides the ONE next action of the step:
 //
-//   - preflight FAILS  => the `anon` account is missing/half-provisioned. Emit
+//   - preflight FAILS  => the `anonpi` account is missing/half-provisioned. Emit
 //     the Tier-2 provisioning COMMANDS (buildTier2ProvisioningScript) plus a
 //     "become root and paste them, then continue" instruction, and
 //     signal WAIT. The impure loop prints these, waits, RE-PROBES, and calls
 //     this again (resumability: the state lives in the OS, not a flag — a
 //     re-run just re-evaluates the fresh preflight).
 //   - preflight PASSES => proceed with Tier 1: point `ANON_PI_HOME` into the
-//     `anon` account's tree (mode-700) and finish. NO wrapper file is produced
+//     `anonpi` account's tree (mode-700) and finish. NO wrapper file is produced
 //     (self-re-exec replaces it) and `NETCAGE_GRAPHROOT` is NEVER set.
 //
 // It is a pure function over the injected preflight result + paths: cli.ts does
@@ -5359,7 +5377,7 @@ export function evaluateHardenedPreflight(
 export interface HardeningStepInputs {
 	/** The preflight RESULT cli.ts computed over the real probes (evaluateHardenedPreflight). */
 	preflight: HardenedPreflightResult;
-	/** The dedicated account to provision/run under (canonically ANON_ACCOUNT = `anon`). */
+	/** The dedicated account to provision/run under (canonically ANON_ACCOUNT = `anonpi`). */
 	account: string;
 	/** The login user the Tier-2 sudoers rule is scoped to (from the impure `whoami`). */
 	loginUser: string;
@@ -5368,7 +5386,7 @@ export interface HardeningStepInputs {
 	/** The login user's $HOME (so the Tier-2 generator can guard the sudoers path). */
 	loginHome: string;
 	/**
-	 * The ABSOLUTE ANON_PI_HOME under the `anon` account's tree (mode-700 on
+	 * The ABSOLUTE ANON_PI_HOME under the `anonpi` account's tree (mode-700 on
 	 * continue). cli.ts resolves it (e.g. `~anon/.anon-pi`) from the real account
 	 * home; injected so the plan stays pure.
 	 */
@@ -5381,7 +5399,7 @@ export interface HardeningStepInputs {
 }
 
 /**
- * `wait-for-account`: the `anon` account is missing/half-provisioned. cli.ts
+ * `wait-for-account`: the `anonpi` account is missing/half-provisioned. cli.ts
  * PRINTS `script` (the reviewable Tier-2 root COMMAND BLOCK) + `instruction`,
  * then waits for the human to run it and continue; on continue it RE-PROBES and
  * re-plans. `failures` echoes the exact preflight remediations so the caller can
@@ -5405,7 +5423,7 @@ export interface HardeningWaitPlan {
  */
 export interface HardeningContinuePlan {
 	kind: 'continue-tier1';
-	/** The ABSOLUTE ANON_PI_HOME under the `anon` account's tree to create + own. */
+	/** The ABSOLUTE ANON_PI_HOME under the `anonpi` account's tree to create + own. */
 	anonHome: string;
 	/** The mode Tier 1 applies to `anonHome` (mode-700: only the account may read it). */
 	mode: number;
@@ -5414,12 +5432,12 @@ export interface HardeningContinuePlan {
 /** The next action of the resumable hardening step: wait for the account, or continue Tier 1. */
 export type HardeningStepPlan = HardeningWaitPlan | HardeningContinuePlan;
 
-/** The mode Tier 1 applies to the `anon` workspace: 0o700 (only the account reads it). */
+/** The mode Tier 1 applies to the `anonpi` workspace: 0o700 (only the account reads it). */
 export const HARDENED_HOME_MODE = 0o700;
 
 /**
  * PURE: decide the next action of the resumable `init` hardening step over the
- * INJECTED preflight result. When the preflight FAILS (the `anon` account is
+ * INJECTED preflight result. When the preflight FAILS (the `anonpi` account is
  * missing or half-provisioned) it returns a `wait-for-account` plan carrying the
  * Tier-2 command block to print + a run-it-then-continue instruction + the exact
  * failures; the impure loop prints, waits, RE-PROBES, and calls this again (the
@@ -5473,8 +5491,8 @@ export function planHardeningStep(
 // `multi-persona-hardened-accounts`, decisions 4 + 5 + 6 + 7 + 8, superseding
 // ADR-0006) -------------------------------------------------------------------
 //
-// `persona add <name>` provisions a persona: the dedicated `anon-<name>` account
-// (default `anon`), its mode-700 workspace + its own fail-closed egress. Like
+// `persona add <name>` provisions a persona: the dedicated `anonpi-<name>` account
+// (default `anonpi`), its mode-700 workspace + its own fail-closed egress. Like
 // v1's init hardening it is a TWO-TIER flow, now per-persona:
 //   - Tier 2 (root): create the account (`useradd -m`, linger, scoped sudoers).
 //     anon-pi NEVER runs this: it PRINTS the copy-paste command block
@@ -5484,7 +5502,7 @@ export function planHardeningStep(
 //     account is missing, emit Tier-2 + wait; once it exists, do Tier 1.
 //   - Tier 1 (rootless): write the persona's OWN ordinary v1 `config.json`
 //     (byte-identical shape, just resolved in the persona's home) carrying the
-//     chosen `proxy`, into `~anon-<name>/.anon-pi` at mode 0o700.
+//     chosen `proxy`, into `~anonpi-<name>/.anon-pi` at mode 0o700.
 // Egress is chosen at add time (Tor multi-persona via composeTorPersonaProxy, or
 // a bring-your-own socks5h endpoint with the uniqueness WARNING); the CLI does
 // the Tor probe + the prompts. This section owns only the PURE parts: the
@@ -5513,8 +5531,8 @@ export const PERSONA_BYO_UNIQUENESS_WARNING =
 /**
  * A parsed `persona <verb> …` command. A discriminated union the CLI dispatches
  * on `verb`. v1 ships ONLY `add`:
- *   - `add [<name>]`: provision the persona `anon-<name>`; a bare `add` (no
- *     name) provisions/refers to the DEFAULT persona `anon` (the empty-suffix
+ *   - `add [<name>]`: provision the persona `anonpi-<name>`; a bare `add` (no
+ *     name) provisions/refers to the DEFAULT persona `anonpi` (the default
  *     case). The bare name is validated by personaAccount (validatePersonaName)
  *     in the CLI, not here, so the parser stays a thin grammar; `name` is the
  *     raw token (undefined for the default).
@@ -5596,7 +5614,7 @@ userdel -r ${account}
 
 /** The injected inputs the resumable `persona add` provisioning planner decides over. */
 export interface PersonaAddInputs {
-	/** The persona Unix account being provisioned (`anon-<name>`, or `anon` for the default). */
+	/** The persona Unix account being provisioned (`anonpi-<name>`, or `anonpi` for the default). */
 	account: string;
 	/** The login user the Tier-2 sudoers rule is scoped to (from the impure `whoami`). */
 	loginUser: string;
@@ -5614,7 +5632,7 @@ export interface PersonaAddInputs {
 	accountExists: boolean;
 	/**
 	 * The ABSOLUTE ANON_PI_HOME under the persona account's tree
-	 * (`~anon-<name>/.anon-pi`), resolved by the CLI from the real account home
+	 * (`~anonpi-<name>/.anon-pi`), resolved by the CLI from the real account home
 	 * (getent) once the account exists. Undefined while the account is missing.
 	 */
 	anonHome?: string;

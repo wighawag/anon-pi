@@ -247,8 +247,8 @@ function main(argv: string[]): number {
 	// PROVISIONING verbs run LOGIN-SIDE, before the redirect. `init` and `persona`
 	// SET UP / TEAR DOWN the hardened account and do their OWN crossings into it
 	// (`sudo -u <account> ...`), which needs the LOGIN user's sudo rights. If the
-	// redirect crossed them into `anon` first, they would run AS `anon` and then
-	// fail trying to `sudo -u anon` from within `anon` ("anon is not in the sudoers
+	// redirect crossed them into `anonpi` first, they would run AS `anonpi` and then
+	// fail trying to `sudo -u anonpi` from within `anonpi` ("anonpi is not in the sudoers
 	// file"). So they are dispatched here, ahead of maybeRedirectToPersona. (`--help`
 	// still shows their own help; runInit/runPersona handle that.)
 	if (rawArgs[0] === 'init') {
@@ -261,7 +261,7 @@ function main(argv: string[]): number {
 	// MULTI-PERSONA SELF-RE-EXEC (prd `multi-persona-hardened-accounts`,
 	// superseding ADR-0006; generalizes docs/adr/0006 option A). On a hardened
 	// install EVERY login-user invocation redirects into the SELECTED persona
-	// account (`anon-<name>`, default `anon`) by SPAWNING `sudo -u <account> -i
+	// account (`anonpi-<name>`, default `anonpi`) by SPAWNING `sudo -u <account> -i
 	// <anon-pi> "$@"` (never setuid, never a uid change); only a caller ALREADY
 	// running as that account skips it (the generalized loop guard). This is the
 	// very first thing a real invocation does, so nothing touches the login user's
@@ -272,8 +272,8 @@ function main(argv: string[]): number {
 	// argv netcage sees must NEVER carry it. So the redirect forwards the RAW args
 	// (with `--as`), and the child (already the account) STRIPS `--as` below before
 	// any subcommand dispatch / launch grammar / netcage. An unknown persona errors
-	// (never a silent create, never a fall-through to `anon`); an absent `--as` is
-	// the default `anon`, byte-behaviour-identical to v1.
+	// (never a silent create, never a fall-through to `anonpi`); an absent `--as` is
+	// the default `anonpi`.
 	const selectedAccount = resolveSelectedPersona(rawArgs);
 	if (selectedAccount === undefined) return 1; // selection error already reported.
 
@@ -434,7 +434,7 @@ function currentUsername(): string | undefined {
 
 /**
  * The ABSOLUTE path to the anon-pi binary the hardened crossing scopes its
- * sudoers rule to and execs AS the account. It must be what the `anon` account
+ * sudoers rule to and execs AS the account. It must be what the `anonpi` account
  * would resolve on ITS OWN clean login shell (a SYSTEM install), NOT what the
  * login user's PATH resolves - the login user's PATH is polluted by per-user Node
  * managers (Volta/nvm/asdf prepend `~/.volta/bin` etc.), which would return a
@@ -457,7 +457,7 @@ function anonPiBinaryPath(): string {
 }
 
 /**
- * Resolve `anon-pi` as the `anon` account would: on a PATH with the login user's
+ * Resolve `anon-pi` as the `anonpi` account would: on a PATH with the login user's
  * per-user Node-manager dirs REMOVED, so a Volta/nvm shim (which the account
  * cannot run) never wins over a system install. We do NOT use `env -i` + a login
  * shell (which would also drop a test's stubbed PATH and break isolation);
@@ -500,14 +500,14 @@ function isHardenedInstall(): boolean {
 }
 
 /**
- * Resolve the SELECTED persona ACCOUNT from `--as <name>` (default `anon`), or
+ * Resolve the SELECTED persona ACCOUNT from `--as <name>` (default `anonpi`), or
  * undefined when the selection is bad (the error is already printed, so main
  * returns 1). The PURE resolvePersonaSelection owns the parse + charset error;
  * the only I/O here is the account-existence probe (getent, via anonAccountHome)
  * for a NON-default persona, so an unknown/unprovisioned `--as <name>` errors
  * clearly ("no persona `<name>`; create it with `anon-pi persona add <name>`")
- * instead of silently creating it or falling through to `anon`. The default
- * `anon` (no `--as`) is NEVER existence-checked, preserving v1: an absent `anon`
+ * instead of silently creating it or falling through to `anonpi`. The default
+ * `anonpi` (no `--as`) is NEVER existence-checked: an absent `anonpi`
  * still surfaces as the sudo re-exec failure below, exactly as before.
  */
 function resolveSelectedPersona(args: readonly string[]): string | undefined {
@@ -517,7 +517,7 @@ function resolveSelectedPersona(args: readonly string[]): string | undefined {
 		reportAnonPiError(pre.error);
 		return undefined;
 	}
-	// The default persona `anon` (no `--as`) is accepted verbatim (v1 behaviour).
+	// The default persona `anonpi` (no `--as`) is accepted verbatim.
 	if (pre.name === undefined) return pre.account;
 
 	// A NON-default `--as <name>`: verify the persona account EXISTS. Re-run the
@@ -543,7 +543,7 @@ function resolveSelectedPersona(args: readonly string[]): string | undefined {
  * running as the selected account never redirects. The RAW args are forwarded
  * (so `--as` SURVIVES into the re-exec and the child re-derives the same persona
  * without looping); the only I/O is the identity probe, the binary-path lookup,
- * and the spawn. The default `anon` path is byte-behaviour-identical to v1.
+ * and the spawn.
  */
 function maybeRedirectToPersona(
 	args: readonly string[],
@@ -587,7 +587,7 @@ function maybeRedirectToPersona(
 }
 
 /**
- * Look up the `anon` account's HOME dir (getent passwd), or undefined when the
+ * Look up the `anonpi` account's HOME dir (getent passwd), or undefined when the
  * account does not exist yet. Used to point ANON_PI_HOME into the account's tree
  * on the Tier-1 continue.
  */
@@ -2514,11 +2514,11 @@ WHAT IT DOES
   4. PROJECTS ROOT: the host folder mounted at /projects (default ~/.anon-pi/
      projects); point it at your own dev folder, or keep the default.
   5. HARDENED DEPLOYMENT (optional): run the whole workspace under a dedicated
-     \`anon\` Unix account (mode-700 home) so a host agent as your login user
+     \`anonpi\` Unix account (mode-700 home) so a host agent as your login user
      cannot casually find your session transcripts. anon-pi prints a reviewable
      root script for you to run with sudo (it never sudo's for you) and is
      RESUMABLE across it. A DISCOVERABILITY boundary, not hard containment (root
-     or blanket sudo defeats it); day-to-day anon-pi self-re-execs as \`anon\`.
+     or blanket sudo defeats it); day-to-day anon-pi self-re-execs as \`anonpi\`.
   Then writes ~/.anon-pi/config.json + the \`default\` machine. Never destroys homes.
 
   Runs AUTOMATICALLY the first time you launch anon-pi with no config yet.
@@ -2570,9 +2570,9 @@ function runInit(args: string[]): number {
 	//    block (the system-wide anon-pi + netcage + account provisioning gauntlet),
 	//    so we ask + run its preflight/provisioning BEFORE the user invests in
 	//    proxy/model/image. Deciding it first also lets EVERY later step be
-	//    hardened-aware (e.g. the projects root defaults to the `anon` tree). ABORT
+	//    hardened-aware (e.g. the projects root defaults to the `anonpi` tree). ABORT
 	//    propagates; a decline leaves `hardened` unset. A caller ALREADY running as
-	//    `anon` (a hardened reconfigure) skips the prompt.
+	//    `anonpi` (a hardened reconfigure) skips the prompt.
 	const hardenResult = initHardeningStep(env);
 	if (hardenResult === ABORT) return 1;
 	const hardened = hardenResult === true ? true : current.hardened;
@@ -2604,7 +2604,7 @@ function runInit(args: string[]): number {
 	const llm = llmResult.endpoint;
 
 	// 4) DEFAULT MACHINE IMAGE: menu (shipped Dockerfiles / existing ref / skip).
-	//    On a hardened install the exists-check + build run AS `anon` (its own
+	//    On a hardened install the exists-check + build run AS `anonpi` (its own
 	//    uid-scoped netcage store), so the image lands where the hardened launch
 	//    reads it - not stranded in the login user's store.
 	const image = initImageStep(hardened === true);
@@ -2612,7 +2612,7 @@ function runInit(args: string[]): number {
 
 	// 5) PROJECTS ROOT: the host dir mounted at /projects (default ~/.anon-pi/
 	//    projects). Overridable per-launch with `--mount`; this sets the default.
-	//    On a hardened install the default lives under the `anon` account's tree
+	//    On a hardened install the default lives under the `anonpi` account's tree
 	//    (never the login home), and a chosen login-home path is refused as a leak.
 	const projects = initProjectsStep(env, current.projects, hardened === true);
 
@@ -2677,7 +2677,7 @@ function runInit(args: string[]): number {
 		selection,
 	};
 
-	// On a hardened install the workspace lives in the `anon` account's mode-700
+	// On a hardened install the workspace lives in the `anonpi` account's mode-700
 	// home, which the LOGIN USER cannot write (ADR-0006). Cross to the account and
 	// let IT do the writes (payload piped on stdin). Otherwise write locally.
 	if (hardened === true && currentUsername() !== ANON_ACCOUNT) {
@@ -2687,7 +2687,7 @@ function runInit(args: string[]): number {
 		// BEFORE crossing, so it reads the LOGIN user's config - which cannot see the
 		// `hardened: true` we just wrote into the ACCOUNT's mode-700 home. Write a
 		// MINIMAL login-side marker (`{ "hardened": true }`) so every future launch
-		// redirects into `anon`. It carries NOTHING sensitive (no proxy/llm/projects,
+		// redirects into `anonpi`. It carries NOTHING sensitive (no proxy/llm/projects,
 		// no transcripts): the real workspace config lives under the account and is
 		// read AFTER the crossing. This overwrites any stale non-hardened login config,
 		// which is correct: on a hardened box the login home is vestigial (only the
@@ -2711,7 +2711,7 @@ function runInit(args: string[]): number {
 
 /**
  * Write the MINIMAL login-user marker that tells the launch entry "this box is
- * hardened, redirect into `anon`". The redirect decision (isHardenedInstall)
+ * hardened, redirect into `anonpi`". The redirect decision (isHardenedInstall)
  * runs as the login user BEFORE crossing, so it must read this from the LOGIN
  * user's own `~/.anon-pi/config.json` (it cannot read the account's mode-700
  * home). We write ONLY `{ "hardened": true }` (via serializeConfigJson, which
@@ -3295,7 +3295,7 @@ function initImageStep(hardened: boolean): string | undefined | typeof ABORT {
 		// re-trigger a long build. Answer `n`/rebuild to force a fresh build (e.g. to
 		// pick up a new pi / SearXNG). The probe fails toward building, never toward a
 		// stale skip.
-		// The store to check/build in: on a hardened install it is `anon`'s uid-scoped
+		// The store to check/build in: on a hardened install it is `anonpi`'s uid-scoped
 		// store (reached by crossing), else the login user's local store.
 		const exists = hardened
 			? netcageImageExistsAsAccount(ANON_ACCOUNT, tag)
@@ -3352,7 +3352,7 @@ function initProjectsStep(
 	// On a hardened install the projects root is the HOST bind-mount SOURCE for
 	// /projects, so a path under the login home would leak the login username
 	// (mount source + file ownership) into the anon-run jail, defeating the whole
-	// point of the dedicated account. Default to the `anon` account's tree, and
+	// point of the dedicated account. Default to the `anonpi` account's tree, and
 	// REFUSE a chosen login-home path below (projectsRootLeaksLogin).
 	const accountHome = hardened ? anonAccountHome(ANON_ACCOUNT) : undefined;
 	const builtin =
@@ -3438,7 +3438,7 @@ function initProjectsStep(
 
 /**
  * The HARDENING step (docs/adr/0006): ask whether to run anon-pi under the
- * dedicated `anon` account, and if yes walk the RESUMABLE Tier-1/Tier-2 flow.
+ * dedicated `anonpi` account, and if yes walk the RESUMABLE Tier-1/Tier-2 flow.
  * Returns:
  *   - `true`  hardening was chosen AND completed (the account is provisioned +
  *             the Tier-1 rootless setup ran) -> init marks `hardened: true`.
@@ -3467,8 +3467,8 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 	);
 
 	// A caller ALREADY running under a hardened persona account (the default
-	// `anon` OR a namespaced `anon-<name>`) does not re-ask; the install is
-	// hardened by definition. (isAnonPersonaAccount generalizes the v1 bare-`anon`
+	// `anonpi` OR a namespaced `anonpi-<name>`) does not re-ask; the install is
+	// hardened by definition. (isAnonPersonaAccount generalizes the bare-`anonpi`
 	// check so a persona reconfigure is recognized too.)
 	const who = currentUsername();
 	if (who !== undefined && isAnonPersonaAccount(who)) {
@@ -3506,7 +3506,7 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 			probeHardenedPreflight(ANON_ACCOUNT),
 			ANON_ACCOUNT,
 		);
-		// The Tier-1 workspace home: under the `anon` account's tree when it exists,
+		// The Tier-1 workspace home: under the `anonpi` account's tree when it exists,
 		// else a placeholder (only reached on the passing branch, where it exists).
 		const accountHome = anonAccountHome(ANON_ACCOUNT);
 		const anonWorkspace = accountHome
@@ -3605,7 +3605,7 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 // --- `anon-pi persona add <name>`: the THIN impure wiring (prd
 // `multi-persona-hardened-accounts`, decisions 4-8, superseding ADR-0006) ------
 //
-// Provisions a persona: map <name> -> anon-<name> (personaAccount), choose the
+// Provisions a persona: map <name> -> anonpi-<name> (personaAccount), choose the
 // per-persona fail-closed egress (Tor multi-persona via composeTorPersonaProxy,
 // or a bring-your-own socks5h endpoint + the uniqueness warning), then run the
 // RESUMABLE two-tier flow of planPersonaAdd: while the account is missing, PRINT
@@ -3623,18 +3623,18 @@ USAGE
   anon-pi persona add [<name>] [--tor [<host:port>] | --proxy <socks5h-url>] [--nopasswd]
   anon-pi persona rm  [<name>] [--yes]
 
-  Provisions the persona account \`anon-<name>\` (a bare \`add\` with no name is the
-  DEFAULT persona \`anon\`): its own mode-700 home + its own fail-closed egress.
+  Provisions the persona account \`anonpi-<name>\` (a bare \`add\` with no name is the
+  DEFAULT persona \`anonpi\`): its own mode-700 home + its own fail-closed egress.
   Runs the same two-tier flow as \`init\`'s hardening, per persona:
-    - Tier 1 (rootless): writes the persona's OWN config.json (the ordinary v1
-      shape) with the chosen \`proxy\`, into \`~anon-<name>/.anon-pi\` at mode 0700.
+    - Tier 1 (rootless): writes the persona's OWN config.json (the ordinary
+      shape) with the chosen \`proxy\`, into \`~anonpi-<name>/.anon-pi\` at mode 0700.
     - Tier 2 (root): PRINTS copy-paste commands (useradd/loginctl/sudoers) you
       paste into a root shell you enter FIRST. anon-pi never runs them. When the
       account does not exist yet it prints these; create it, then re-run.
 
   EGRESS (fail-closed, per persona; two personas never share an exit):
     --tor [<host:port>]   Tor multi-persona: compose
-                          \`socks5h://anon-<name>:x@<host:port>\` (default
+                          \`socks5h://anonpi-<name>:x@<host:port>\` (default
                           127.0.0.1:9050). Tor isolates each persona by its
                           account name (a separate circuit/exit per persona).
     --proxy <socks5h-url> bring-your-own socks5h endpoint you run. anon-pi prints
@@ -3656,7 +3656,7 @@ USAGE
   them: you paste them into a root shell. \`userdel -r\` DELETES the account's home
   and ALL its anonymized transcripts, so on a TTY it asks you to type the account
   name to confirm (or pass \`--yes\`); without a TTY it refuses unless \`--yes\`.
-  A bare \`rm\` targets the DEFAULT persona \`anon\`.
+  A bare \`rm\` targets the DEFAULT persona \`anonpi\`.
 `;
 
 /** Parsed persona-add egress flags (impure grammar layered over parsePersonaArgs). */
@@ -3800,7 +3800,7 @@ function resolvePersonaEgress(
 }
 
 /**
- * The persona's OWN anon-pi home (`~anon-<name>/.anon-pi`), resolved from the
+ * The persona's OWN anon-pi home (`~anonpi-<name>/.anon-pi`), resolved from the
  * account's real home dir (getent) once the account exists, or undefined when
  * the account does not exist yet. Mirrors anonAccountHome + the init Tier-1 home.
  */
@@ -3819,7 +3819,7 @@ function personaAlreadyProvisioned(anonHome: string | undefined): boolean {
 
 /**
  * `anon-pi persona add <name>`: the thin impure wiring around planPersonaAdd.
- * Maps the bare name to `anon-<name>`, resolves the per-persona egress, and
+ * Maps the bare name to `anonpi-<name>`, resolves the per-persona egress, and
  * runs the RESUMABLE loop: account missing -> PRINT Tier-2 + wait; account
  * exists -> write the persona's mode-700 config.json. Never runs Tier 2, never
  * silently sudo's, never writes a persona without a proxy.
@@ -3980,7 +3980,7 @@ function runPersona(personaArgs: string[]): number {
  * `userdel -r` DELETES the account's home (all its anonymized transcripts), this
  * is gated: on a TTY it requires typing the account name to confirm (or `--yes`);
  * without a TTY it refuses unless `--yes`. A no-op-friendly note when the account
- * does not exist. Bare `rm` targets the DEFAULT persona `anon`.
+ * does not exist. Bare `rm` targets the DEFAULT persona `anonpi`.
  */
 function runPersonaRm(name: string | undefined, yes: boolean): number {
 	let account: string;

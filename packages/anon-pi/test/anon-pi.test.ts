@@ -229,10 +229,10 @@ describe('projectsRootLeaksLogin (hardened projects root must avoid the login ho
 		).toBe(true);
 	});
 
-	it('does NOT leak for the anon account tree (a sibling home)', () => {
+	it('does NOT leak for the anonpi account tree (a sibling home)', () => {
 		expect(
 			projectsRootLeaksLogin({
-				projectsRoot: '/home/anon/.anon-pi/projects',
+				projectsRoot: '/home/anonpi/.anon-pi/projects',
 				loginHome,
 				hardened: true,
 			}),
@@ -340,7 +340,7 @@ describe('anonPiVersionMismatch (hardened login vs account version divergence)',
 
 describe('resolveInitProjectsDefault (hardened re-run must not keep a leaking stored root)', () => {
 	const loginHome = '/home/wighawag';
-	const builtin = '/home/anon/.anon-pi/projects';
+	const builtin = '/home/anonpi/.anon-pi/projects';
 
 	it('no stored value: default is the builtin, not keepable', () => {
 		expect(
@@ -353,11 +353,11 @@ describe('resolveInitProjectsDefault (hardened re-run must not keep a leaking st
 	});
 
 	it('HARDENED + stored value under login home: DROP it, default to builtin', () => {
-		// the reported bug: `current: /home/wighawag/anon` was shown as the default
+		// the reported bug: `current: /home/wighawag/anonpi` was shown as the default
 		// and Enter kept it; it must be dropped and the anon-tree builtin shown.
 		expect(
 			resolveInitProjectsDefault({
-				currentResolved: '/home/wighawag/anon',
+				currentResolved: '/home/wighawag/anonpi',
 				builtin,
 				loginHome,
 				hardened: true,
@@ -369,17 +369,17 @@ describe('resolveInitProjectsDefault (hardened re-run must not keep a leaking st
 		});
 	});
 
-	it('HARDENED + stored value already under the anon tree: KEEP it', () => {
+	it('HARDENED + stored value already under the anonpi tree: KEEP it', () => {
 		expect(
 			resolveInitProjectsDefault({
-				currentResolved: '/home/anon/work',
+				currentResolved: '/home/anonpi/work',
 				builtin,
 				loginHome,
 				hardened: true,
 			}),
 		).toEqual({
 			keepCurrent: true,
-			shown: '/home/anon/work',
+			shown: '/home/anonpi/work',
 			droppedLeakingCurrent: false,
 		});
 	});
@@ -387,14 +387,14 @@ describe('resolveInitProjectsDefault (hardened re-run must not keep a leaking st
 	it('NON-hardened: a login-home stored value is fine and KEPT (no leak concept)', () => {
 		expect(
 			resolveInitProjectsDefault({
-				currentResolved: '/home/wighawag/anon',
+				currentResolved: '/home/wighawag/anonpi',
 				builtin: '/home/wighawag/.anon-pi/projects',
 				loginHome,
 				hardened: false,
 			}),
 		).toEqual({
 			keepCurrent: true,
-			shown: '/home/wighawag/anon',
+			shown: '/home/wighawag/anonpi',
 			droppedLeakingCurrent: false,
 		});
 	});
@@ -742,7 +742,7 @@ describe('anonPiVersion', () => {
 describe('expandTilde', () => {
 	it('expands a leading ~ / ~/ to $HOME', () => {
 		expect(expandTilde('~', '/home/u')).toBe('/home/u');
-		expect(expandTilde('~/dev/anon', '/home/u')).toBe('/home/u/dev/anon');
+		expect(expandTilde('~/dev/anonpi', '/home/u')).toBe('/home/u/dev/anonpi');
 	});
 	it('leaves absolute + relative + mid-string ~ alone', () => {
 		expect(expandTilde('/abs/x', '/home/u')).toBe('/abs/x');

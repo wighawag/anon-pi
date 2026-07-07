@@ -113,12 +113,15 @@ describe('__init-apply: writes the workspace into ITS OWN home (the crossing tar
 	it('a persona payload (no `machine`) writes ONLY config.json, no default machine', () => {
 		const anonHome = join(tmp('anon-acct-'), '.anon-pi');
 		const payload: InitApplyPayload = {
-			config: {proxy: 'socks5h://anon-alice:x@127.0.0.1:9050', hardened: true},
+			config: {
+				proxy: 'socks5h://anonpi-alice:x@127.0.0.1:9050',
+				hardened: true,
+			},
 		};
 		const r = apply(anonHome, payload);
 		expect(r.status).toBe(0);
 		const cfg = JSON.parse(readFileSync(join(anonHome, 'config.json'), 'utf8'));
-		expect(cfg.proxy).toBe('socks5h://anon-alice:x@127.0.0.1:9050');
+		expect(cfg.proxy).toBe('socks5h://anonpi-alice:x@127.0.0.1:9050');
 		// NO default machine for a persona (identity/config is the user's to set).
 		expect(existsSync(join(anonHome, 'machines'))).toBe(false);
 	});
@@ -181,7 +184,7 @@ describe('__read-config: prints THIS account config for the login-side init defa
 		apply(anonHome, {
 			config: {
 				proxy: 'socks5h://127.0.0.1:9050',
-				projects: '/home/anon/work',
+				projects: '/home/anonpi/work',
 				hardened: true,
 			},
 		});
@@ -192,7 +195,7 @@ describe('__read-config: prints THIS account config for the login-side init defa
 		expect(r.status).toBe(0);
 		const cfg = JSON.parse(r.stdout);
 		expect(cfg.proxy).toBe('socks5h://127.0.0.1:9050');
-		expect(cfg.projects).toBe('/home/anon/work');
+		expect(cfg.projects).toBe('/home/anonpi/work');
 		expect(cfg.hardened).toBe(true);
 	});
 

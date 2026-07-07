@@ -8,17 +8,17 @@ import {
 } from '../src/index.js';
 
 // The PURE core of the hardened self-re-exec invocation (docs/adr/0006):
-// a should-redirect predicate + the `sudo -u anon -i <anon-pi> …` argv builder
-// and its `su - anon -c '…'` fallback string. Both the "am I anon?" identity and
+// a should-redirect predicate + the `sudo -u anonpi -i <anon-pi> …` argv builder
+// and its `su - anonpi -c '…'` fallback string. Both the "am I anonpi?" identity and
 // the anon-pi path are INJECTED, so nothing here spawns, sets a uid, or calls a
 // privilege syscall. No test invokes real sudo/su.
 
 describe('hardened invocation: shouldRedirectToAnon (loop-guarded, always on hardened)', () => {
-	it('redirects on a hardened install when the caller is NOT anon', () => {
+	it('redirects on a hardened install when the caller is NOT anonpi', () => {
 		expect(shouldRedirectToAnon({hardened: true, isAnon: false})).toBe(true);
 	});
 
-	it('does NOT redirect when the caller already IS anon (no self-loop)', () => {
+	it('does NOT redirect when the caller already IS anonpi (no self-loop)', () => {
 		expect(shouldRedirectToAnon({hardened: true, isAnon: true})).toBe(false);
 	});
 
@@ -29,7 +29,7 @@ describe('hardened invocation: shouldRedirectToAnon (loop-guarded, always on har
 });
 
 describe('hardened invocation: buildAnonSudoArgv (login -i form)', () => {
-	it('composes the exact `sudo -u anon -i <abs-anon-pi> <args…>` argv', () => {
+	it('composes the exact `sudo -u anonpi -i <abs-anon-pi> <args…>` argv', () => {
 		const argv = buildAnonSudoArgv({
 			anonPiPath: '/usr/local/bin/anon-pi',
 			forwardedArgs: ['recon', '--mount', '/tmp/x'],
@@ -49,7 +49,7 @@ describe('hardened invocation: buildAnonSudoArgv (login -i form)', () => {
 	it('carries no forwarded args cleanly (bare re-exec)', () => {
 		expect(
 			buildAnonSudoArgv({anonPiPath: '/opt/anon-pi', forwardedArgs: []}),
-		).toEqual(['sudo', '-u', 'anon', '-i', '/opt/anon-pi']);
+		).toEqual(['sudo', '-u', 'anonpi', '-i', '/opt/anon-pi']);
 	});
 
 	it('only ever emits a sudo argv, never a privilege syscall (structural)', () => {
@@ -61,8 +61,8 @@ describe('hardened invocation: buildAnonSudoArgv (login -i form)', () => {
 	});
 });
 
-describe('hardened invocation: buildAnonSuFallback (`su - anon -c` string form)', () => {
-	it('composes the exact `su - anon -c` argv with a single quoted command string', () => {
+describe('hardened invocation: buildAnonSuFallback (`su - anonpi -c` string form)', () => {
+	it('composes the exact `su - anonpi -c` argv with a single quoted command string', () => {
 		const argv = buildAnonSuFallback({
 			anonPiPath: '/usr/local/bin/anon-pi',
 			forwardedArgs: ['recon', '--mount', '/tmp/x'],
@@ -87,7 +87,7 @@ describe('hardened invocation: buildAnonSuFallback (`su - anon -c` string form)'
 	it('is a bare re-exec with no forwarded args', () => {
 		expect(
 			buildAnonSuFallback({anonPiPath: '/opt/anon-pi', forwardedArgs: []}),
-		).toEqual(['su', '-', 'anon', '-c', "'/opt/anon-pi'"]);
+		).toEqual(['su', '-', 'anonpi', '-c', "'/opt/anon-pi'"]);
 	});
 
 	it('only ever emits a su argv, never a privilege syscall (structural)', () => {
@@ -100,16 +100,16 @@ describe('hardened invocation: buildAnonSuFallback (`su - anon -c` string form)'
 });
 
 describe('hardened invocation: buildAnonSudoArgv targets a SELECTED persona account', () => {
-	it('re-execs into `anon-<name>` when an account is passed (multi-persona)', () => {
+	it('re-execs into `anonpi-<name>` when an account is passed (multi-persona)', () => {
 		const argv = buildAnonSudoArgv({
 			anonPiPath: '/usr/local/bin/anon-pi',
 			forwardedArgs: ['--as', 'alice', 'recon'],
-			account: 'anon-alice',
+			account: 'anonpi-alice',
 		});
 		expect(argv).toEqual([
 			'sudo',
 			'-u',
-			'anon-alice',
+			'anonpi-alice',
 			'-i',
 			'/usr/local/bin/anon-pi',
 			'--as',
@@ -118,7 +118,7 @@ describe('hardened invocation: buildAnonSudoArgv targets a SELECTED persona acco
 		]);
 	});
 
-	it('defaults to `anon` when no account is passed (v1 byte-identical)', () => {
+	it('defaults to `anonpi` when no account is passed (v1 byte-identical)', () => {
 		expect(
 			buildAnonSudoArgv({anonPiPath: '/opt/anon-pi', forwardedArgs: []}),
 		).toEqual(['sudo', '-u', ANON_ACCOUNT, '-i', '/opt/anon-pi']);
@@ -128,15 +128,15 @@ describe('hardened invocation: buildAnonSudoArgv targets a SELECTED persona acco
 		const argv = buildAnonSuFallback({
 			anonPiPath: '/usr/local/bin/anon-pi',
 			forwardedArgs: ['--as', 'alice'],
-			account: 'anon-alice',
+			account: 'anonpi-alice',
 		});
-		expect(argv.slice(0, 3)).toEqual(['su', '-', 'anon-alice']);
+		expect(argv.slice(0, 3)).toEqual(['su', '-', 'anonpi-alice']);
 	});
 });
 
 describe('hardened invocation: the account name is pinned', () => {
-	it('names the dedicated account `anon`', () => {
-		expect(ANON_ACCOUNT).toBe('anon');
+	it('names the dedicated account `anonpi`', () => {
+		expect(ANON_ACCOUNT).toBe('anonpi');
 	});
 
 	it('accepts a HardenedInvocation shape for the builders', () => {

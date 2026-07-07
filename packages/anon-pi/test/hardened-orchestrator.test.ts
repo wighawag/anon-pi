@@ -19,7 +19,7 @@ import {
 // NOTHING here spawns, probes, sudo's, or touches the fs. The two seams the task
 // calls out: missing-account -> print-script-and-wait; passing -> continue.
 
-/** All-pass probe inputs (a fully-provisioned `anon` account + a system anon-pi). */
+/** All-pass probe inputs (a fully-provisioned `anonpi` account + a system anon-pi). */
 const allPassProbes: HardenedPreflightProbes = {
 	anonPiResolvedPath: '/usr/local/bin/anon-pi',
 	loginHome: '/home/operator',
@@ -51,7 +51,7 @@ function inputs(
 		loginUser: 'operator',
 		anonPiPath: '/usr/local/bin/anon-pi',
 		loginHome: '/home/operator',
-		anonHome: '/home/anon/.anon-pi',
+		anonHome: '/home/anonpi/.anon-pi',
 		...over,
 	};
 }
@@ -63,7 +63,7 @@ describe('planHardeningStep: preflight PASSES -> continue Tier 1', () => {
 		const plan = planHardeningStep(inputs(preflight));
 		expect(plan.kind).toBe('continue-tier1');
 		if (plan.kind !== 'continue-tier1') throw new Error('wrong kind');
-		expect(plan.anonHome).toBe('/home/anon/.anon-pi');
+		expect(plan.anonHome).toBe('/home/anonpi/.anon-pi');
 		expect(plan.mode).toBe(HARDENED_HOME_MODE);
 		expect(plan.mode).toBe(0o700);
 	});

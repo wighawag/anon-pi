@@ -2,7 +2,7 @@
 // `multi-persona-hardened-accounts`, superseding ADR-0006; task
 // `persona-as-launch-selection-wiring`). Generalizes v1's single-account
 // self-re-exec (hardened-wiring.test.ts) to the SELECTED persona: on a hardened
-// install `anon-pi --as <name> …` re-execs into `anon-<name>` (default `anon`),
+// install `anon-pi --as <name> …` re-execs into `anonpi-<name>` (default `anonpi`),
 // the `--as` value is STRIPPED from the argv netcage sees yet SURVIVES into the
 // re-exec, an unknown persona errors, and the no-`--as` default stays
 // byte-identical to v1.
@@ -134,19 +134,19 @@ function run(args: string[], opts: {home: string; bin: string}) {
 }
 
 describe('multi-persona launch: `--as <name>` selects + re-execs into the persona account', () => {
-	it('redirects `--as alice` into `sudo -u anon-alice -i …`, --as SURVIVING the re-exec', () => {
+	it('redirects `--as alice` into `sudo -u anonpi-alice -i …`, --as SURVIVING the re-exec', () => {
 		const home = tmp('anon-pi-home-');
 		writeHardenedConfig(home, true);
 		const sudoLog = join(tmp('anon-pi-log-'), 'sudo.log');
-		// anon-alice exists (was provisioned by `persona add`); the default anon too.
-		const bin = fakeBin(sudoLog, ['anon', 'anon-alice']);
+		// anonpi-alice exists (was provisioned by `persona add`); the default anonpi too.
+		const bin = fakeBin(sudoLog, ['anonpi', 'anonpi-alice']);
 
 		const r = run(['--as', 'alice', 'recon', '--mount', '/tmp/x'], {home, bin});
 		expect(r.status).toBe(0);
 		expect(existsSync(sudoLog)).toBe(true);
 		const argv = readFileSync(sudoLog, 'utf8').trim().split('\n');
-		// sudo saw: -u anon-alice -i <anon-pi> --as alice recon --mount /tmp/x
-		expect(argv.slice(0, 3)).toEqual(['-u', 'anon-alice', '-i']);
+		// sudo saw: -u anonpi-alice -i <anon-pi> --as alice recon --mount /tmp/x
+		expect(argv.slice(0, 3)).toEqual(['-u', 'anonpi-alice', '-i']);
 		// the 4th arg is the anon-pi binary path; then (after the internal
 		// parent-version pair) the forwarded args, with `--as alice` PRESERVED so the
 		// child re-derives its persona + loop-guards.
@@ -159,35 +159,35 @@ describe('multi-persona launch: `--as <name>` selects + re-execs into the person
 		]);
 	});
 
-	it('no `--as` (default persona) redirects into `anon` exactly as v1', () => {
+	it('no `--as` (default persona) redirects into `anonpi` exactly as v1', () => {
 		const home = tmp('anon-pi-home-');
 		writeHardenedConfig(home, true);
 		const sudoLog = join(tmp('anon-pi-log-'), 'sudo.log');
-		const bin = fakeBin(sudoLog, ['anon']);
+		const bin = fakeBin(sudoLog, ['anonpi']);
 
 		const r = run(['recon', '--mount', '/tmp/x'], {home, bin});
 		expect(r.status).toBe(0);
 		const argv = readFileSync(sudoLog, 'utf8').trim().split('\n');
-		// byte-identical to v1's hardened-wiring test: -u anon -i <anon-pi> recon …
-		expect(argv.slice(0, 3)).toEqual(['-u', 'anon', '-i']);
+		// byte-identical to v1's hardened-wiring test: -u anonpi -i <anon-pi> recon …
+		expect(argv.slice(0, 3)).toEqual(['-u', 'anonpi', '-i']);
 		expect(forwarded(argv)).toEqual(['recon', '--mount', '/tmp/x']);
 		// the default path carries NO `--as` token into the re-exec.
 		expect(argv).not.toContain('--as');
 	});
 
-	it('an UNKNOWN persona errors clearly (no silent create, no fall-through to anon, no sudo)', () => {
+	it('an UNKNOWN persona errors clearly (no silent create, no fall-through to anonpi, no sudo)', () => {
 		const home = tmp('anon-pi-home-');
 		writeHardenedConfig(home, true);
 		const sudoLog = join(tmp('anon-pi-log-'), 'sudo.log');
 		// carol was never provisioned: getent misses -> unknown-persona error.
-		const bin = fakeBin(sudoLog, ['anon', 'anon-alice']);
+		const bin = fakeBin(sudoLog, ['anonpi', 'anonpi-alice']);
 
 		const r = run(['--as', 'carol', 'recon'], {home, bin});
 		expect(r.status).not.toBe(0);
 		expect(r.stderr).toContain('no persona');
 		expect(r.stderr).toContain('carol');
 		expect(r.stderr).toContain('persona add');
-		// it must NOT silently redirect to anon or anywhere.
+		// it must NOT silently redirect to anonpi or anywhere.
 		expect(existsSync(sudoLog)).toBe(false);
 	});
 
@@ -195,7 +195,7 @@ describe('multi-persona launch: `--as <name>` selects + re-execs into the person
 		const home = tmp('anon-pi-home-');
 		writeHardenedConfig(home, true);
 		const sudoLog = join(tmp('anon-pi-log-'), 'sudo.log');
-		const bin = fakeBin(sudoLog, ['anon']);
+		const bin = fakeBin(sudoLog, ['anonpi']);
 
 		const r = run(['--as'], {home, bin});
 		expect(r.status).not.toBe(0);
@@ -207,7 +207,7 @@ describe('multi-persona launch: `--as <name>` selects + re-execs into the person
 		const home = tmp('anon-pi-home-');
 		writeHardenedConfig(home, true);
 		const sudoLog = join(tmp('anon-pi-log-'), 'sudo.log');
-		const bin = fakeBin(sudoLog, ['anon']);
+		const bin = fakeBin(sudoLog, ['anonpi']);
 
 		const r = run(['--as', 'Alice', 'recon'], {home, bin});
 		expect(r.status).not.toBe(0);
@@ -219,7 +219,7 @@ describe('multi-persona launch: `--as <name>` selects + re-execs into the person
 		const home = tmp('anon-pi-home-');
 		writeHardenedConfig(home, true);
 		const sudoLog = join(tmp('anon-pi-log-'), 'sudo.log');
-		const bin = fakeBin(sudoLog, ['anon', 'anon-alice']);
+		const bin = fakeBin(sudoLog, ['anonpi', 'anonpi-alice']);
 
 		const r = run(['--version'], {home, bin});
 		expect(r.status).toBe(0);
@@ -231,12 +231,12 @@ describe('multi-persona launch: `--as <name>` selects + re-execs into the person
 		const home = tmp('anon-pi-home-');
 		writeHardenedConfig(home, true);
 		const sudoLog = join(tmp('anon-pi-log-'), 'sudo.log');
-		const bin = fakeBin(sudoLog, ['anon', 'anon-alice']);
+		const bin = fakeBin(sudoLog, ['anonpi', 'anonpi-alice']);
 
 		const r = run(['--as', 'alice', 'machine', 'list'], {home, bin});
 		expect(r.status).toBe(0);
 		const argv = readFileSync(sudoLog, 'utf8').trim().split('\n');
-		expect(argv.slice(0, 3)).toEqual(['-u', 'anon-alice', '-i']);
+		expect(argv.slice(0, 3)).toEqual(['-u', 'anonpi-alice', '-i']);
 		expect(forwarded(argv)).toEqual(['--as', 'alice', 'machine', 'list']);
 	});
 });
@@ -249,7 +249,7 @@ describe('multi-persona launch isolation: the redirect never touches real homes 
 		const home = tmp('anon-pi-home-');
 		writeHardenedConfig(home, true);
 		const sudoLog = join(tmp('anon-pi-log-'), 'sudo.log');
-		const bin = fakeBin(sudoLog, ['anon', 'anon-alice']);
+		const bin = fakeBin(sudoLog, ['anonpi', 'anonpi-alice']);
 
 		const r = run(['--as', 'alice', 'recon'], {home, bin});
 		expect(r.status).toBe(0);

@@ -19,56 +19,56 @@ import {
 
 describe('per-persona egress: composeTorPersonaProxy (account -> socks5h://<account>:x@<host:port>)', () => {
 	it('composes the literal Tor URL with the account as the SOCKS-isolation username', () => {
-		expect(composeTorPersonaProxy('anon-alice')).toBe(
-			'socks5h://anon-alice:x@127.0.0.1:9050',
+		expect(composeTorPersonaProxy('anonpi-alice')).toBe(
+			'socks5h://anonpi-alice:x@127.0.0.1:9050',
 		);
 	});
 
-	it('uses the default persona account `anon` as the isolation username too', () => {
-		expect(composeTorPersonaProxy('anon')).toBe(
-			'socks5h://anon:x@127.0.0.1:9050',
+	it('uses the default persona account `anonpi` as the isolation username too', () => {
+		expect(composeTorPersonaProxy('anonpi')).toBe(
+			'socks5h://anonpi:x@127.0.0.1:9050',
 		);
 	});
 
 	it('gives two personas DISTINCT isolation usernames on the same Tor endpoint', () => {
 		// Same :9050, different username -> Tor IsolateSOCKSAuth gives separate
 		// circuits/exits. The composer is what makes the usernames distinct.
-		const a = composeTorPersonaProxy('anon-alice');
-		const b = composeTorPersonaProxy('anon-bob');
+		const a = composeTorPersonaProxy('anonpi-alice');
+		const b = composeTorPersonaProxy('anonpi-bob');
 		expect(a).not.toBe(b);
-		expect(a).toContain('anon-alice:x@');
-		expect(b).toContain('anon-bob:x@');
+		expect(a).toContain('anonpi-alice:x@');
+		expect(b).toContain('anonpi-bob:x@');
 	});
 
 	it('defaults the host:port to 127.0.0.1:9050 (system Tor)', () => {
 		expect(DEFAULT_TOR_SOCKS_HOST_PORT).toBe('127.0.0.1:9050');
-		expect(composeTorPersonaProxy('anon-alice')).toContain('@127.0.0.1:9050');
+		expect(composeTorPersonaProxy('anonpi-alice')).toContain('@127.0.0.1:9050');
 	});
 
 	it('accepts a custom Tor SOCKS host:port', () => {
-		expect(composeTorPersonaProxy('anon-alice', '127.0.0.1:9150')).toBe(
-			'socks5h://anon-alice:x@127.0.0.1:9150',
+		expect(composeTorPersonaProxy('anonpi-alice', '127.0.0.1:9150')).toBe(
+			'socks5h://anonpi-alice:x@127.0.0.1:9150',
 		);
-		expect(composeTorPersonaProxy('anon-bob', '10.0.0.2:9050')).toBe(
-			'socks5h://anon-bob:x@10.0.0.2:9050',
+		expect(composeTorPersonaProxy('anonpi-bob', '10.0.0.2:9050')).toBe(
+			'socks5h://anonpi-bob:x@10.0.0.2:9050',
 		);
 	});
 
 	it('normalises a custom host:port that carries a scheme (never socks5h://socks5h://)', () => {
 		expect(
-			composeTorPersonaProxy('anon-alice', 'socks5h://127.0.0.1:9050'),
-		).toBe('socks5h://anon-alice:x@127.0.0.1:9050');
+			composeTorPersonaProxy('anonpi-alice', 'socks5h://127.0.0.1:9050'),
+		).toBe('socks5h://anonpi-alice:x@127.0.0.1:9050');
 	});
 
 	it('uses the ignored placeholder password `x`', () => {
 		expect(TOR_PLACEHOLDER_PASSWORD).toBe('x');
-		expect(composeTorPersonaProxy('anon-alice')).toContain(':x@');
+		expect(composeTorPersonaProxy('anonpi-alice')).toContain(':x@');
 	});
 
 	it('produces a plain literal socks5h URL, readable as an ordinary v1 proxy', () => {
 		// The composed URL is stored in the persona config `proxy` field verbatim;
 		// it must be a bare socks5h:// string with no schema marker.
-		const url = composeTorPersonaProxy('anon-alice');
+		const url = composeTorPersonaProxy('anonpi-alice');
 		expect(url.startsWith('socks5h://')).toBe(true);
 		// It round-trips as an ordinary v1 proxy (resolveProxy returns it unchanged).
 		expect(resolveProxy({config: {proxy: url}, env: {}})).toBe(url);
@@ -126,14 +126,14 @@ describe('per-persona egress: fail-closed per persona (reuse of v1 PROXY_REQUIRE
 		// it. The pure resolver only ever reads the config it is handed, so a
 		// persona whose OWN config lacks a proxy fails closed regardless of any
 		// other persona's proxy.
-		const bobProxy = composeTorPersonaProxy('anon-bob');
-		expect(bobProxy).toBe('socks5h://anon-bob:x@127.0.0.1:9050');
+		const bobProxy = composeTorPersonaProxy('anonpi-bob');
+		expect(bobProxy).toBe('socks5h://anonpi-bob:x@127.0.0.1:9050');
 		// alice resolves over her OWN (empty) config -> fail-closed, not bob's proxy.
 		expect(() => resolveProxy({config: {}, env: {}})).toThrow(AnonPiError);
 	});
 
 	it('a persona WITH its own composed Tor proxy resolves to exactly that proxy', () => {
-		const aliceProxy = composeTorPersonaProxy('anon-alice');
+		const aliceProxy = composeTorPersonaProxy('anonpi-alice');
 		expect(resolveProxy({config: {proxy: aliceProxy}, env: {}})).toBe(
 			aliceProxy,
 		);
