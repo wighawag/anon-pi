@@ -126,6 +126,7 @@ import {
 	isAnonPersonaAccount,
 	projectsRootLeaksLogin,
 	resolveInitProjectsDefault,
+	VERSION_MANAGER_DIRS,
 	composeTorPersonaProxy,
 	offerTor,
 	DEFAULT_TOR_SOCKS_HOST_PORT,
@@ -450,18 +451,34 @@ function anonPiBinaryPath(): string {
 }
 
 /**
- * Resolve `anon-pi` as the `anon` account would: in a sanitized login shell
- * (`env -i` clears the caller's polluted PATH; `sh -l` loads the SYSTEM login
- * PATH from /etc/profile). Returns the resolved path (NOT realpath'd - keep the
- * stable bin symlink) or undefined when it is not on the system PATH. HOME is
- * pointed at a nonexistent dir so no per-user shell rc can re-inject a Volta PATH.
+ * Resolve `anon-pi` as the `anon` account would: on a PATH with the login user's
+ * per-user Node-manager dirs REMOVED, so a Volta/nvm shim (which the account
+ * cannot run) never wins over a system install. We do NOT use `env -i` + a login
+ * shell (which would also drop a test's stubbed PATH and break isolation);
+ * instead we filter the CURRENT PATH, dropping only entries that traverse a
+ * `VERSION_MANAGER_DIRS` segment (`.volta`, `.nvm`, ...). System dirs
+ * (`/usr/local/bin`, `/usr/bin`) and any non-manager entry survive, so a real
+ * `/usr/local/bin/anon-pi` is found. Returns the resolved path (NOT realpath'd -
+ * keep the stable bin symlink) or undefined when anon-pi is not found on the
+ * sanitized PATH.
  */
 function systemResolvedAnonPi(): string | undefined {
-	const res = spawnSync(
-		'env',
-		['-i', 'HOME=/nonexistent', 'TERM=dumb', 'sh', '-lc', 'command -v anon-pi'],
-		{encoding: 'utf8'},
-	);
+	const rawPath = process.env.PATH ?? '';
+	const sanitized = rawPath
+		.split(':')
+		.filter((dir) => {
+			if (dir === '') return false;
+			const segs = dir.split('/');
+			return !segs.some((s) =>
+				(VERSION_MANAGER_DIRS as readonly string[]).includes(s),
+			);
+		})
+		.join(':');
+	const res = spawnSync('command', ['-v', 'anon-pi'], {
+		encoding: 'utf8',
+		shell: true,
+		env: {...process.env, PATH: sanitized},
+	});
 	if (res.status !== 0) return undefined;
 	const p = res.stdout.trim();
 	return p === '' ? undefined : p;
