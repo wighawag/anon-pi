@@ -10,12 +10,25 @@
 //
 // Requires the package to be built (dist/cli.js); CI builds before test.
 import {afterEach, describe, it, expect} from 'vitest';
-import {existsSync, mkdtempSync, readFileSync, rmSync, statSync} from 'node:fs';
+import {
+	chmodSync,
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {INIT_APPLY_SUBCOMMAND, type InitApplyPayload} from '../src/index.js';
+import {
+	INIT_APPLY_SUBCOMMAND,
+	IMAGE_EXISTS_SUBCOMMAND,
+	IMAGE_BUILD_SUBCOMMAND,
+	type InitApplyPayload,
+} from '../src/index.js';
 
 const cli = join(
 	dirname(fileURLToPath(import.meta.url)),
@@ -41,6 +54,34 @@ function apply(anonHome: string, payload: unknown) {
 		encoding: 'utf8',
 		env: {...process.env, ANON_PI_HOME: anonHome},
 		input: JSON.stringify(payload),
+	});
+}
+
+/**
+ * A temp bin dir on PATH holding a FAKE `netcage` whose `images --format json`
+ * reports the given tags, `--version` answers 0.11.0, and everything else (incl.
+ * `build`) is a tripwire (we only assert the exists-check dispatch here).
+ */
+function fakeNetcageBin(tags: string[]): string {
+	const bin = tmp('anon-pi-bin-');
+	const images = JSON.stringify(tags.map((t) => ({Id: t, Names: [t]})));
+	writeFileSync(
+		join(bin, 'netcage'),
+		`#!/bin/sh\n` +
+			`if [ "$1" = images ]; then printf '%s' '${images}'; exit 0; fi\n` +
+			`if [ "$1" = --version ]; then echo 'netcage 0.11.0'; exit 0; fi\n` +
+			`echo "TRIPWIRE: netcage $1" >&2; exit 97\n`,
+	);
+	chmodSync(join(bin, 'netcage'), 0o755);
+	return bin;
+}
+
+/** Run an internal image subcommand with a stubbed PATH (fake netcage). */
+function imageCmd(sub: string, arg: string | undefined, bin: string) {
+	const args = arg === undefined ? [cli, sub] : [cli, sub, arg];
+	return spawnSync(process.execPath, args, {
+		encoding: 'utf8',
+		env: {...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`},
 	});
 }
 
@@ -98,5 +139,36 @@ describe('__init-apply: writes the workspace into ITS OWN home (the crossing tar
 		});
 		expect(r.status).not.toBe(0);
 		expect(r.stderr).toMatch(/unparseable payload/);
+	});
+});
+
+describe('__image-exists / __image-build: dispatched, not treated as a project', () => {
+	it('__image-exists exits 0 when the tag is in this store, 1 when not', () => {
+		const tag = 'localhost/anon-pi/pi-webveil:latest';
+		const present = imageCmd(
+			IMAGE_EXISTS_SUBCOMMAND,
+			tag,
+			fakeNetcageBin([tag]),
+		);
+		expect(present.status).toBe(0);
+		const absent = imageCmd(
+			IMAGE_EXISTS_SUBCOMMAND,
+			tag,
+			fakeNetcageBin(['localhost/other:latest']),
+		);
+		expect(absent.status).toBe(1);
+	});
+
+	it('__image-exists with no tag errors (exit 2)', () => {
+		const r = imageCmd(IMAGE_EXISTS_SUBCOMMAND, undefined, fakeNetcageBin([]));
+		expect(r.status).toBe(2);
+		expect(r.stderr).toMatch(/needs an image tag/);
+	});
+
+	it('__image-build rejects a bad choice (exit 2), never runs netcage', () => {
+		const r = imageCmd(IMAGE_BUILD_SUBCOMMAND, 'bogus', fakeNetcageBin([]));
+		expect(r.status).toBe(2);
+		expect(r.stderr).toMatch(/takes `basic` or `webveil`/);
+		expect(r.stderr).not.toContain('TRIPWIRE');
 	});
 });

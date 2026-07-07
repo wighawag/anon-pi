@@ -22,6 +22,7 @@ import {
 	verifyEgressAssertionPassed,
 	NETCAGE_EGRESS_ASSERTION,
 	imageTagPresent,
+	shippedImageTag,
 	processHint,
 	serializeConfigJson,
 	socks5hUrl,
@@ -315,6 +316,15 @@ describe('verifyEgressAssertionPassed (the anonymity proof, load-bearing for ini
 
 	it('is FALSE when the egress assertion is ABSENT (netcage could not prove egress)', () => {
 		expect(verifyEgressAssertionPassed('verify errored: offline?')).toBe(false);
+	});
+});
+
+describe('shippedImageTag (choice -> fully-qualified localhost/ tag)', () => {
+	it('maps basic + webveil to their localhost/ tags', () => {
+		expect(shippedImageTag('basic')).toBe('localhost/anon-pi/pi:latest');
+		expect(shippedImageTag('webveil')).toBe(
+			'localhost/anon-pi/pi-webveil:latest',
+		);
 	});
 });
 

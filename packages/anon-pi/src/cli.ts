@@ -111,6 +111,10 @@ import {
 	PARENT_VERSION_FLAG,
 	anonPiVersionMismatch,
 	INIT_APPLY_SUBCOMMAND,
+	IMAGE_EXISTS_SUBCOMMAND,
+	IMAGE_BUILD_SUBCOMMAND,
+	shippedImageTag,
+	type ShippedImageChoice,
 	HARDENED_HOME_MODE,
 	type InitApplyPayload,
 	evaluateHardenedPreflight,
@@ -222,6 +226,17 @@ function main(argv: string[]): number {
 	// selection/redirect so it can never be mistaken for a project or re-crossed.
 	if (rawArgs[0] === INIT_APPLY_SUBCOMMAND) {
 		return runInitApply();
+	}
+
+	// INTERNAL: the as-account image exists-check / build (hardened `init`). Also
+	// reached only inside the `sudo -u <account> -i anon-pi __image-...` crossing;
+	// we are the account, so netcage's uid-scoped store is the account's. Dispatched
+	// before persona selection/redirect (never a project, never re-crossed).
+	if (rawArgs[0] === IMAGE_EXISTS_SUBCOMMAND) {
+		return runImageExists(rawArgs[1]);
+	}
+	if (rawArgs[0] === IMAGE_BUILD_SUBCOMMAND) {
+		return runImageBuild(rawArgs[1]);
 	}
 
 	// MULTI-PERSONA SELF-RE-EXEC (prd `multi-persona-hardened-accounts`,
@@ -627,6 +642,93 @@ function runInitApply(): number {
 	}
 	applyInitWorkspace(envFromProcess(process.env), payload);
 	return 0;
+}
+
+// --- Hardened image build: cross to the account so the image lands in ITS store -
+//
+// On a hardened install `netcage` runs as the account, whose podman graphroot is
+// uid-scoped (`/var/tmp/netcage-storage-<uid>`), distinct from the login user's.
+// So the exists-check + the build must run AS the account, or the image lands in
+// the wrong store and the jail cannot see it. Both cross via `sudo -u <account>
+// -i anon-pi __image-... ` (the same rule/mechanism as the launch redirect); the
+// build streams (inherited stdio) so the user sees `netcage build`'s output.
+
+/** True iff `tag` exists in the ACCOUNT's netcage store (crosses via sudo). */
+function netcageImageExistsAsAccount(account: string, tag: string): boolean {
+	const argv = buildAnonSudoArgv({
+		anonPiPath: anonPiBinaryPath(),
+		forwardedArgs: [IMAGE_EXISTS_SUBCOMMAND, tag],
+		account,
+	});
+	const [cmd, ...rest] = argv;
+	// stdout ignored (we only need the exit code); stderr/stdin inherit so a sudo
+	// password prompt still reaches the user's TTY.
+	const res = spawnSync(cmd, rest, {stdio: ['inherit', 'ignore', 'inherit']});
+	return !res.error && res.status === 0;
+}
+
+/** Build a shipped image `choice` in the ACCOUNT's store (crosses via sudo, streams). */
+function buildImageAsAccount(
+	account: string,
+	choice: ShippedImageChoice,
+): boolean {
+	const argv = buildAnonSudoArgv({
+		anonPiPath: anonPiBinaryPath(),
+		forwardedArgs: [IMAGE_BUILD_SUBCOMMAND, choice],
+		account,
+	});
+	const [cmd, ...rest] = argv;
+	const res = spawnSync(cmd, rest, {stdio: 'inherit'});
+	if (res.error) {
+		process.stderr.write(
+			`  anon-pi: failed to build the image as \`${account}\` via sudo ` +
+				`(${res.error.message}).\n`,
+		);
+		return false;
+	}
+	return res.status === 0;
+}
+
+/**
+ * The as-account `__image-exists <tag>` handler: exit 0 iff `tag` is in THIS
+ * process's netcage store (we are the account, reached via the crossing).
+ */
+function runImageExists(tag: string | undefined): number {
+	if (tag === undefined || tag.trim() === '') {
+		process.stderr.write(
+			`anon-pi: ${IMAGE_EXISTS_SUBCOMMAND} needs an image tag.\n`,
+		);
+		return 2;
+	}
+	return netcageImageExists(tag) ? 0 : 1;
+}
+
+/**
+ * The as-account `__image-build <basic|webveil>` handler: re-resolve the shipped
+ * Dockerfile (from the SYSTEM anon-pi install, which the account can read) + its
+ * tag, and build into THIS account's store. Runs as the account (via the
+ * crossing), so `netcage build` targets the account's uid-scoped graphroot.
+ */
+function runImageBuild(choice: string | undefined): number {
+	if (choice !== 'basic' && choice !== 'webveil') {
+		process.stderr.write(
+			`anon-pi: ${IMAGE_BUILD_SUBCOMMAND} takes \`basic\` or \`webveil\`, got ${JSON.stringify(choice)}.\n`,
+		);
+		return 2;
+	}
+	const dockerfile =
+		choice === 'basic'
+			? shippedDockerfilePath()
+			: shippedWebveilDockerfilePath();
+	if (dockerfile === undefined || !existsSync(dockerfile)) {
+		process.stderr.write(
+			`anon-pi: ${IMAGE_BUILD_SUBCOMMAND} could not locate the shipped ` +
+				`${choice === 'basic' ? 'Dockerfile.pi' : 'examples/Dockerfile.pi-webveil'} ` +
+				`(is anon-pi installed system-wide, readable by this account?).\n`,
+		);
+		return 1;
+	}
+	return buildImage(dockerfile, shippedImageTag(choice)) ? 0 : 1;
 }
 
 /**
@@ -2386,7 +2488,10 @@ function runInit(args: string[]): number {
 	const llm = llmResult.endpoint;
 
 	// 4) DEFAULT MACHINE IMAGE: menu (shipped Dockerfiles / existing ref / skip).
-	const image = initImageStep();
+	//    On a hardened install the exists-check + build run AS `anon` (its own
+	//    uid-scoped netcage store), so the image lands where the hardened launch
+	//    reads it - not stranded in the login user's store.
+	const image = initImageStep(hardened === true);
 	if (image === ABORT) return 1;
 
 	// 5) PROJECTS ROOT: the host dir mounted at /projects (default ~/.anon-pi/
@@ -2961,12 +3066,20 @@ function initDefaultModelPicker(chosen: readonly GeneratedModel[]): string {
  * the impure action for the pick (build via `podman build`, take a ref, or
  * skip). Returns the resolved image ref, undefined for skip, or ABORT.
  */
-function initImageStep(): string | undefined | typeof ABORT {
+function initImageStep(hardened: boolean): string | undefined | typeof ABORT {
 	process.stdout.write(
 		sectionHeader(
 			'Step 4/5  ·  Default machine image (an image with `pi` on PATH)',
 		),
 	);
+	if (hardened) {
+		process.stdout.write(
+			c.dim(
+				`  (hardened: the exists-check + build run as \`${ANON_ACCOUNT}\`, so the image\n` +
+					`  lands in that account's netcage store where the jail reads it.)`,
+			) + '\n',
+		);
+	}
 	const menu = initImageMenu();
 	menu.forEach((e, i) => {
 		process.stdout.write(`  [${i + 1}] ${e.label}\n`);
@@ -3010,10 +3123,7 @@ function initImageStep(): string | undefined | typeof ABORT {
 		// at run time ("did not resolve to an alias and no unqualified-search
 		// registries defined"), so a locally-built image MUST carry the localhost/
 		// prefix to be runnable by name.
-		const tag =
-			choice === 'basic'
-				? 'localhost/anon-pi/pi:latest'
-				: 'localhost/anon-pi/pi-webveil:latest';
+		const tag = shippedImageTag(choice);
 		// SKIP-IF-EXISTS: this tag is fixed per shipped Dockerfile, and building it
 		// is expensive (apt + npm + pip, minutes). If it is ALREADY in netcage's
 		// store, offer to REUSE it (default) instead of rebuilding every `init`. A
@@ -3021,8 +3131,15 @@ function initImageStep(): string | undefined | typeof ABORT {
 		// re-trigger a long build. Answer `n`/rebuild to force a fresh build (e.g. to
 		// pick up a new pi / SearXNG). The probe fails toward building, never toward a
 		// stale skip.
-		if (netcageImageExists(tag)) {
-			process.stdout.write(`  ${tag} already exists in netcage's store.\n`);
+		// The store to check/build in: on a hardened install it is `anon`'s uid-scoped
+		// store (reached by crossing), else the login user's local store.
+		const exists = hardened
+			? netcageImageExistsAsAccount(ANON_ACCOUNT, tag)
+			: netcageImageExists(tag);
+		if (exists) {
+			process.stdout.write(
+				c.ok(`  ✓ ${tag} already exists in netcage's store.`) + '\n',
+			);
 			const reuse = promptLine(
 				'  Reuse it (skip the rebuild)? [Y/n] (n = rebuild fresh) ',
 			);
@@ -3036,7 +3153,11 @@ function initImageStep(): string | undefined | typeof ABORT {
 			}
 			process.stdout.write('  Rebuilding fresh...\n');
 		}
-		const built = buildImage(dockerfile, tag);
+		// The choice tag for the as-account builder (which re-resolves its OWN shipped
+		// Dockerfile from the system install, readable by the account).
+		const built = hardened
+			? buildImageAsAccount(ANON_ACCOUNT, choice)
+			: buildImage(dockerfile, tag);
 		if (!built) {
 			process.stdout.write('  Build failed; pick another option.\n');
 			continue;

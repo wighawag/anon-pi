@@ -4263,6 +4263,28 @@ export function buildAnonSudoArgv(inv: HardenedInvocation): string[] {
 export const INIT_APPLY_SUBCOMMAND = '__init-apply';
 
 /**
+ * Internal subcommands the hardened image step invokes on the as-account child:
+ * `__image-exists <tag>` (exit 0 if the tag is in THIS account's netcage store)
+ * and `__image-build <basic|webveil>` (build the shipped Dockerfile into this
+ * account's store). Like INIT_APPLY_SUBCOMMAND, they cross via `sudo -u <account>
+ * -i anon-pi ...` so the store touched is the ACCOUNT's uid-scoped one (not the
+ * login user's), and the built image lands where the hardened jail reads it.
+ * INTERNAL (double-underscore, not in help).
+ */
+export const IMAGE_EXISTS_SUBCOMMAND = '__image-exists';
+export const IMAGE_BUILD_SUBCOMMAND = '__image-build';
+
+/** The shipped-image choices the hardened `__image-build` child understands. */
+export type ShippedImageChoice = 'basic' | 'webveil';
+
+/** PURE: the fully-qualified `localhost/` tag for a shipped-image choice. */
+export function shippedImageTag(choice: ShippedImageChoice): string {
+	return choice === 'basic'
+		? 'localhost/anon-pi/pi:latest'
+		: 'localhost/anon-pi/pi-webveil:latest';
+}
+
+/**
  * The JSON payload the login-user side serializes and pipes (on stdin) to the
  * as-account `__init-apply` child. It carries ONLY already-resolved values (the
  * interactive answers are gathered login-side; the child never prompts). Both
