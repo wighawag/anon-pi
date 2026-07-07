@@ -1,9 +1,0 @@
----
-'anon-pi': minor
----
-
-Rename the dedicated hardened-deployment Unix accounts off the generic `anon` namespace onto anon-pi's own `anonpi` namespace. The default persona account is now `anonpi` (was `anon`) and named personas are `anonpi-<name>` (was `anon-<name>`). This is a BREAKING change: an existing hardened install's `anon` / `anon-<name>` accounts, their mode-700 homes, sudoers rules, and stored per-persona proxies do not carry over, so re-provision under the new names (`anon-pi init`, `anon-pi persona add <name>`) and `userdel -r` the old ones.
-
-Why: a sibling tool, `anonctl`, owns the generic account namespace (the bare `anon` and the `anon-<name>` prefix) for a different anonymization model. anon-pi moves to a disjoint namespace so the two tools' accounts never collide on a box that runs both. `anonpi` has no hyphen after `anon`, so it is neither the bare `anon` nor a `anon-<name>` persona, and no `anonpi-<name>` can equal `anon` or `anon-<x>`. `anonpi` is also self-documenting and not a common real-world username (unlike `pi`).
-
-A new namespace guard in `validatePersonaName` rejects a persona name that is exactly `anon` or starts with `anon-`, keeping anon-pi's and anonctl's account spaces disjoint and preventing a confusing `anonpi-anon…` account. The `ANON_ACCOUNT` (`'anonpi'`) and `PERSONA_ACCOUNT_PREFIX` (`'anonpi-'`) constants, `personaAccount`/`personaName`, the generated Tier-2 provisioning + teardown commands, the `sudo -u <account>` crossing, the `/home/<account>` assumptions, the per-persona Tor SOCKS-isolation username, the `init`/`persona` help text, and the README all move to the new scheme. The `anon-pi` package name, the `anon-pi.*` netcage labels, the `~/.anon-pi` workspace dir, and the `/etc/sudoers.d/anon-pi-<account>` file prefix are the tool name and are unchanged.
