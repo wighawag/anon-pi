@@ -5504,7 +5504,8 @@ export const PERSONA_BYO_UNIQUENESS_WARNING =
  *     in the CLI, not here, so the parser stays a thin grammar; `name` is the
  *     raw token (undefined for the default).
  */
-export type PersonaCommand = {verb: 'add'; name?: string};
+export type PersonaCommand =
+	{verb: 'add'; name?: string} | {verb: 'rm'; name?: string; yes: boolean};
 
 /**
  * PURE: parse the tokens AFTER `persona` into a PersonaCommand. Throws
@@ -5527,19 +5528,55 @@ export function parsePersonaArgs(args: readonly string[]): PersonaCommand {
 
 	const verb = args[0];
 	if (verb === undefined) {
-		fail('`persona` needs a subcommand: add');
+		fail('`persona` needs a subcommand: add | rm');
 	}
-	if (verb !== 'add') {
-		fail(
-			`unknown \`persona\` subcommand ${JSON.stringify(verb)} (only \`add\`).`,
-		);
+	if (verb !== 'add' && verb !== 'rm') {
+		fail(`unknown \`persona\` subcommand ${JSON.stringify(verb)} (add | rm).`);
 	}
 
 	const rest = args.slice(1);
 	// The name is the FIRST token iff it is not a flag; everything after is flags.
 	const name =
 		rest[0] !== undefined && !rest[0].startsWith('-') ? rest[0] : undefined;
+	if (verb === 'rm') {
+		// `rm` accepts a `--yes` to skip the destructive confirmation (mirrors
+		// `machine rm` / `container rm`); the CLI parses the charset of the name.
+		const yes = rest.includes('--yes') || rest.includes('-y');
+		return {verb: 'rm', name, yes};
+	}
 	return {verb: 'add', name};
+}
+
+/**
+ * PURE: generate the root TEARDOWN COMMAND BLOCK for `persona rm` - the mirror of
+ * buildTier2ProvisioningScript. anon-pi PRINTS these (never runs them): the human
+ * pastes them into a root shell they enter FIRST. Order matters: drop the scoped
+ * sudoers rule and disable linger BEFORE `userdel`, so nothing dangles and no
+ * active lingering session blocks the account deletion. `userdel -r` deletes the
+ * account's HOME - which holds ALL its anonymized session transcripts - so it is
+ * DESTRUCTIVE and irreversible; the CLI gates it behind an explicit confirmation.
+ * Inputs are injected (account only), so the block is a fully testable STRING;
+ * nothing here spawns or sudo's.
+ */
+export function buildPersonaTeardownScript(account: string): string {
+	const sudoersFile = `/etc/sudoers.d/anon-pi-${account}`;
+	return `# anon-pi persona teardown (REVIEW, then run yourself). anon-pi GENERATED
+# these commands and NEVER runs them. Become root FIRST, then paste the rest.
+# WARNING: step 3 DELETES the \`${account}\` account's HOME, which holds ALL its
+# anonymized session transcripts. This is IRREVERSIBLE.
+
+# 0. Become root (or use \`su -\`), then paste the commands below in that shell.
+sudo -i
+
+# 1. Remove the scoped sudoers rule (do this FIRST so nothing dangles).
+rm -f '${sudoersFile}'
+
+# 2. Disable linger for the account (drops its lingering session).
+loginctl disable-linger ${account} 2>/dev/null || true
+
+# 3. Delete the account AND its home (-r). This ERASES its transcripts.
+userdel -r ${account}
+`;
 }
 
 /** The injected inputs the resumable `persona add` provisioning planner decides over. */

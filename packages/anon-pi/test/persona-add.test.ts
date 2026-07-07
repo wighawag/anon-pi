@@ -4,6 +4,7 @@ import {
 	ANON_ACCOUNT,
 	parsePersonaArgs,
 	planPersonaAdd,
+	buildPersonaTeardownScript,
 	personaAccount,
 	composeTorPersonaProxy,
 	PERSONA_BYO_UNIQUENESS_WARNING,
@@ -33,9 +34,28 @@ describe('parsePersonaArgs: the `persona <verb>` grammar', () => {
 		expect(() => parsePersonaArgs([])).toThrow(AnonPiError);
 	});
 
-	it('errors on an unknown subcommand (only `add` in v1)', () => {
+	it('errors on an unknown subcommand (only add | rm)', () => {
 		expect(() => parsePersonaArgs(['list'])).toThrow(AnonPiError);
-		expect(() => parsePersonaArgs(['rm', 'alice'])).toThrow(AnonPiError);
+		expect(() => parsePersonaArgs(['bogus'])).toThrow(AnonPiError);
+	});
+
+	it('parses `rm <name>` and a bare `rm` (default persona), with --yes', () => {
+		expect(parsePersonaArgs(['rm', 'alice'])).toEqual({
+			verb: 'rm',
+			name: 'alice',
+			yes: false,
+		});
+		expect(parsePersonaArgs(['rm'])).toEqual({verb: 'rm', yes: false});
+		expect(parsePersonaArgs(['rm', 'alice', '--yes'])).toEqual({
+			verb: 'rm',
+			name: 'alice',
+			yes: true,
+		});
+		expect(parsePersonaArgs(['rm', 'alice', '-y'])).toEqual({
+			verb: 'rm',
+			name: 'alice',
+			yes: true,
+		});
 	});
 
 	it('takes the name FIRST; LEAVES trailing flag tokens for the CLI', () => {
@@ -130,5 +150,32 @@ describe('planPersonaAdd: resumable across account creation', () => {
 		expect(plan.kind).toBe('wait-for-account');
 		if (plan.kind !== 'wait-for-account') throw new Error('unreachable');
 		expect(plan.script).toContain('useradd -m anon');
+	});
+});
+
+describe('buildPersonaTeardownScript: the root teardown block for `persona rm`', () => {
+	it('emits the ordered teardown for a named persona (sudoers, linger, userdel -r)', () => {
+		const script = buildPersonaTeardownScript(personaAccount('alice'));
+		// become root first, never a script shebang.
+		expect(script).toMatch(/^sudo -i\b/m);
+		expect(script).not.toContain('#!/bin/sh');
+		// remove the scoped sudoers rule for this account.
+		expect(script).toContain("rm -f '/etc/sudoers.d/anon-pi-anon-alice'");
+		// disable linger, then delete the account + home.
+		expect(script).toContain('loginctl disable-linger anon-alice');
+		expect(script).toContain('userdel -r anon-alice');
+		// the DESTRUCTIVE warning is present (userdel -r erases transcripts).
+		expect(script).toMatch(/IRREVERSIBLE/);
+		// ORDER: sudoers rule removed BEFORE userdel (nothing dangles).
+		expect(script.indexOf('rm -f')).toBeLessThan(script.indexOf('userdel'));
+		expect(script.indexOf('disable-linger')).toBeLessThan(
+			script.indexOf('userdel'),
+		);
+	});
+
+	it('targets the default `anon` account for a bare teardown', () => {
+		const script = buildPersonaTeardownScript(ANON_ACCOUNT);
+		expect(script).toContain('userdel -r anon');
+		expect(script).toContain("rm -f '/etc/sudoers.d/anon-pi-anon'");
 	});
 });

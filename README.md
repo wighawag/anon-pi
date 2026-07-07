@@ -344,6 +344,8 @@ The default persona `anon` is created at `init`. To add another, run **`anon-pi 
 
 Persona **identity** (email, git config, credentials) is **your** job, configured inside the persona's home; anon-pi only gives you the isolated account + workspace + egress. What the persona is is whatever you make it inside its jail.
 
+To tear a persona down, run **`anon-pi persona rm [<name>]`** (bare `rm` targets the default `anon`). Like `add`, it only **prints** the root commands (remove the scoped sudoers rule, `loginctl disable-linger`, then `userdel -r anon-<name>`) for you to paste into a root shell; anon-pi never runs them. Because `userdel -r` **deletes the account's home and all its anonymized transcripts** (irreversible), on a TTY it asks you to type the account name to confirm before printing, or pass `--yes` (without a TTY it refuses unless `--yes`). If the account does not exist it says so and the commands are harmless no-ops (useful to clean a leftover sudoers rule).
+
 ### Per-persona egress: each persona has its own exit
 
 Each persona has its **own** socks5h proxy, chosen at `persona add` time and stored literally in that persona's own `config.json` (inside its mode-700 home, so your login user's workspace never holds any persona's proxy or name). No persona shares another's exit, and it is **fail-closed per persona**: a persona with no resolvable proxy refuses to launch, exactly like the global fail-closed today. There is no rotation knob. Two ways to give a persona an endpoint:

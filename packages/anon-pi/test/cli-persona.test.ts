@@ -363,3 +363,49 @@ describe('persona add: isolation (real homes + real tools untouched)', () => {
 		expect(after).toBe(before);
 	});
 });
+
+describe('persona rm: PRINTS the teardown, never runs root, gated on confirmation', () => {
+	it('account MISSING: prints the no-op note + commands, exits 0, runs nothing', () => {
+		const home = tmp('anon-pi-home-');
+		const bin = fakeBin({}); // getent reports no such account.
+		const r = run(['persona', 'rm', 'alice'], {home, bin});
+		expect(r.status).toBe(0);
+		expect(r.stdout).toMatch(/not provisioned/i);
+		expect(r.stdout).toContain('userdel -r anon-alice');
+		// anon-pi PRINTS only; it never invokes a real privilege tool.
+		expect(r.stderr).not.toContain('TRIPWIRE');
+	});
+
+	it('account EXISTS + no --yes + no TTY: REFUSES (never prints userdel)', () => {
+		const home = tmp('anon-pi-home-');
+		const accountHome = tmp('anon-acct-');
+		const bin = fakeBin({accountHome}); // getent reports anon-alice.
+		const r = run(['persona', 'rm', 'alice'], {home, bin});
+		expect(r.status).not.toBe(0);
+		expect(r.stderr).toMatch(/refusing to print a DESTRUCTIVE teardown/i);
+		expect(r.stdout).not.toContain('userdel');
+		expect(r.stderr).not.toContain('TRIPWIRE');
+	});
+
+	it('account EXISTS + --yes: PRINTS the teardown (still runs nothing)', () => {
+		const home = tmp('anon-pi-home-');
+		const accountHome = tmp('anon-acct-');
+		const bin = fakeBin({accountHome});
+		const r = run(['persona', 'rm', 'alice', '--yes'], {home, bin});
+		expect(r.status).toBe(0);
+		expect(r.stdout).toContain('userdel -r anon-alice');
+		expect(r.stdout).toContain("rm -f '/etc/sudoers.d/anon-pi-anon-alice'");
+		expect(r.stdout).toMatch(/IRREVERSIBLE/);
+		// PRINTED only: no real userdel/sudo/loginctl ran (they are tripwires).
+		expect(r.stderr).not.toContain('TRIPWIRE');
+	});
+
+	it('a bare `rm --yes` targets the default `anon` account', () => {
+		const home = tmp('anon-pi-home-');
+		const accountHome = tmp('anon-acct-');
+		const bin = fakeBin({accountHome});
+		const r = run(['persona', 'rm', '--yes'], {home, bin});
+		expect(r.status).toBe(0);
+		expect(r.stdout).toContain('userdel -r anon');
+	});
+});

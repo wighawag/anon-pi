@@ -121,6 +121,7 @@ import {
 	planHardeningStep,
 	parsePersonaArgs,
 	planPersonaAdd,
+	buildPersonaTeardownScript,
 	personaAccount,
 	personaName,
 	isAnonPersonaAccount,
@@ -3425,6 +3426,7 @@ const PERSONA_HELP = `anon-pi persona - provision dedicated persona accounts (mu
 
 USAGE
   anon-pi persona add [<name>] [--tor [<host:port>] | --proxy <socks5h-url>] [--nopasswd]
+  anon-pi persona rm  [<name>] [--yes]
 
   Provisions the persona account \`anon-<name>\` (a bare \`add\` with no name is the
   DEFAULT persona \`anon\`): its own mode-700 home + its own fail-closed egress.
@@ -3453,6 +3455,13 @@ USAGE
   Re-running \`persona add <name>\` for an already-provisioned persona is an
   idempotent no-op (a re-check). Persona IDENTITY (email/git/creds) is NOT set up
   here; configure it inside the persona's home.
+
+  \`persona rm [<name>]\` PRINTS the root TEARDOWN commands for a persona (remove
+  its sudoers rule, disable linger, \`userdel -r\` the account). anon-pi never runs
+  them: you paste them into a root shell. \`userdel -r\` DELETES the account's home
+  and ALL its anonymized transcripts, so on a TTY it asks you to type the account
+  name to confirm (or pass \`--yes\`); without a TTY it refuses unless \`--yes\`.
+  A bare \`rm\` targets the DEFAULT persona \`anon\`.
 `;
 
 /** Parsed persona-add egress flags (impure grammar layered over parsePersonaArgs). */
@@ -3633,6 +3642,8 @@ function runPersona(personaArgs: string[]): number {
 		return reportAnonPiError(e);
 	}
 
+	if (cmd.verb === 'rm') return runPersonaRm(cmd.name, cmd.yes);
+
 	// The name (when present) is the FIRST token after `add`; the flag tail is
 	// everything after it. parsePersonaAddFlags then rejects any stray positional
 	// (e.g. a second name) as an unknown option, so the grammar stays strict.
@@ -3765,6 +3776,86 @@ function runPersona(personaArgs: string[]): number {
 		}
 		// Enter / anything else: loop and RE-PROBE the account.
 	}
+}
+
+/**
+ * `anon-pi persona rm [<name>]`: PRINT the root TEARDOWN commands for a persona
+ * (the mirror of `add`). anon-pi NEVER runs them: the human pastes
+ * `rm sudoers` / `disable-linger` / `userdel -r` into a root shell. Because
+ * `userdel -r` DELETES the account's home (all its anonymized transcripts), this
+ * is gated: on a TTY it requires typing the account name to confirm (or `--yes`);
+ * without a TTY it refuses unless `--yes`. A no-op-friendly note when the account
+ * does not exist. Bare `rm` targets the DEFAULT persona `anon`.
+ */
+function runPersonaRm(name: string | undefined, yes: boolean): number {
+	let account: string;
+	try {
+		account = personaAccount(name); // maps + validates the bare name.
+	} catch (e) {
+		return reportAnonPiError(e);
+	}
+	const label = personaName(account) ?? ANON_ACCOUNT;
+
+	// If the account does not exist, there is nothing to tear down on the account
+	// side; still print the (harmless, idempotent) commands so a half-provisioned
+	// state (e.g. a leftover sudoers rule) can be cleaned, but say so plainly.
+	const accountExists = anonAccountHome(account) !== undefined;
+	if (!accountExists) {
+		process.stdout.write(
+			c.dim(
+				`anon-pi: no \`${account}\` account found (persona \`${label}\` is not provisioned).\n` +
+					`  Nothing to delete on the account side. If a leftover sudoers rule remains,\n` +
+					`  the commands below (step 1) clean it; steps 2-3 are no-ops.`,
+			) + '\n',
+		);
+	}
+
+	// CONFIRM the destructive teardown (userdel -r erases the home + transcripts).
+	if (accountExists && !yes) {
+		if (!process.stdin.isTTY) {
+			process.stderr.write(
+				`anon-pi: refusing to print a DESTRUCTIVE teardown for \`${account}\` without a TTY ` +
+					`to confirm. Re-run with \`--yes\` (this only PRINTS the root commands; you still ` +
+					`run them yourself).\n`,
+			);
+			return 1;
+		}
+		process.stdout.write(
+			c.warn(
+				c.bold(
+					`  About to tear down persona \`${label}\` (account \`${account}\`).`,
+				),
+			) +
+				'\n' +
+				c.warn(
+					`  The printed commands DELETE the account's mode-700 home and ALL its\n` +
+						`  anonymized session transcripts. This is IRREVERSIBLE.`,
+				) +
+				'\n',
+		);
+		const ans = promptLine(
+			`  Type the account name (${c.bold(account)}) to print the teardown commands, or Enter to abort: `,
+		);
+		if (ans === undefined || ans.trim() !== account) {
+			process.stderr.write('anon-pi: aborted; nothing printed.\n');
+			return 1;
+		}
+	}
+
+	process.stdout.write(
+		'\n' +
+			c.title('  Root commands to paste (become root FIRST):') +
+			'\n\n' +
+			buildPersonaTeardownScript(account) +
+			'\n',
+	);
+	process.stdout.write(
+		c.dim(
+			`  anon-pi printed these and will NOT run them. Review, become root (\`sudo -i\`\n` +
+				`  or \`su -\`), and paste them. Your login user's own config is untouched.`,
+		) + '\n',
+	);
+	return 0;
 }
 
 /**
