@@ -119,6 +119,7 @@ import {
 	personaName,
 	isAnonPersonaAccount,
 	projectsRootLeaksLogin,
+	resolveInitProjectsDefault,
 	composeTorPersonaProxy,
 	offerTor,
 	DEFAULT_TOR_SOCKS_HOST_PORT,
@@ -3007,7 +3008,23 @@ function initProjectsStep(
 		accountHome !== undefined
 			? join(accountHome, '.anon-pi', 'projects')
 			: builtinProjectsRoot(env);
-	const shown = currentProjects ?? builtin;
+	// A STORED projects root that LEAKS the login home under hardening must NOT be
+	// offered as the default (nor keepable via Enter): on a hardened re-run the
+	// old login-home path (e.g. from a previously non-hardened install) would
+	// otherwise be silently kept, re-introducing the very leak this step prevents.
+	// The PURE resolveInitProjectsDefault decides keepability + the shown default.
+	const currentResolved =
+		currentProjects !== undefined
+			? resolve(expandTilde(currentProjects, env.home))
+			: undefined;
+	const {keepCurrent, shown, droppedLeakingCurrent} =
+		resolveInitProjectsDefault({
+			currentResolved,
+			builtin,
+			loginHome: env.home,
+			hardened,
+		});
+	const keepable = keepCurrent;
 	if (currentProjects) {
 		process.stdout.write(`  current: ${currentProjects}\n`);
 	}
@@ -3019,16 +3036,31 @@ function initProjectsStep(
 	);
 	if (hardened) {
 		process.stdout.write(
-			`  HARDENED: keep this under the \`${ANON_ACCOUNT}\` account (the default), NOT\n` +
-				`  under your login home ${env.home} - a login-home path leaks your\n` +
-				'  username through the mount source and file ownership into the jail.\n',
+			`  HARDENED: the projects root must live under the \`${ANON_ACCOUNT}\` account, NOT\n` +
+				`  under your login home ${env.home} - a login-home path leaks your username\n` +
+				'  through the mount source and file ownership into the jail.\n',
 		);
+		if (droppedLeakingCurrent) {
+			process.stdout.write(
+				`  Your current projects root ${currentProjects} is under your login home, so it\n` +
+					`  is NOT kept for this hardened install; the default is now ${builtin}.\n`,
+			);
+		}
 	}
 	for (;;) {
 		const ans = promptLine(`  Projects root (Enter to keep ${shown}): `);
-		if (ans === undefined) return currentProjects;
+		if (ans === undefined) {
+			// Ctrl-C/EOF: keep the current value ONLY if it is keepable; a leaking
+			// current under hardening is dropped to the safe builtin (undefined).
+			return keepable ? currentProjects : undefined;
+		}
 		const trimmed = ans.trim();
-		if (trimmed === '') return currentProjects;
+		if (trimmed === '') {
+			// Enter accepts the SHOWN default. When the current leaks under hardening,
+			// SHOWN is the builtin (return undefined = the clean default), never the
+			// leaking current.
+			return keepable ? currentProjects : undefined;
+		}
 		// Expand a leading `~` (path.resolve does NOT — it would make a literal `~`
 		// dir), then absolutize. Store the built-in as "unset" (undefined) so
 		// config.json stays clean when the user just accepts the default path.

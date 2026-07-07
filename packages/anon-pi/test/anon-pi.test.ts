@@ -35,6 +35,7 @@ import {
 	resolveLlm,
 	resolveProjectsRoot,
 	projectsRootLeaksLogin,
+	resolveInitProjectsDefault,
 	resolveProxy,
 	type AnonPiConfig,
 	type AnonPiEnv,
@@ -246,6 +247,68 @@ describe('projectsRootLeaksLogin (hardened projects root must avoid the login ho
 				hardened: true,
 			}),
 		).toBe(false);
+	});
+});
+
+describe('resolveInitProjectsDefault (hardened re-run must not keep a leaking stored root)', () => {
+	const loginHome = '/home/wighawag';
+	const builtin = '/home/anon/.anon-pi/projects';
+
+	it('no stored value: default is the builtin, not keepable', () => {
+		expect(
+			resolveInitProjectsDefault({builtin, loginHome, hardened: true}),
+		).toEqual({
+			keepCurrent: false,
+			shown: builtin,
+			droppedLeakingCurrent: false,
+		});
+	});
+
+	it('HARDENED + stored value under login home: DROP it, default to builtin', () => {
+		// the reported bug: `current: /home/wighawag/anon` was shown as the default
+		// and Enter kept it; it must be dropped and the anon-tree builtin shown.
+		expect(
+			resolveInitProjectsDefault({
+				currentResolved: '/home/wighawag/anon',
+				builtin,
+				loginHome,
+				hardened: true,
+			}),
+		).toEqual({
+			keepCurrent: false,
+			shown: builtin,
+			droppedLeakingCurrent: true,
+		});
+	});
+
+	it('HARDENED + stored value already under the anon tree: KEEP it', () => {
+		expect(
+			resolveInitProjectsDefault({
+				currentResolved: '/home/anon/work',
+				builtin,
+				loginHome,
+				hardened: true,
+			}),
+		).toEqual({
+			keepCurrent: true,
+			shown: '/home/anon/work',
+			droppedLeakingCurrent: false,
+		});
+	});
+
+	it('NON-hardened: a login-home stored value is fine and KEPT (no leak concept)', () => {
+		expect(
+			resolveInitProjectsDefault({
+				currentResolved: '/home/wighawag/anon',
+				builtin: '/home/wighawag/.anon-pi/projects',
+				loginHome,
+				hardened: false,
+			}),
+		).toEqual({
+			keepCurrent: true,
+			shown: '/home/wighawag/anon',
+			droppedLeakingCurrent: false,
+		});
 	});
 });
 

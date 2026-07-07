@@ -741,6 +741,63 @@ export function projectsRootLeaksLogin(args: {
 }
 
 /**
+ * PURE: decide the projects-root prompt default for `init`, honouring hardening.
+ * `init` re-runs over an existing config, so a STORED `current` value is the
+ * usual default (Enter keeps it). But on a HARDENED (re)configure a stored value
+ * that LEAKS the login home (e.g. carried over from a previously non-hardened
+ * install) must NOT be keepable: pressing Enter would silently re-mount the
+ * login-home path, re-introducing the very leak the hardened projects step
+ * exists to prevent. So:
+ *   - `keepCurrent`: is the stored `current` an acceptable default to KEEP? True
+ *     only when a non-empty `current` exists AND it does not leak under the
+ *     chosen `hardened`. When false, the prompt must default to `builtin` and an
+ *     empty/keep answer must NOT return `current`.
+ *   - `shown`: the path to display as the Enter-default (`current` when keepable,
+ *     else `builtin`).
+ *   - `droppedLeakingCurrent`: true when a stored `current` was rejected BECAUSE
+ *     it leaks under hardening (so the CLI can explain why it changed the
+ *     default). Distinct from "no current at all".
+ * The `current` is resolved against `loginHome` (tilde-expanded, absolutized) by
+ * the caller before the leak test; `builtin` is the account-tree default the CLI
+ * computed. Nothing here spawns or touches the fs.
+ */
+export function resolveInitProjectsDefault(args: {
+	/** The RESOLVED (absolute) stored projects root, or undefined when unset. */
+	currentResolved?: string;
+	/** The account-tree (hardened) or built-in (non-hardened) default path. */
+	builtin: string;
+	/** The login user's $HOME. */
+	loginHome: string;
+	/** Whether this (re)configure is hardened. */
+	hardened: boolean;
+}): {keepCurrent: boolean; shown: string; droppedLeakingCurrent: boolean} {
+	if (args.currentResolved === undefined) {
+		return {
+			keepCurrent: false,
+			shown: args.builtin,
+			droppedLeakingCurrent: false,
+		};
+	}
+	const leaks = projectsRootLeaksLogin({
+		projectsRoot: args.currentResolved,
+		loginHome: args.loginHome,
+		hardened: args.hardened,
+	});
+	if (leaks) {
+		return {
+			keepCurrent: false,
+			shown: args.builtin,
+			droppedLeakingCurrent: true,
+		};
+	}
+	return {
+		keepCurrent: true,
+		shown: args.currentResolved,
+		droppedLeakingCurrent: false,
+	};
+}
+
+/**
  * PURE: resolve the proxy with env-over-config precedence, REQUIRED /
  * fail-closed. Throws AnonPiError with the verbatim PROXY_REQUIRED_MESSAGE when
  * neither env nor config supplies a non-empty proxy (never a guessed default:
