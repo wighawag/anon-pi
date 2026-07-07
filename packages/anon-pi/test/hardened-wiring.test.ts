@@ -158,6 +158,32 @@ describe('hardened self-re-exec: a login-user launch redirects via sudo -u anon 
 		expect(existsSync(sudoLog)).toBe(false);
 	});
 
+	it('does NOT redirect `init` (it provisions + crosses itself, login-side)', () => {
+		const home = tmp('anon-pi-home-');
+		writeHardenedConfig(home, true);
+		const sudoLog = join(tmp('anon-pi-log-'), 'sudo.log');
+		const bin = fakeBin(sudoLog);
+
+		// init needs a TTY (spawnSync has none), so it exits at the no-TTY guard -
+		// but only AFTER any redirect would have fired. The point: sudo was NEVER
+		// invoked (init must run as the login user; a redirect would make it run as
+		// `anon` and then fail `sudo -u anon` from within `anon`).
+		run(['init'], {home, bin});
+		expect(existsSync(sudoLog)).toBe(false);
+	});
+
+	it('does NOT redirect `persona rm` (it prints login-side, no launch crossing)', () => {
+		const home = tmp('anon-pi-home-');
+		writeHardenedConfig(home, true);
+		const sudoLog = join(tmp('anon-pi-log-'), 'sudo.log');
+		const bin = fakeBin(sudoLog);
+
+		// persona rm only PRINTS root commands (no account exists via this bin's
+		// getent), so it never crosses; the point is it is NOT redirected as a launch.
+		run(['persona', 'rm', 'alice'], {home, bin});
+		expect(existsSync(sudoLog)).toBe(false);
+	});
+
 	it('redirects a SUBCOMMAND invocation too (before it touches the workspace)', () => {
 		const home = tmp('anon-pi-home-');
 		writeHardenedConfig(home, true);

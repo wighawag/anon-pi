@@ -244,6 +244,20 @@ function main(argv: string[]): number {
 		return runReadConfig();
 	}
 
+	// PROVISIONING verbs run LOGIN-SIDE, before the redirect. `init` and `persona`
+	// SET UP / TEAR DOWN the hardened account and do their OWN crossings into it
+	// (`sudo -u <account> ...`), which needs the LOGIN user's sudo rights. If the
+	// redirect crossed them into `anon` first, they would run AS `anon` and then
+	// fail trying to `sudo -u anon` from within `anon` ("anon is not in the sudoers
+	// file"). So they are dispatched here, ahead of maybeRedirectToPersona. (`--help`
+	// still shows their own help; runInit/runPersona handle that.)
+	if (rawArgs[0] === 'init') {
+		return runInit(rawArgs.slice(1));
+	}
+	if (rawArgs[0] === 'persona') {
+		return runPersona(rawArgs.slice(1));
+	}
+
 	// MULTI-PERSONA SELF-RE-EXEC (prd `multi-persona-hardened-accounts`,
 	// superseding ADR-0006; generalizes docs/adr/0006 option A). On a hardened
 	// install EVERY login-user invocation redirects into the SELECTED persona
@@ -316,14 +330,8 @@ function main(argv: string[]): number {
 		return runContainer(args.slice(1));
 	}
 
-	// `persona …` provisions dedicated persona accounts (`anon-<name>`, default
-	// `anon`), each with its own mode-700 home + its own fail-closed egress (prd
-	// `multi-persona-hardened-accounts`, superseding ADR-0006). Dispatched BEFORE
-	// the launch grammar so a bare `persona` is never parsed as a project named
-	// "persona". v1 ships only `persona add <name>`.
-	if (args[0] === 'persona') {
-		return runPersona(args.slice(1));
-	}
+	// (`init` and `persona` are dispatched EARLIER, before the redirect, because
+	// they provision the account and cross into it themselves - see above.)
 
 	// The destructive cleanup verbs (replacing the old `--fresh`). Dispatched
 	// BEFORE the launch grammar: they are top-level data verbs, not launch flags,
@@ -335,12 +343,6 @@ function main(argv: string[]): number {
 	}
 	if (args[0] === '--delete-project') {
 		return runDeleteProject(args.slice(1));
-	}
-
-	// `init` onboards: verify the proxy, capture the llm endpoint, pick/build the
-	// default machine image, write config.json + the default machine. Re-runnable.
-	if (args[0] === 'init') {
-		return runInit(args.slice(1));
 	}
 
 	// Host-access verbs (netcage >= 0.10.0). `forward` opens a host->jail port; the
