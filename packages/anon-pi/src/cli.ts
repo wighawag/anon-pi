@@ -2627,12 +2627,14 @@ function initProxyStep(currentProxy: string | undefined): string | undefined {
 			process.stdout.write(output.trimEnd() + '\n');
 			// netcage verify runs SEVERAL assertions and exits non-zero if ANY fails.
 			// The load-bearing one for ANONYMITY is the exit-IP-differs assertion; the
-			// rest (e.g. `dns-resolves-over-tcp-glibc`) are in-jail FUNCTIONALITY. If
-			// the anonymity assertion PASSED but something else failed, the proxy is
-			// proven-anonymous, so we do NOT trap the user: we show the failure and
-			// offer a DELIBERATE proceed-anyway (defaulting to NO). If the anonymity
-			// assertion did NOT pass (absent or FAIL), this is a real egress failure
-			// (or netcage could not prove egress) and there is NO override: re-pick.
+			// rest are in-jail FUNCTIONALITY/ENVIRONMENT checks (e.g. a glibc DNS probe,
+			// which can itself FAIL for a non-DNS reason such as a slow probe-image pull
+			// over the proxy - see the netcage report). If the anonymity assertion
+			// PASSED but something else failed, the proxy is proven-anonymous, so we do
+			// NOT trap the user: we show the failure and offer a DELIBERATE proceed-
+			// anyway (defaulting to NO). If the anonymity assertion did NOT pass (absent
+			// or FAIL), this is a real egress failure (or netcage could not prove
+			// egress) and there is NO override: re-pick.
 			if (verify.error || !verifyEgressAssertionPassed(output)) {
 				process.stdout.write(
 					`  netcage verify FAILED for ${url} (exit ${verify.status ?? 'n/a'}), and\n` +
@@ -2643,10 +2645,10 @@ function initProxyStep(currentProxy: string | undefined): string | undefined {
 			}
 			process.stdout.write(
 				`  netcage verify reported a NON-egress failure for ${url} (exit ` +
-					`${verify.status ?? 'n/a'}). The forced-egress exit-IP proof PASSED (your\n` +
-					`  egress is anonymized), but another netcage check failed - most likely\n` +
-					'  an in-jail DNS/functionality issue, NOT an anonymity leak. See the\n' +
-					'  output above; a `netcage-dns` issue is netcage-side, not anon-pi.\n',
+					`${verify.status ?? 'n/a'}). The forced-egress exit-IP proof PASSED, so your\n` +
+					'  egress IS anonymized; another (functionality/environment) netcage check\n' +
+					'  failed. Read the SPECIFIC assertion in the output above: it may be a\n' +
+					'  netcage-side/probe issue (not an anon-pi bug and not an anonymity leak).\n',
 			);
 			const proceed = promptLine(
 				`  Use ${url} anyway (egress is proven anonymous)? [y/N] `,

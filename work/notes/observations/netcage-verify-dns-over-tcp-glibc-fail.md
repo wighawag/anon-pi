@@ -34,4 +34,21 @@ Is the DNS-over-TCP failure REAL or a probe artifact? The user has been making w
 - Is the forwarder actually UDP-only, or is TCP being dropped somewhere (nftables/netns)?
 - Does this actually break glibc images (Debian/`node:*-slim`, e.g. the webveil image) in practice, or only the probe? A quick in-jail check: `getent hosts one.one.one.one` and `curl https://example.com` from a glibc jail.
 
-If real, the fix belongs in netcage (its DNS forwarder must answer over TCP, or it must not set `use-vc`). anon-pi must NOT work around it (never weaken forced egress / DNS). Related idea already on file: `work/notes/ideas/consume-netcage-verify-json.md` (consume `verify --json` so anon-pi reasons over assertions structurally instead of scraping `[PASS]`/`[FAIL]` prose — would make the split above robust to wording changes).
+If real, the fix belongs in netcage (its DNS forwarder must answer over TCP, or it must not set `use-vc`). anon-pi must NOT work around it (never weaken forced egress / DNS). Related idea already on file: `work/notes/ideas/consume-netcage-verify-json.md` (consume `verify --json` so anon-pi reasons over assertions structurally instead of scraping `[PASS]`/`[FAIL]` prose - would make the split above robust to wording changes).
+
+## RESOLVED (2026-07-07): DNS was NEVER broken - a false negative from an image pull
+
+Investigated in the netcage repo. Definitive diagnosis (with source evidence + a reproduced PASS, zero DNS code changed):
+
+- The in-jail DNS forwarder DOES listen on TCP (`dnsforwarder.Start` binds UDP + TCP; `serveTCP`/`handleTCPConn` present in the installed v0.11.0 `netcage-dns`).
+- The firewall PERMITS loopback TCP :53 (no DROP for it, OUTPUT policy stays ACCEPT); `nc -z 127.0.0.1 53` is open in a real jail.
+- `use-vc` is intentional + correct (egress UDP is hard-dropped, so glibc must use TCP).
+- glibc `getaddrinfo` over TCP WORKS in practice (Debian/`node:*-slim` resolve fine).
+
+Root cause: the `dns-resolves-over-tcp-glibc` assertion stands up a real jail using a ~950 MB `buildpack-deps` glibc probe image. On the uid-scoped store that image was absent, so it was PULLED THROUGH THE SOCKS/Tor PROXY, blowing the 3-minute verify budget. The probe then saw EMPTY output and mis-collapsed "probe produced no output" into the specific claim "the forwarder is not answering over TCP." So it was over-strict (option d), NOT a real DNS/forwarder/firewall bug. The user's web usage worked all along because their tool image was already local (no in-jail pull).
+
+netcage-side fix (implemented in the netcage repo, both parts of d): pre-pull / shrink the DNS-probe image so it is not fetched through the proxy, and split the failure message so "image pull/timeout" is reported honestly instead of a scary "TCP DNS broken."
+
+anon-pi-side (0.24.0 `verifyEgressAssertionPassed` + proceed-anyway): KEPT - the design is still correct (anonymity proof is load-bearing; a genuine non-egress assertion should not trap the user). Only the WORDING was made neutral (0.25.x): it no longer presumes the non-egress failure is DNS, and points the user at the SPECIFIC assertion, since netcage now distinguishes a probe/pull failure from a real functionality failure.
+
+Net: nothing broken on your box; the proxy anonymizes and DNS resolves. With updated netcage the assertion will PASS (or fail honestly on a slow pull). anon-pi will not trap you either way.
