@@ -25,7 +25,7 @@ import {
 import {readSync} from 'node:fs';
 import {userInfo} from 'node:os';
 import {fileURLToPath} from 'node:url';
-import {spawnSync, execFileSync} from 'node:child_process';
+import {spawnSync, spawn, execFileSync} from 'node:child_process';
 import {join, dirname, resolve} from 'node:path';
 import {
 	AnonPiError,
@@ -185,7 +185,7 @@ import {
 // registry; anon-pi adds no file).
 const ANON_PI_KEY_LABEL = 'anon-pi.key';
 
-function main(argv: string[]): number {
+function main(argv: string[]): number | Promise<number> {
 	let rawArgs = argv.slice(2);
 
 	// HARDENED version-match: the login-side parent forwards its version as
@@ -912,7 +912,7 @@ function probeNetcageVersion(): string | undefined {
 }
 
 // --- the launch path --------------------------------------------------------
-function runLaunch(parsed: ParsedLaunch): number {
+function runLaunch(parsed: ParsedLaunch): number | Promise<number> {
 	const env = envFromProcess(process.env);
 
 	// config.json (the workspace default proxy/llm/defaultMachine/projects).
@@ -1078,7 +1078,7 @@ function executeLaunchPlan(
 	intent: LaunchIntent,
 	plan: Extract<ReturnType<typeof resolveRunPlan>, {kind: 'launch'}>,
 	opts: {watch?: boolean} = {},
-): number {
+): number | Promise<number> {
 	// Create the host dirs the mounts need BEFORE spawn: the machine home and,
 	// for a named project (not the root token `.` / a bare shell), its folder
 	// under the active root (the --mount parent or the projects root).
@@ -1191,7 +1191,9 @@ function runMenu(intent: LaunchIntent, machine: Machine): number {
 		process.stderr.write('anon-pi: internal error resolving the menu pick.\n');
 		return 1;
 	}
-	return executeLaunchPlan(launchIntent, plan);
+	// The menu path never sets `watch`, so this ALWAYS returns a number (watch is
+	// the only branch that returns a Promise). Assert it so runMenu stays sync.
+	return executeLaunchPlan(launchIntent, plan) as number;
 }
 
 /**
@@ -1830,7 +1832,9 @@ function containerCreate(
 		);
 	}
 
-	return executeLaunchPlan(intent, plan);
+	// A durable `container create` never sets `watch`, so this ALWAYS returns a
+	// number; assert it so containerCreate stays sync.
+	return executeLaunchPlan(intent, plan) as number;
 }
 
 /**
@@ -5132,11 +5136,18 @@ function spawnNetcage(
  * run stays pipeable, mirroring pi's own `--mode text`). stdin + stderr stay
  * inherited; the exit code propagates. Colour follows the stderr TTY / NO_COLOR
  * rule. This is the ONLY spawn path that does not inherit stdout.
+ *
+ * LIVE: this is ASYNC (returns a Promise) because it must render each turn AS IT
+ * ARRIVES. `spawnSync` cannot do that (it buffers ALL of stdout and hands it back
+ * only on child exit, so every step would render at the very end); the async
+ * `spawn` + incremental `stdout.on('data')` runs the event loop so partial
+ * chunks surface immediately. The top-level `main` result is awaited before
+ * `process.exit`.
  */
 function spawnNetcageWatch(
 	netcageArgs: string[],
 	opts: {enteringJail?: boolean} = {},
-): number {
+): Promise<number> {
 	if (opts.enteringJail) {
 		process.stderr.write(
 			'anon-pi: entering the netcage jail (setting up forced-egress)\u2026\n',
@@ -5153,6 +5164,8 @@ function spawnNetcageWatch(
 		for (const rendered of lines) process.stderr.write(`${rendered}\n`);
 		if (turnAnswer !== undefined) answer = turnAnswer;
 	};
+	// Split the streamed stdout on newlines AS IT ARRIVES: surface each complete
+	// line the instant it lands, keep the trailing partial for the next chunk.
 	const flush = (chunk: string): void => {
 		pending += chunk;
 		let nl = pending.indexOf('\n');
@@ -5163,28 +5176,30 @@ function spawnNetcageWatch(
 		}
 	};
 
-	const res = spawnSync('netcage', netcageArgs, {
-		// stdin + stderr inherited; stdout PIPED so we parse pi's JSONL stream.
-		stdio: ['inherit', 'pipe', 'inherit'],
-		encoding: 'utf8',
-		maxBuffer: 256 * 1024 * 1024,
+	return new Promise<number>((resolvePromise) => {
+		const child = spawn('netcage', netcageArgs, {
+			// stdin + stderr inherited; stdout PIPED so we parse pi's JSONL stream
+			// incrementally (live), rather than buffering it all until exit.
+			stdio: ['inherit', 'pipe', 'inherit'],
+		});
+
+		child.stdout?.setEncoding('utf8');
+		child.stdout?.on('data', (chunk: string) => flush(chunk));
+
+		child.on('error', (err) => {
+			process.stderr.write(`anon-pi: failed to run netcage: ${err.message}\n`);
+			resolvePromise(1);
+		});
+
+		child.on('close', (code) => {
+			// Drain any trailing partial line (a final record without a newline).
+			if (pending.trim() !== '') surface(pending);
+			// The final answer to STDOUT, so `anon-pi <p> -p --mode text-stream "..."
+			// | ...` still pipes pi's answer just like `--mode text` does.
+			if (answer !== undefined) process.stdout.write(`${answer}\n`);
+			resolvePromise(code ?? 1);
+		});
 	});
-	if (res.error) {
-		process.stderr.write(
-			`anon-pi: failed to run netcage: ${res.error.message}\n`,
-		);
-		return 1;
-	}
-
-	// Feed the captured stream through the line splitter, then drain any trailing
-	// partial line (a final record without a newline).
-	if (typeof res.stdout === 'string') flush(res.stdout);
-	if (pending.trim() !== '') surface(pending);
-
-	// The final answer to STDOUT, so `anon-pi <p> -p --mode text-stream "..." | ...`
-	// still pipes pi's answer just like `--mode text` does.
-	if (answer !== undefined) process.stdout.write(`${answer}\n`);
-	return res.status ?? 1;
 }
 
 function hasNetcage(): boolean {
@@ -5211,4 +5226,13 @@ function reportAnonPiError(e: unknown): number {
 	throw e;
 }
 
-process.exit(main(process.argv));
+// `main` is synchronous EXCEPT the `-p --mode text-stream` WATCH path, which
+// returns a Promise (it streams pi's JSONL live via async spawn). Resolve either
+// shape before exiting so the exit code is the real one.
+Promise.resolve(main(process.argv)).then(
+	(code) => process.exit(code),
+	(err) => {
+		process.stderr.write(`anon-pi: ${(err as Error)?.message ?? err}\n`);
+		process.exit(1);
+	},
+);
