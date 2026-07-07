@@ -611,6 +611,7 @@ function applyWorkspaceAsAccount(
 	account: string,
 	payload: InitApplyPayload,
 ): number {
+	noteCrossing(account, 'write its mode-700 workspace');
 	const argv = buildAnonSudoArgv({
 		anonPiPath: anonPiBinaryPath(),
 		forwardedArgs: [INIT_APPLY_SUBCOMMAND],
@@ -687,8 +688,23 @@ function runInitApply(): number {
 // -i anon-pi __image-... ` (the same rule/mechanism as the launch redirect); the
 // build streams (inherited stdio) so the user sees `netcage build`'s output.
 
+/**
+ * Print a consistent heads-up before an interactive `sudo -u <account> -i anon-pi`
+ * crossing, so the `[sudo] password` prompt never appears out of nowhere. On a
+ * hardened install anon-pi runs the given step AS the account; `what` names the
+ * step. sudo caches the credential (~15 min), so it MAY not actually prompt.
+ */
+function noteCrossing(account: string, what: string): void {
+	process.stdout.write(
+		c.dim(
+			`  Crossing into \`${account}\` to ${what} (sudo may ask for YOUR password)...`,
+		) + '\n',
+	);
+}
+
 /** True iff `tag` exists in the ACCOUNT's netcage store (crosses via sudo). */
 function netcageImageExistsAsAccount(account: string, tag: string): boolean {
+	noteCrossing(account, 'check its netcage store for the image');
 	const argv = buildAnonSudoArgv({
 		anonPiPath: anonPiBinaryPath(),
 		forwardedArgs: [IMAGE_EXISTS_SUBCOMMAND, tag],
@@ -706,6 +722,7 @@ function buildImageAsAccount(
 	account: string,
 	choice: ShippedImageChoice,
 ): boolean {
+	noteCrossing(account, 'build the image in its netcage store');
 	const argv = buildAnonSudoArgv({
 		anonPiPath: anonPiBinaryPath(),
 		forwardedArgs: [IMAGE_BUILD_SUBCOMMAND, choice],
