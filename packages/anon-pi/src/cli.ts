@@ -3386,8 +3386,8 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 		if (binaryFailure !== undefined) {
 			process.stdout.write(
 				'\n' +
-					c.warn(c.bold('  anon-pi must be installed system-wide first')) +
-					'\n',
+					c.warn(c.bold('  Hardening needs anon-pi installed system-wide')) +
+					'\n\n',
 			);
 			process.stdout.write(`  ${binaryFailure.remediation}\n`);
 			// The account-provisioning failures (if any) are shown too, but as a

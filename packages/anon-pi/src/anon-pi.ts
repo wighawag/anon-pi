@@ -5224,12 +5224,16 @@ export function netcageVersionRemediation(found: string | undefined): string {
 }
 
 /**
- * PURE: the EXACT remediation for the anon-pi-binary check. Names WHERE anon-pi
- * resolved and WHY that path cannot run as the account (per
- * crossAccountBinaryUnsuitable's reason), then insists on a SYSTEM-WIDE install
- * plus REMOVING the per-user (Volta/nvm) one to avoid running two versions. No
- * install commands are printed (deliberately: a system Node + global install has
- * too many distro-specific, staleness-prone forms to bake in honestly).
+ * PURE: the EXACT remediation for the anon-pi-binary check. It is framed around
+ * the fact that the user CHOSE hardening (that is what imposes the requirement),
+ * names WHERE anon-pi resolved + WHY that path cannot run as the account, then
+ * gives the concrete fix: install Node SYSTEM-WIDE and `npm install -g anon-pi`
+ * (which then lands on a shared PATH the account can run). It reassures that a
+ * per-user Node manager (Volta/nvm/asdf) TAKES PRECEDENCE on the login shell, so
+ * a system Node does not disturb the user's normal workflow; it only asks them to
+ * remove the per-user anon-pi so the login + account installs never diverge in
+ * version. A multi-line message (blank-line-separated) so the guidance is
+ * readable in the terminal.
  */
 export function anonPiBinaryRemediation(
 	resolvedPath: string | undefined,
@@ -5244,17 +5248,23 @@ export function anonPiBinaryRemediation(
 		reason === 'no-binary'
 			? `anon-pi could not resolve its own binary path`
 			: reason === 'under-login-home'
-				? `anon-pi ${where} is under your login home, which the \`${account}\` account cannot traverse or execute`
+				? `anon-pi ${where} is under your login home, which the \`${account}\` account cannot reach or execute`
 				: reason === 'version-manager-shim'
 					? `anon-pi ${where} is a per-user Node manager (Volta/nvm/asdf) install, which the \`${account}\` account cannot execute from its own login shell`
 					: `anon-pi ${where} is a \`.js\` entry, not a directly executable binary`;
 	return (
-		`anon-pi: ${why}. The hardened deployment runs anon-pi AS the \`${account}\` ` +
+		`Because you chose the HARDENED deployment, anon-pi runs AS the \`${account}\` ` +
 		`account (\`sudo -u ${account} -i anon-pi ...\`), so anon-pi must be installed ` +
-		`SYSTEM-WIDE on a shared PATH (e.g. /usr/local/bin or /usr/bin) that the ` +
-		`\`${account}\` account can run. Install anon-pi system-wide, and REMOVE the ` +
-		`per-user install (e.g. the Volta/nvm one) so you never run two different ` +
-		`versions. Then re-run.`
+		`system-wide where that account can run it. Right now ${why}.\n\n` +
+		`To fix it:\n` +
+		`  1. Install Node.js SYSTEM-WIDE (via your distro / NodeSource / an official\n` +
+		`     installer). A per-user manager like Volta/nvm keeps precedence on YOUR\n` +
+		`     login shell, so a system Node will not change your normal workflow.\n` +
+		`  2. With that system Node, run:  sudo npm install -g anon-pi\n` +
+		`     (it lands on a shared PATH such as /usr/local/bin, which \`${account}\` can run).\n` +
+		`  3. Remove the per-user anon-pi (e.g. \`volta uninstall anon-pi\`) so your login\n` +
+		`     user and the \`${account}\` account never run two different versions.\n\n` +
+		`Then re-run \`anon-pi init\`. (Or decline hardening to keep your current setup.)`
 	);
 }
 

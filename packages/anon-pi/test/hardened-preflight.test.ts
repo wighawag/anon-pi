@@ -122,8 +122,13 @@ describe('evaluateHardenedPreflight: the anon-pi-binary cross-account check', ()
 		expect(f?.remediation).toBe(
 			anonPiBinaryRemediation(path, 'under-login-home', ANON_ACCOUNT),
 		);
-		expect(f?.remediation).toContain('SYSTEM-WIDE');
-		expect(f?.remediation).toContain('REMOVE the per-user');
+		// frames it around the hardened CHOICE, gives the concrete install command,
+		// and reassures that Volta/nvm keeps precedence on the login shell.
+		expect(f?.remediation).toContain('HARDENED');
+		expect(f?.remediation).toContain('sudo npm install -g anon-pi');
+		expect(f?.remediation).toContain('system-wide');
+		expect(f?.remediation).toMatch(/Volta\/nvm keeps precedence/);
+		expect(f?.remediation).toMatch(/volta uninstall anon-pi/);
 	});
 
 	it('FAILS for a shim OUTSIDE the home (version-manager-dir reason)', () => {
