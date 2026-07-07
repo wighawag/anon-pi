@@ -27,6 +27,7 @@ import {
 	INIT_APPLY_SUBCOMMAND,
 	IMAGE_EXISTS_SUBCOMMAND,
 	IMAGE_BUILD_SUBCOMMAND,
+	READ_CONFIG_SUBCOMMAND,
 	type InitApplyPayload,
 } from '../src/index.js';
 
@@ -170,5 +171,38 @@ describe('__image-exists / __image-build: dispatched, not treated as a project',
 		expect(r.status).toBe(2);
 		expect(r.stderr).toMatch(/takes `basic` or `webveil`/);
 		expect(r.stderr).not.toContain('TRIPWIRE');
+	});
+});
+
+describe('__read-config: prints THIS account config for the login-side init defaults', () => {
+	it('prints the config.json from its own ANON_PI_HOME as JSON', () => {
+		const anonHome = join(tmp('anon-acct-'), '.anon-pi');
+		// seed a config the way the account would have.
+		apply(anonHome, {
+			config: {
+				proxy: 'socks5h://127.0.0.1:9050',
+				projects: '/home/anon/work',
+				hardened: true,
+			},
+		});
+		const r = spawnSync(process.execPath, [cli, READ_CONFIG_SUBCOMMAND], {
+			encoding: 'utf8',
+			env: {...process.env, ANON_PI_HOME: anonHome},
+		});
+		expect(r.status).toBe(0);
+		const cfg = JSON.parse(r.stdout);
+		expect(cfg.proxy).toBe('socks5h://127.0.0.1:9050');
+		expect(cfg.projects).toBe('/home/anon/work');
+		expect(cfg.hardened).toBe(true);
+	});
+
+	it('prints {} when there is no config yet', () => {
+		const anonHome = join(tmp('anon-acct-'), '.anon-pi');
+		const r = spawnSync(process.execPath, [cli, READ_CONFIG_SUBCOMMAND], {
+			encoding: 'utf8',
+			env: {...process.env, ANON_PI_HOME: anonHome},
+		});
+		expect(r.status).toBe(0);
+		expect(JSON.parse(r.stdout)).toEqual({});
 	});
 });

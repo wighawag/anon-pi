@@ -112,6 +112,7 @@ import {
 	INIT_APPLY_SUBCOMMAND,
 	IMAGE_EXISTS_SUBCOMMAND,
 	IMAGE_BUILD_SUBCOMMAND,
+	READ_CONFIG_SUBCOMMAND,
 	shippedImageTag,
 	type ShippedImageChoice,
 	HARDENED_HOME_MODE,
@@ -238,6 +239,9 @@ function main(argv: string[]): number {
 	}
 	if (rawArgs[0] === IMAGE_BUILD_SUBCOMMAND) {
 		return runImageBuild(rawArgs[1]);
+	}
+	if (rawArgs[0] === READ_CONFIG_SUBCOMMAND) {
+		return runReadConfig();
 	}
 
 	// MULTI-PERSONA SELF-RE-EXEC (prd `multi-persona-hardened-accounts`,
@@ -780,6 +784,48 @@ function runImageBuild(choice: string | undefined): number {
 		return 1;
 	}
 	return buildImage(dockerfile, shippedImageTag(choice)) ? 0 : 1;
+}
+
+/**
+ * The as-account `__read-config` handler: print THIS account's own config.json
+ * (from its `~/.anon-pi`) as JSON on stdout, so the login-side init can pre-fill
+ * its prompts from what the ACCOUNT previously chose. Prints `{}` when there is
+ * no config yet. We are the account (via the crossing), so `resolveAnonPiHome`
+ * points at the account's home.
+ */
+function runReadConfig(): number {
+	const cfg = readJsonConfig(envFromProcess(process.env));
+	process.stdout.write(JSON.stringify(cfg));
+	return 0;
+}
+
+/**
+ * Read the ACCOUNT's config by crossing to it (`sudo -u <account> -i anon-pi
+ * __read-config`) and parsing the JSON it prints. Used on a hardened RE-init so
+ * the prompt defaults reflect the account's existing config, not the login
+ * user's (vestigial) one. Returns {} on any failure (no config, a stale system
+ * anon-pi without the subcommand, a sudo decline): init then falls back to fresh
+ * defaults rather than crashing. stderr/stdin inherit so a sudo password prompt
+ * reaches the TTY; stdout is captured (the JSON).
+ */
+function readAccountConfig(account: string): AnonPiConfig {
+	noteCrossing(account, 'read its existing config for the defaults');
+	const argv = buildAnonSudoArgv({
+		anonPiPath: anonPiBinaryPath(),
+		forwardedArgs: [READ_CONFIG_SUBCOMMAND],
+		account,
+	});
+	const [cmd, ...rest] = argv;
+	const res = spawnSync(cmd, rest, {
+		encoding: 'utf8',
+		stdio: ['inherit', 'pipe', 'inherit'],
+	});
+	if (res.error || res.status !== 0 || !res.stdout) return {};
+	try {
+		return parseConfigJson(JSON.parse(res.stdout.trim()));
+	} catch {
+		return {};
+	}
 }
 
 /**
@@ -2507,7 +2553,11 @@ function runInit(args: string[]): number {
 
 	const env = envFromProcess(process.env);
 	// Pre-fill from the CURRENT config (re-runnable: init doubles as reconfigure).
-	const current = readJsonConfig(env);
+	// On a hardened install this is REPLACED below with the ACCOUNT's own config
+	// (read via a crossing) once hardening is confirmed, so the prompt defaults
+	// reflect what the account previously chose, not the login user's vestigial
+	// config. `let` so the hardened path can reassign it.
+	let current = readJsonConfig(env);
 
 	process.stdout.write(
 		'anon-pi init: honest, evidence-based onboarding. Nothing is destroyed; your\n' +
@@ -2524,6 +2574,19 @@ function runInit(args: string[]): number {
 	const hardenResult = initHardeningStep(env);
 	if (hardenResult === ABORT) return 1;
 	const hardened = hardenResult === true ? true : current.hardened;
+
+	// On a hardened install, re-fetch `current` from the ACCOUNT's own config (via
+	// a crossing), so every following prompt (proxy/model/image/projects) defaults
+	// to what the ACCOUNT previously chose - not the login user's config, which is
+	// a vestigial `{ hardened: true }` marker (or a stale non-hardened config). This
+	// is what makes a hardened RE-init pre-fill correctly. Only when we are NOT
+	// already the account (a login-user init; the account-side __init-apply child is
+	// non-interactive and never reaches here).
+	if (hardened === true && currentUsername() !== ANON_ACCOUNT) {
+		const accountConfig = readAccountConfig(ANON_ACCOUNT);
+		// Keep the marker's `hardened` true; take the rest from the account.
+		current = {...accountConfig, hardened: true};
+	}
 
 	// 2) PROXY: probe + handshake + findings + netcage verify + confirm.
 	const proxyHostPort = initProxyStep(current.proxy);
@@ -2555,11 +2618,29 @@ function runInit(args: string[]): number {
 	// the generated models/settings), then WRITE it. The proxy is always present
 	// (we only reach here on a chosen proxy); `hardened` is written only when the
 	// hardening step above completed.
+	// The projects value to STORE: the step's choice, else the current default.
+	// FINAL GUARD: on a hardened install a login-home path must NEVER be written
+	// (it leaks the username + breaks the launch, `mkdir /home/<you>/...`). If the
+	// resolved value would leak, drop it to undefined (the safe anon-tree default).
+	// This defends the `?? current.projects` fallback even if a stale current
+	// carried a login-home path.
+	let projectsToStore = projects ?? current.projects;
+	if (
+		hardened === true &&
+		projectsToStore !== undefined &&
+		projectsRootLeaksLogin({
+			projectsRoot: resolve(expandTilde(projectsToStore, env.home)),
+			loginHome: env.home,
+			hardened: true,
+		})
+	) {
+		projectsToStore = undefined;
+	}
 	const nextConfig: AnonPiConfig = {
 		proxy: proxyUrl,
 		llm: llm ?? current.llm,
 		defaultMachine: current.defaultMachine ?? DEFAULT_MACHINE,
-		projects: projects ?? current.projects,
+		projects: projectsToStore,
 		hardened: hardened === true ? true : undefined,
 	};
 

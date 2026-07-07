@@ -4271,6 +4271,16 @@ export const INIT_APPLY_SUBCOMMAND = '__init-apply';
 export const IMAGE_EXISTS_SUBCOMMAND = '__image-exists';
 export const IMAGE_BUILD_SUBCOMMAND = '__image-build';
 
+/**
+ * Internal subcommand: `__read-config` prints the ACCOUNT's own config.json (from
+ * its mode-700 home) as JSON on stdout. On a hardened RE-init the login user
+ * cannot read the account's config to pre-fill the prompts, so init crosses via
+ * `sudo -u <account> -i anon-pi __read-config` and parses what the account prints
+ * - so the defaults reflect what the ACCOUNT previously chose, not the login
+ * user's (vestigial) config. INTERNAL (double-underscore, not in help).
+ */
+export const READ_CONFIG_SUBCOMMAND = '__read-config';
+
 /** The shipped-image choices the hardened `__image-build` child understands. */
 export type ShippedImageChoice = 'basic' | 'webveil';
 
