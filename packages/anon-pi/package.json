@@ -1,6 +1,6 @@
 {
 	"name": "anon-pi",
-	"version": "0.29.5",
+	"version": "0.29.6",
 	"description": "Launch pi inside a netcage: anonymized web egress through a socks5h proxy, one direct hole for a local model, seeded pi config on the host.",
 	"license": "AGPL-3.0-only",
 	"keywords": [
