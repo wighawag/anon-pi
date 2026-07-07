@@ -11,7 +11,7 @@ import {
 // The PURE Tier-2 root-provisioning COMMAND generator (prd
 // `multi-persona-hardened-accounts` decisions 0 + 8, superseding ADR-0006).
 // anon-pi is a rootless npm launcher: it must NEVER silently sudo. So for the
-// root-requiring parts of provisioning a persona (create the `anon-<name>`
+// root-requiring parts of provisioning a persona (create the `anonpi-<name>`
 // account, enable-linger, the scoped sudoers snippet) it EMITS a block of
 // COPY-PASTE COMMANDS the human pastes into a root shell they enter FIRST
 // (`sudo -i`/`su -`) — there is NO `#!/bin/sh` script FILE written to disk (v1's
@@ -52,17 +52,17 @@ describe('Tier-2 provisioning: the required root commands', () => {
 		const script = buildTier2ProvisioningScript(baseInputs);
 		expect(script).toMatch(/useradd\b/);
 		expect(script).toMatch(/useradd[^\n]*-m\b/);
-		expect(script).toMatch(/useradd[^\n]*\banon\b/);
+		expect(script).toMatch(/useradd[^\n]*\banonpi\b/);
 	});
 
-	it('emits `loginctl enable-linger anon`', () => {
+	it('emits `loginctl enable-linger anonpi`', () => {
 		const script = buildTier2ProvisioningScript(baseInputs);
-		expect(script).toContain('loginctl enable-linger anon');
+		expect(script).toContain('loginctl enable-linger anonpi');
 	});
 
-	it('emits the scoped sudoers snippet `<login-user> ALL=(anon) <anon-pi-binary>`', () => {
+	it('emits the scoped sudoers snippet `<login-user> ALL=(anonpi) <anon-pi-binary>`', () => {
 		const script = buildTier2ProvisioningScript(baseInputs);
-		expect(script).toContain('operator ALL=(anon) /usr/local/bin/anon-pi');
+		expect(script).toContain('operator ALL=(anonpi) /usr/local/bin/anon-pi');
 	});
 
 	it('validates the sudoers rule with `visudo -cf` before installing mode-0440', () => {
@@ -81,8 +81,8 @@ describe('Tier-2 provisioning: NO explicit subuid/subgid range line', () => {
 		expect(script).not.toMatch(/>>?\s*\/etc\/subuid/);
 		expect(script).not.toMatch(/>>?\s*\/etc\/subgid/);
 		expect(script).not.toMatch(/grep[^\n]*\/etc\/sub[ug]id/);
-		// no `anon:<start>:<count>` range triple anywhere.
-		expect(script).not.toMatch(/anon:\d+:\d+/);
+		// no `anonpi:<start>:<count>` range triple anywhere.
+		expect(script).not.toMatch(/anonpi:\d+:\d+/);
 	});
 });
 
@@ -98,7 +98,7 @@ describe('Tier-2 provisioning: the password is KEPT by default', () => {
 			nopasswd: true,
 		});
 		expect(optedIn).toContain(
-			'operator ALL=(anon) NOPASSWD: /usr/local/bin/anon-pi',
+			'operator ALL=(anonpi) NOPASSWD: /usr/local/bin/anon-pi',
 		);
 		// and the default (no flag / false) keeps the password.
 		expect(
@@ -129,27 +129,27 @@ describe('Tier-2 provisioning: PURE + injected, both default and persona account
 			anonPiPath: '/opt/tools/anon-pi',
 			loginHome: '/home/alice',
 		});
-		expect(script).toContain('alice ALL=(anon) /opt/tools/anon-pi');
+		expect(script).toContain('alice ALL=(anonpi) /opt/tools/anon-pi');
 		expect(script).toContain('/opt/tools/anon-pi');
 	});
 
-	it('works for a persona account `anon-<name>` (account injected)', () => {
+	it('works for a persona account `anonpi-<name>` (account injected)', () => {
 		const account = personaAccount('alice');
-		expect(account).toBe('anon-alice');
+		expect(account).toBe('anonpi-alice');
 		const script = buildTier2ProvisioningScript({
 			account,
 			loginUser: 'operator',
 			anonPiPath: '/usr/local/bin/anon-pi',
 			loginHome: '/home/operator',
 		});
-		expect(script).toContain('useradd -m anon-alice');
-		expect(script).toContain('loginctl enable-linger anon-alice');
+		expect(script).toContain('useradd -m anonpi-alice');
+		expect(script).toContain('loginctl enable-linger anonpi-alice');
 		expect(script).toContain(
-			'operator ALL=(anon-alice) /usr/local/bin/anon-pi',
+			'operator ALL=(anonpi-alice) /usr/local/bin/anon-pi',
 		);
 		// the sudoers file is scoped per persona account, so provisioning a
 		// second persona does not clobber the first's rule file.
-		expect(script).toContain('/etc/sudoers.d/anon-pi-anon-alice');
+		expect(script).toContain('/etc/sudoers.d/anon-pi-anonpi-alice');
 	});
 
 	it('is deterministic (same inputs -> byte-identical block)', () => {
@@ -193,7 +193,7 @@ describe('Tier-2 provisioning: filtered to ONLY the missing steps (needs)', () =
 		expect(script).not.toContain('loginctl enable-linger');
 		expect(script).toContain(NETCAGE_SYSTEM_INSTALL_CMD);
 		// the sudoers step is ALWAYS emitted (idempotent, no preflight probe).
-		expect(script).toContain('operator ALL=(anon) /usr/local/bin/anon-pi');
+		expect(script).toContain('operator ALL=(anonpi) /usr/local/bin/anon-pi');
 		// steps are renumbered with no gaps: 0 (become root), 1 (netcage), 2 (sudoers).
 		expect(script).toMatch(/# 1\. /);
 		expect(script).toMatch(/# 2\. /);
@@ -202,8 +202,8 @@ describe('Tier-2 provisioning: filtered to ONLY the missing steps (needs)', () =
 
 	it('absent `needs` emits ALL steps (a fully-missing account, backward compatible)', () => {
 		const script = buildTier2ProvisioningScript(baseInputs);
-		expect(script).toContain('useradd -m anon');
-		expect(script).toContain('loginctl enable-linger anon');
+		expect(script).toContain('useradd -m anonpi');
+		expect(script).toContain('loginctl enable-linger anonpi');
 		expect(script).toContain(NETCAGE_SYSTEM_INSTALL_CMD);
 	});
 });
@@ -225,7 +225,7 @@ describe('Tier-2 provisioning: REFUSES a sudoers rule for a non-system anon-pi p
 		});
 		// no scoped sudoers rule pointing at the caller-writable/home path.
 		expect(script).not.toContain(
-			'operator ALL=(anon) /home/operator/.volta/bin/volta-shim',
+			'operator ALL=(anonpi) /home/operator/.volta/bin/volta-shim',
 		);
 		expect(script).not.toMatch(/visudo -cf/);
 		// instead, a SKIPPED note explaining why.

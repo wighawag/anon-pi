@@ -1,7 +1,7 @@
 // End-to-end IMPURE wiring for the hardened deployment (docs/adr/0006, prd
 // `hardened-dedicated-account-deployment` stories 3+4): the self-re-exec hook on
 // the launch entry. On a hardened install a login-user invocation must re-exec
-// via `sudo -u anon -i <anon-pi> "$@"`; a caller already running as `anon` must
+// via `sudo -u anonpi -i <anon-pi> "$@"`; a caller already running as `anonpi` must
 // NOT (the loop guard, else an infinite re-exec).
 //
 // ISOLATION (the task's hard constraint): every OS-touching bit is stubbed. We
@@ -104,17 +104,17 @@ function run(
 			...process.env,
 			PATH: `${opts.bin}:${process.env.PATH ?? ''}`,
 			ANON_PI_HOME: opts.home,
-			// The CLI's "am I anon?" probe reads os.userInfo().username; we cannot
+			// The CLI's "am I anonpi?" probe reads os.userInfo().username; we cannot
 			// change the real uid in a test, so the anon-caller case is covered at
-			// the pure seam (shouldRedirectToAnon: hardened+anon => false). Here we
-			// exercise the login-user path (username != 'anon').
+			// the pure seam (shouldRedirectToAnon: hardened+anonpi => false). Here we
+			// exercise the login-user path (username != 'anonpi').
 			...(opts.asAnon ? {} : {}),
 		},
 	});
 }
 
-describe('hardened self-re-exec: a login-user launch redirects via sudo -u anon -i', () => {
-	it('spawns `sudo -u anon -i <anon-pi> <args>` on a hardened install', () => {
+describe('hardened self-re-exec: a login-user launch redirects via sudo -u anonpi -i', () => {
+	it('spawns `sudo -u anonpi -i <anon-pi> <args>` on a hardened install', () => {
 		const home = tmp('anon-pi-home-');
 		writeHardenedConfig(home, true);
 		const sudoLog = join(tmp('anon-pi-log-'), 'sudo.log');
@@ -125,8 +125,8 @@ describe('hardened self-re-exec: a login-user launch redirects via sudo -u anon 
 		expect(r.status).toBe(0);
 		expect(existsSync(sudoLog)).toBe(true);
 		const argv = readFileSync(sudoLog, 'utf8').trim().split('\n');
-		// sudo saw: -u anon -i <anon-pi> recon --mount /tmp/x
-		expect(argv.slice(0, 3)).toEqual(['-u', 'anon', '-i']);
+		// sudo saw: -u anonpi -i <anon-pi> recon --mount /tmp/x
+		expect(argv.slice(0, 3)).toEqual(['-u', 'anonpi', '-i']);
 		// the 4th arg is the anon-pi binary path; then (after the internal
 		// parent-version pair) the forwarded args verbatim.
 		expect(forwarded(argv)).toEqual(['recon', '--mount', '/tmp/x']);
@@ -167,7 +167,7 @@ describe('hardened self-re-exec: a login-user launch redirects via sudo -u anon 
 		// init needs a TTY (spawnSync has none), so it exits at the no-TTY guard -
 		// but only AFTER any redirect would have fired. The point: sudo was NEVER
 		// invoked (init must run as the login user; a redirect would make it run as
-		// `anon` and then fail `sudo -u anon` from within `anon`).
+		// `anonpi` and then fail `sudo -u anonpi` from within `anonpi`).
 		run(['init'], {home, bin});
 		expect(existsSync(sudoLog)).toBe(false);
 	});
@@ -193,7 +193,7 @@ describe('hardened self-re-exec: a login-user launch redirects via sudo -u anon 
 		const r = run(['machine', 'list'], {home, bin});
 		expect(r.status).toBe(0);
 		const argv = readFileSync(sudoLog, 'utf8').trim().split('\n');
-		expect(argv.slice(0, 3)).toEqual(['-u', 'anon', '-i']);
+		expect(argv.slice(0, 3)).toEqual(['-u', 'anonpi', '-i']);
 		expect(forwarded(argv)).toEqual(['machine', 'list']);
 	});
 });

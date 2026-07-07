@@ -16,7 +16,7 @@ import {
 } from '../src/index.js';
 
 // The PURE hardened-deployment preflight (docs/adr/0006, prd
-// `hardened-dedicated-account-deployment` story 6). A half-provisioned `anon`
+// `hardened-dedicated-account-deployment` story 6). A half-provisioned `anonpi`
 // account must fail LOUDLY with remediation. Each check is a pure predicate over
 // an INJECTED probe result (the real `/etc/subuid` read, `loginctl`, `stat
 // /dev/net/tun`, `netcage --version` live in cli.ts, wired by the
@@ -185,7 +185,7 @@ describe('evaluateHardenedPreflight: each check pass/fail branch + exact remedia
 		const res = evaluateHardenedPreflight({...allPass, lingerEnabled: false});
 		const f = res.failures.find((x) => x.id === 'linger');
 		expect(f?.remediation).toBe(lingerRemediation(ANON_ACCOUNT));
-		expect(f?.remediation).toContain('loginctl enable-linger anon');
+		expect(f?.remediation).toContain('loginctl enable-linger anonpi');
 	});
 
 	it('FAILS the /dev/net/tun check with its exact remediation', () => {

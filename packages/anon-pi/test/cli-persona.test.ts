@@ -2,7 +2,7 @@
 // `multi-persona-hardened-accounts`, decisions 4-8, superseding ADR-0006): the
 // thin CLI around the pure planPersonaAdd + composeTorPersonaProxy + offerTor +
 // the Tier-2 command generator. It provisions a persona: maps <name> ->
-// anon-<name>, chooses egress (Tor multi-persona or a bring-your-own socks5h
+// anonpi-<name>, chooses egress (Tor multi-persona or a bring-your-own socks5h
 // endpoint + the uniqueness warning), PRINTS the Tier-2 copy-paste root commands
 // when the account is missing, and (once the account exists) writes the
 // persona's OWN ordinary v1 config.json into its mode-700 tree.
@@ -58,7 +58,7 @@ function tmp(prefix: string): string {
  * A temp bin dir on PATH. Only stubs the tools the persona-add flow reads
  * (getent + netcage); everything root/privilege-touching is a TRIPWIRE that
  * exits non-zero + prints "TRIPWIRE" (anon-pi never runs Tier 2). `accountHome`,
- * when given, makes `getent passwd anon-<name>` REPORT the account (with that
+ * when given, makes `getent passwd anonpi-<name>` REPORT the account (with that
  * home), simulating "the account exists"; when absent, getent reports no such
  * account. `torSocks5` controls the fake `netcage detect-proxy --json`.
  */
@@ -235,7 +235,7 @@ describe('persona add: egress selection', () => {
 		expect(conf.proxy).toBe(byo);
 	});
 
-	it('--tor composes socks5h://anon-<name>:x@... (Tor detected) and stores it', () => {
+	it('--tor composes socks5h://anonpi-<name>:x@... (Tor detected) and stores it', () => {
 		const home = tmp('anon-pi-home-');
 		const accountHome = tmp('anon-acct-');
 		const bin = fakeBin({accountHome, torSocks5: true});
@@ -245,12 +245,12 @@ describe('persona add: egress selection', () => {
 		const conf = JSON.parse(
 			readFileSync(personaConfigPath(accountHome), 'utf8'),
 		);
-		expect(conf.proxy).toBe('socks5h://anon-alice:x@127.0.0.1:9050');
+		expect(conf.proxy).toBe('socks5h://anonpi-alice:x@127.0.0.1:9050');
 		// the Tor path does NOT print the BYO uniqueness warning.
 		expect(r.stdout + r.stderr).not.toMatch(/unique to this persona/i);
 	});
 
-	it('the default persona (bare `add`) composes for account `anon`', () => {
+	it('the default persona (bare `add`) composes for account `anonpi`', () => {
 		const home = tmp('anon-pi-home-');
 		const accountHome = tmp('anon-acct-');
 		const bin = fakeBin({accountHome, torSocks5: true});
@@ -259,12 +259,12 @@ describe('persona add: egress selection', () => {
 		const conf = JSON.parse(
 			readFileSync(personaConfigPath(accountHome), 'utf8'),
 		);
-		expect(conf.proxy).toBe('socks5h://anon:x@127.0.0.1:9050');
+		expect(conf.proxy).toBe('socks5h://anonpi:x@127.0.0.1:9050');
 	});
 });
 
 describe('persona add: Tier-1 in-home write is mode 700 and identity is NOT set', () => {
-	it('writes ~anon-<name>/.anon-pi at mode 0700, ordinary v1 config, no email/git', () => {
+	it('writes ~anonpi-<name>/.anon-pi at mode 0700, ordinary v1 config, no email/git', () => {
 		const home = tmp('anon-pi-home-');
 		const accountHome = tmp('anon-acct-');
 		const bin = fakeBin({accountHome});
@@ -300,9 +300,9 @@ describe('persona add: Tier-2 printed when the account is missing (resumable)', 
 		// exits non-zero (re-run after creating the account). anon-pi NEVER runs it.
 		expect(r.stderr).not.toContain('TRIPWIRE');
 		const out = r.stdout + r.stderr;
-		expect(out).toContain('useradd -m anon-alice');
-		expect(out).toContain('loginctl enable-linger anon-alice');
-		expect(out).toContain('anon-alice) '); // the scoped sudoers rule
+		expect(out).toContain('useradd -m anonpi-alice');
+		expect(out).toContain('loginctl enable-linger anonpi-alice');
+		expect(out).toContain('anonpi-alice) '); // the scoped sudoers rule
 		// no on-disk script file framing.
 		expect(out).not.toContain('#!/bin/sh');
 		// nothing written into a persona tree (the account does not exist).
@@ -371,7 +371,7 @@ describe('persona rm: PRINTS the teardown, never runs root, gated on confirmatio
 		const r = run(['persona', 'rm', 'alice'], {home, bin});
 		expect(r.status).toBe(0);
 		expect(r.stdout).toMatch(/not provisioned/i);
-		expect(r.stdout).toContain('userdel -r anon-alice');
+		expect(r.stdout).toContain('userdel -r anonpi-alice');
 		// anon-pi PRINTS only; it never invokes a real privilege tool.
 		expect(r.stderr).not.toContain('TRIPWIRE');
 	});
@@ -379,7 +379,7 @@ describe('persona rm: PRINTS the teardown, never runs root, gated on confirmatio
 	it('account EXISTS + no --yes + no TTY: REFUSES (never prints userdel)', () => {
 		const home = tmp('anon-pi-home-');
 		const accountHome = tmp('anon-acct-');
-		const bin = fakeBin({accountHome}); // getent reports anon-alice.
+		const bin = fakeBin({accountHome}); // getent reports anonpi-alice.
 		const r = run(['persona', 'rm', 'alice'], {home, bin});
 		expect(r.status).not.toBe(0);
 		expect(r.stderr).toMatch(/refusing to print a DESTRUCTIVE teardown/i);
@@ -393,19 +393,19 @@ describe('persona rm: PRINTS the teardown, never runs root, gated on confirmatio
 		const bin = fakeBin({accountHome});
 		const r = run(['persona', 'rm', 'alice', '--yes'], {home, bin});
 		expect(r.status).toBe(0);
-		expect(r.stdout).toContain('userdel -r anon-alice');
-		expect(r.stdout).toContain("rm -f '/etc/sudoers.d/anon-pi-anon-alice'");
+		expect(r.stdout).toContain('userdel -r anonpi-alice');
+		expect(r.stdout).toContain("rm -f '/etc/sudoers.d/anon-pi-anonpi-alice'");
 		expect(r.stdout).toMatch(/IRREVERSIBLE/);
 		// PRINTED only: no real userdel/sudo/loginctl ran (they are tripwires).
 		expect(r.stderr).not.toContain('TRIPWIRE');
 	});
 
-	it('a bare `rm --yes` targets the default `anon` account', () => {
+	it('a bare `rm --yes` targets the default `anonpi` account', () => {
 		const home = tmp('anon-pi-home-');
 		const accountHome = tmp('anon-acct-');
 		const bin = fakeBin({accountHome});
 		const r = run(['persona', 'rm', '--yes'], {home, bin});
 		expect(r.status).toBe(0);
-		expect(r.stdout).toContain('userdel -r anon');
+		expect(r.stdout).toContain('userdel -r anonpi');
 	});
 });
