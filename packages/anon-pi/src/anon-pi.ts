@@ -4786,6 +4786,45 @@ export interface Tier2ProvisioningInputs {
 	 * single-user trusted box.
 	 */
 	nopasswd?: boolean;
+	/**
+	 * Which provisioning steps are still NEEDED (from the preflight), so the block
+	 * shows ONLY what is missing on a re-run (e.g. account already exists ->
+	 * no `useradd`). When ABSENT, ALL steps are emitted (the account-fully-missing
+	 * case, e.g. a first `persona add`). The sudoers step is ALWAYS emitted (it is
+	 * idempotent and has no preflight probe); `useradd`/`loginctl`/netcage are
+	 * gated. Derived from the failing check ids by tier2NeedsFromFailures.
+	 */
+	needs?: Tier2Needs;
+}
+
+/** Which Tier-2 steps to emit (the sudoers step is always emitted separately). */
+export interface Tier2Needs {
+	/** `useradd -m <account>` (the account does not exist / has no subid ranges). */
+	useradd: boolean;
+	/** `loginctl enable-linger <account>` (linger off / no $XDG_RUNTIME_DIR). */
+	linger: boolean;
+	/** the system-wide netcage install (netcage missing/old/per-user). */
+	netcage: boolean;
+}
+
+/**
+ * PURE: map the ORDERED preflight failure ids to the Tier-2 steps still needed.
+ * `subid` (account missing / no ranges) -> useradd; `linger` OR `xdg-runtime` ->
+ * loginctl; `netcage-version` -> the netcage system-wide install. The
+ * `anon-pi-binary` failure gates the SUDOERS step (handled separately, always
+ * emitted but SKIPPED-with-note when unsuitable). A step whose check PASSED is
+ * omitted, so a re-run shows only what is left to do.
+ */
+export function tier2NeedsFromFailures(
+	failingChecks: readonly HardenedPreflightCheckId[],
+): Tier2Needs {
+	const has = (id: HardenedPreflightCheckId): boolean =>
+		failingChecks.includes(id);
+	return {
+		useradd: has('subid'),
+		linger: has('linger') || has('xdg-runtime'),
+		netcage: has('netcage-version'),
+	};
 }
 
 /**
@@ -4855,6 +4894,13 @@ export function buildTier2ProvisioningScript(
 	inputs: Tier2ProvisioningInputs,
 ): string {
 	const {account, loginUser, anonPiPath, loginHome, nopasswd = false} = inputs;
+	// When `needs` is given, emit ONLY the still-missing steps (a re-run shows just
+	// what is left); absent = emit all (the fully-missing account, e.g. first run).
+	const needs: Tier2Needs = inputs.needs ?? {
+		useradd: true,
+		linger: true,
+		netcage: true,
+	};
 	const sudoersFile = `/etc/sudoers.d/anon-pi-${account}`;
 	// GUARD: never emit a sudoers rule scoped to an anon-pi path the account cannot
 	// run (a login-home / per-user Volta/nvm shim). Such a rule is broken AND, being
@@ -4868,39 +4914,56 @@ export function buildTier2ProvisioningScript(
 	const sudoersRule = nopasswd
 		? `${loginUser} ALL=(${account}) NOPASSWD: ${anonPiPath}`
 		: `${loginUser} ALL=(${account}) ${anonPiPath}`;
-	const sudoersStep = binCheck.unsuitable
-		? `# 4. Scoped sudoers rule: SKIPPED - anon-pi at ${anonPiPath} is not
-#    system-executable by ${account} (${binCheck.reason}). Install anon-pi
-#    system-wide + remove the per-user install (see the anon-pi error above),
-#    then re-run; anon-pi will emit the rule scoped to the system path.`
-		: `# 4. Scoped sudoers rule: ${loginUser} may run ONLY anon-pi as ${account}.
-#    Password ${nopasswd ? 'NOT required (--nopasswd opted in)' : 'KEPT (crossing the boundary is deliberate)'}.
-#    Written to a temp file, validated with visudo -cf, then installed mode-0440,
-#    so a syntax error can never lock you out.
-tmp="$(mktemp)" && printf '%s\\n' '${sudoersRule}' >"$tmp" && visudo -cf "$tmp" && install -m 0440 -o root -g root "$tmp" '${sudoersFile}' && rm -f "$tmp"`;
+
+	// Assemble the NEEDED steps in order, numbering them dynamically (so the block
+	// reads 1, 2, 3... with no gaps even when steps are skipped). Step 0 (become
+	// root) is always first; the sudoers step is always last.
+	const steps: string[] = [];
+	if (needs.useradd) {
+		steps.push(
+			`# Create the account WITH a home dir (auto-allocates its subuid/subgid block).
+useradd -m ${account}`,
+		);
+	}
+	if (needs.linger) {
+		steps.push(
+			`# Enable linger so $XDG_RUNTIME_DIR exists without an interactive login.
+loginctl enable-linger ${account}`,
+		);
+	}
+	if (needs.netcage) {
+		steps.push(
+			`# Install netcage SYSTEM-WIDE so ${account} can run it (its per-user
+# ~/.local/bin default is unreachable cross-account); writes netcage +
+# netcage-dns to /usr/local/bin. Remove any per-user netcage afterwards.
+${NETCAGE_SYSTEM_INSTALL_CMD}`,
+		);
+	}
+	steps.push(
+		binCheck.unsuitable
+			? `# Scoped sudoers rule: SKIPPED - anon-pi at ${anonPiPath} is not
+# system-executable by ${account} (${binCheck.reason}). Install anon-pi
+# system-wide + remove the per-user install (see the anon-pi error above),
+# then re-run; anon-pi will emit the rule scoped to the system path.`
+			: `# Scoped sudoers rule: ${loginUser} may run ONLY anon-pi as ${account}
+# (password ${nopasswd ? 'NOT required, --nopasswd opted in' : 'KEPT: crossing is deliberate'}), visudo-validated then installed mode-0440.
+tmp="$(mktemp)" && printf '%s\\n' '${sudoersRule}' >"$tmp" && visudo -cf "$tmp" && install -m 0440 -o root -g root "$tmp" '${sudoersFile}' && rm -f "$tmp"`,
+	);
+
+	// Number the steps: 0 = become root, then 1..N for the assembled steps.
+	const numbered = steps
+		.map((s, i) => s.replace(/^# /, `# ${i + 1}. `))
+		.join('\n\n');
 	return `# anon-pi Tier-2 provisioning (REVIEW, then run yourself). anon-pi
 # GENERATED these commands and NEVER runs them: the root-requiring steps are
 # explicit + auditable. Become root FIRST, then paste the rest into that shell
 # (no script file is written; the become-root line keeps the account name out of
-# the audit log).
+# the audit log). Only the steps STILL NEEDED are shown.
 
 # 0. Become root (or use \`su -\`), then paste the commands below in that shell.
 sudo -i
 
-# 1. Create the account WITH a home dir. This also auto-allocates its
-#    subordinate uid/gid block (no explicit range line needed).
-useradd -m ${account}
-
-# 2. Enable linger so $XDG_RUNTIME_DIR exists without an interactive login.
-loginctl enable-linger ${account}
-
-# 3. Install netcage SYSTEM-WIDE so the ${account} account can run it (its
-#    per-user ~/.local/bin default is unreachable cross-account). PREFIX writes
-#    both netcage + netcage-dns to /usr/local/bin. Remove any per-user
-#    (~/.local/bin) netcage afterwards to avoid running two versions.
-${NETCAGE_SYSTEM_INSTALL_CMD}
-
-${sudoersStep}
+${numbered}
 `;
 }
 
@@ -5344,12 +5407,15 @@ export function planHardeningStep(
 	if (preflight.ok) {
 		return {kind: 'continue-tier1', anonHome, mode: HARDENED_HOME_MODE};
 	}
+	// Filter the Tier-2 block to ONLY the steps whose preflight check failed, so a
+	// re-run shows just what is left (e.g. account already exists -> no useradd).
 	const script = buildTier2ProvisioningScript({
 		account,
 		loginUser,
 		anonPiPath,
 		loginHome,
 		nopasswd,
+		needs: tier2NeedsFromFailures(preflight.failures.map((f) => f.id)),
 	});
 	const instruction =
 		`anon-pi: the \`${account}\` account is not fully provisioned yet. The ` +

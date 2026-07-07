@@ -1042,6 +1042,31 @@ function readDirNames(dir: string): string[] {
 const ESC = '\u001b';
 
 /**
+ * Colorize init/onboarding output, gated on the stdout TTY + NO_COLOR (so pipes
+ * and NO_COLOR stay plain). One tiny palette used by the interactive steps:
+ * `title` (bold cyan section headers), `ok` (green), `warn` (yellow), `err`
+ * (red), `dim` (faint). Each wraps its text in the SGR code + reset, or returns
+ * it unchanged when color is off. `rule()` is a full-width-ish separator line.
+ */
+const COLOR_ON =
+	process.stdout.isTTY === true && !nonEmptyEnv(process.env.NO_COLOR);
+const sgr = (code: string, s: string): string =>
+	COLOR_ON ? `${ESC}[${code}m${s}${ESC}[0m` : s;
+const c = {
+	title: (s: string): string => sgr('1;36', s), // bold cyan
+	ok: (s: string): string => sgr('32', s), // green
+	warn: (s: string): string => sgr('33', s), // yellow
+	err: (s: string): string => sgr('31', s), // red
+	dim: (s: string): string => sgr('2', s), // faint
+	bold: (s: string): string => sgr('1', s),
+};
+/** A titled section header block: a rule line, the bold-cyan title, a rule line. */
+function sectionHeader(title: string): string {
+	const rule = c.dim('\u2500'.repeat(64));
+	return `\n${rule}\n${c.title(title)}\n${rule}\n`;
+}
+
+/**
  * Present `entries` as an arrow-key list and return the chosen one, or undefined
  * on cancel (Ctrl-C / q / Esc / EOF). Blocks on raw stdin; restores the terminal
  * on every path. An empty entry list returns undefined immediately (nothing to
@@ -2336,12 +2361,23 @@ function runInit(args: string[]): number {
 			'current values are pre-filled. Press Ctrl-C to abort at any prompt.\n\n',
 	);
 
-	// 1) PROXY: probe + handshake + findings + netcage verify + confirm.
+	// 1) HARDENING (docs/adr/0006) FIRST: it is the most gating + most likely to
+	//    block (the system-wide anon-pi + netcage + account provisioning gauntlet),
+	//    so we ask + run its preflight/provisioning BEFORE the user invests in
+	//    proxy/model/image. Deciding it first also lets EVERY later step be
+	//    hardened-aware (e.g. the projects root defaults to the `anon` tree). ABORT
+	//    propagates; a decline leaves `hardened` unset. A caller ALREADY running as
+	//    `anon` (a hardened reconfigure) skips the prompt.
+	const hardenResult = initHardeningStep(env);
+	if (hardenResult === ABORT) return 1;
+	const hardened = hardenResult === true ? true : current.hardened;
+
+	// 2) PROXY: probe + handshake + findings + netcage verify + confirm.
 	const proxyHostPort = initProxyStep(current.proxy);
 	if (proxyHostPort === undefined) return 1;
 	const proxyUrl = socks5hUrl(proxyHostPort);
 
-	// 2) LOCAL MODEL endpoint + model import: capture the endpoint, then merge the
+	// 3) LOCAL MODEL endpoint + model import: capture the endpoint, then merge the
 	//    host config's matching provider (well-tuned) with the endpoint's live
 	//    /v1/models, let the user pick which to import + the default. May ABORT
 	//    (a real host apiKey without --force-allow-local-llm-api-key).
@@ -2349,22 +2385,9 @@ function runInit(args: string[]): number {
 	if (llmResult === ABORT) return 1;
 	const llm = llmResult.endpoint;
 
-	// 3) DEFAULT MACHINE IMAGE: menu (shipped Dockerfiles / existing ref / skip).
+	// 4) DEFAULT MACHINE IMAGE: menu (shipped Dockerfiles / existing ref / skip).
 	const image = initImageStep();
 	if (image === ABORT) return 1;
-
-	// 4) HARDENING (docs/adr/0006): ask whether to run under the dedicated `anon`
-	//    account. If yes, the RESUMABLE Tier-1/Tier-2 flow runs (print the root
-	//    script -> wait -> re-check -> continue). ABORT propagates; a decline
-	//    leaves `hardened` unset. There is NO `harden` verb and NO `--hardened`
-	//    flag: hardening is this step INSIDE init. A caller ALREADY running as
-	//    `anon` (a hardened reconfigure) skips the prompt. This runs BEFORE the
-	//    projects-root step so that step knows whether we are hardened (and can
-	//    default to / guard the persona account's tree instead of the login home,
-	//    which would leak the login username through the mount source).
-	const hardenResult = initHardeningStep(env);
-	if (hardenResult === ABORT) return 1;
-	const hardened = hardenResult === true ? true : current.hardened;
 
 	// 5) PROJECTS ROOT: the host dir mounted at /projects (default ~/.anon-pi/
 	//    projects). Overridable per-launch with `--mount`; this sets the default.
@@ -2572,7 +2595,9 @@ const ABORT = Symbol('abort');
  */
 function initProxyStep(currentProxy: string | undefined): string | undefined {
 	process.stdout.write(
-		'Step 1/5 - proxy (the socks5h endpoint that anonymizes egress)\n',
+		sectionHeader(
+			'Step 2/5  ·  Proxy (the socks5h endpoint that anonymizes egress)',
+		),
 	);
 	if (currentProxy) {
 		process.stdout.write(`  current: ${currentProxy}\n`);
@@ -2756,7 +2781,7 @@ function initLlmStep(
 	forceLocalApiKey: boolean,
 ): LlmStepResult | typeof ABORT {
 	process.stdout.write(
-		'\nStep 2/5 - local model endpoint (the ONE direct hole)\n',
+		sectionHeader('Step 3/5  ·  Local model endpoint (the ONE direct hole)'),
 	);
 	if (currentLlm) process.stdout.write(`  current: ${currentLlm}\n`);
 	const prefill = currentLlm
@@ -2938,7 +2963,9 @@ function initDefaultModelPicker(chosen: readonly GeneratedModel[]): string {
  */
 function initImageStep(): string | undefined | typeof ABORT {
 	process.stdout.write(
-		'\nStep 3/5 - default machine image (an image with `pi` on PATH)\n',
+		sectionHeader(
+			'Step 4/5  ·  Default machine image (an image with `pi` on PATH)',
+		),
 	);
 	const menu = initImageMenu();
 	menu.forEach((e, i) => {
@@ -3033,7 +3060,9 @@ function initProjectsStep(
 	hardened: boolean,
 ): string | undefined {
 	process.stdout.write(
-		'\nStep 5/5 - projects root (the host folder mounted at /projects)\n',
+		sectionHeader(
+			'Step 5/5  ·  Projects root (the host folder mounted at /projects)',
+		),
 	);
 	// On a hardened install the projects root is the HOST bind-mount SOURCE for
 	// /projects, so a path under the login home would leak the login username
@@ -3143,15 +3172,13 @@ function initProjectsStep(
  */
 function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 	process.stdout.write(
-		'\nStep 4/5 - hardened deployment\n' +
-			`  Run anon-pi's whole workspace under a dedicated \`${ANON_ACCOUNT}\` Unix\n` +
+		sectionHeader('Step 1/5  ·  Hardened deployment') +
+			`  Run anon-pi's whole workspace under a dedicated ${c.bold(ANON_ACCOUNT)} Unix\n` +
 			'  account (mode-700 home), so a host coding agent running as your login\n' +
 			'  user cannot casually `find`/`grep` your anonymized session transcripts.\n' +
-			'  Crossing into it is DELIBERATE (a kept sudo password). This is a\n' +
+			`  Crossing into it is ${c.bold('DELIBERATE')} (a kept sudo password). This is a\n` +
 			'  DISCOVERABILITY boundary, NOT hard containment: root or blanket sudo\n' +
-			'  defeats it. Day to day, a hardened install self-re-execs as `' +
-			ANON_ACCOUNT +
-			'`.\n',
+			`  defeats it. Day to day, a hardened install self-re-execs as ${c.bold(ANON_ACCOUNT)}.\n`,
 	);
 
 	// A caller ALREADY running under a hardened persona account (the default
@@ -3161,7 +3188,9 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 	const who = currentUsername();
 	if (who !== undefined && isAnonPersonaAccount(who)) {
 		process.stdout.write(
-			`  (already running as \`${who}\`; keeping the hardened deployment.)\n`,
+			c.ok(
+				`  (already running as \`${who}\`; keeping the hardened deployment.)`,
+			) + '\n',
 		);
 		return true;
 	}
@@ -3217,24 +3246,35 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 			// wrapper file; NETCAGE_GRAPHROOT is never set (the uid-scoped store handles
 			// itself).
 			process.stdout.write(
-				`  anon-pi: \`${ANON_ACCOUNT}\` account is provisioned; the workspace will be\n` +
-					`  written under it. Day-to-day \`anon-pi …\` now self-re-execs as \`${ANON_ACCOUNT}\`.\n`,
+				c.ok(
+					`  ✓ \`${ANON_ACCOUNT}\` account is provisioned; the workspace will be written under it.`,
+				) +
+					`\n  Day-to-day \`anon-pi …\` now self-re-execs as ${c.bold(ANON_ACCOUNT)}.\n`,
 			);
 			return true;
 		}
 
-		// wait-for-account: PRINT the reviewable Tier-2 script + the instruction,
-		// then wait for the human to run it (in another terminal) and continue. On
-		// continue we loop and RE-PROBE (resumability: the state is the OS, not a
-		// flag). An empty continue-prompt aborts the hardening flow.
-		process.stdout.write('\n' + plan.script + '\n');
-		process.stdout.write(plan.instruction + '\n\n');
+		// wait-for-account: PRINT what is missing (the checks), then the reviewable
+		// Tier-2 commands (filtered to only what is needed), then wait for the human to
+		// run them and continue. On continue we loop and RE-PROBE (resumability: the
+		// state is the OS, not a flag).
+		process.stdout.write(
+			'\n' + c.warn(c.bold('  What is still needed:')) + '\n',
+		);
 		for (const f of plan.failures) {
-			process.stdout.write(`  - ${f.remediation}\n`);
+			process.stdout.write(`  ${c.warn('•')} ${f.remediation}\n`);
 		}
+		process.stdout.write(
+			'\n' +
+				c.title('  Root commands to paste (become root FIRST):') +
+				'\n\n' +
+				plan.script +
+				'\n',
+		);
+		process.stdout.write(c.dim('  ' + plan.instruction) + '\n');
 		const cont = promptLine(
-			`\n  Run the script above with sudo in another terminal, then press Enter to\n` +
-				`  re-check (or type \`skip\` to install non-hardened): `,
+			`\n  ${c.bold('Run the commands above in a root shell')}, then press Enter to re-check\n` +
+				`  (or type ${c.bold('skip')} to install non-hardened): `,
 		);
 		if (cont === undefined) {
 			// Enter with nothing: re-check once more (the common "I ran it" case).

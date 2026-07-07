@@ -2,6 +2,7 @@ import {describe, it, expect} from 'vitest';
 import {
 	ANON_ACCOUNT,
 	buildTier2ProvisioningScript,
+	tier2NeedsFromFailures,
 	NETCAGE_SYSTEM_INSTALL_CMD,
 	personaAccount,
 	type Tier2ProvisioningInputs,
@@ -155,6 +156,55 @@ describe('Tier-2 provisioning: PURE + injected, both default and persona account
 		expect(buildTier2ProvisioningScript(baseInputs)).toBe(
 			buildTier2ProvisioningScript(baseInputs),
 		);
+	});
+});
+
+describe('Tier-2 provisioning: filtered to ONLY the missing steps (needs)', () => {
+	it('tier2NeedsFromFailures maps failing check ids to the needed steps', () => {
+		expect(
+			tier2NeedsFromFailures(['subid', 'linger', 'netcage-version']),
+		).toEqual({useradd: true, linger: true, netcage: true});
+		// only netcage missing (account already exists, linger on): the reported case.
+		expect(tier2NeedsFromFailures(['netcage-version'])).toEqual({
+			useradd: false,
+			linger: false,
+			netcage: true,
+		});
+		// xdg-runtime also implies linger.
+		expect(tier2NeedsFromFailures(['xdg-runtime'])).toEqual({
+			useradd: false,
+			linger: true,
+			netcage: false,
+		});
+		// nothing failing (all steps done): no provisioning steps needed.
+		expect(tier2NeedsFromFailures([])).toEqual({
+			useradd: false,
+			linger: false,
+			netcage: false,
+		});
+	});
+
+	it('OMITS useradd/linger when only netcage is needed (the reported re-run bug)', () => {
+		const script = buildTier2ProvisioningScript({
+			...baseInputs,
+			needs: {useradd: false, linger: false, netcage: true},
+		});
+		expect(script).not.toContain('useradd');
+		expect(script).not.toContain('loginctl enable-linger');
+		expect(script).toContain(NETCAGE_SYSTEM_INSTALL_CMD);
+		// the sudoers step is ALWAYS emitted (idempotent, no preflight probe).
+		expect(script).toContain('operator ALL=(anon) /usr/local/bin/anon-pi');
+		// steps are renumbered with no gaps: 0 (become root), 1 (netcage), 2 (sudoers).
+		expect(script).toMatch(/# 1\. /);
+		expect(script).toMatch(/# 2\. /);
+		expect(script).not.toMatch(/# 3\. /);
+	});
+
+	it('absent `needs` emits ALL steps (a fully-missing account, backward compatible)', () => {
+		const script = buildTier2ProvisioningScript(baseInputs);
+		expect(script).toContain('useradd -m anon');
+		expect(script).toContain('loginctl enable-linger anon');
+		expect(script).toContain(NETCAGE_SYSTEM_INSTALL_CMD);
 	});
 });
 

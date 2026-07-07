@@ -3,6 +3,7 @@ import {
 	ANON_ACCOUNT,
 	HARDENED_HOME_MODE,
 	buildTier2ProvisioningScript,
+	tier2NeedsFromFailures,
 	evaluateHardenedPreflight,
 	planHardeningStep,
 	type HardenedPreflightProbes,
@@ -91,6 +92,7 @@ describe('planHardeningStep: account missing/half-provisioned -> print-and-wait'
 				loginUser: 'operator',
 				anonPiPath: '/usr/local/bin/anon-pi',
 				loginHome: '/home/operator',
+				needs: tier2NeedsFromFailures(preflight.failures.map((f) => f.id)),
 			}),
 		);
 		// the instruction tells the human to run it with sudo elsewhere and continue.
