@@ -18,7 +18,6 @@ import {
 	mkdirSync,
 	readdirSync,
 	readFileSync,
-	realpathSync,
 	rmSync,
 	statSync,
 	writeFileSync,
@@ -427,28 +426,45 @@ function currentUsername(): string | undefined {
 }
 
 /**
- * The ABSOLUTE path to THIS anon-pi binary, to re-exec as `anon`. Prefer the
- * installed `bin` (the `anon-pi` command on the account's PATH) so the sudoers
- * rule (scoped to that path) matches; fall back to this cli.js entrypoint. The
- * `anon` account must be able to resolve it, so a bare `anon-pi` on PATH is the
- * canonical target.
+ * The ABSOLUTE path to the anon-pi binary the hardened crossing scopes its
+ * sudoers rule to and execs AS the account. It must be what the `anon` account
+ * would resolve on ITS OWN clean login shell (a SYSTEM install), NOT what the
+ * login user's PATH resolves - the login user's PATH is polluted by per-user Node
+ * managers (Volta/nvm/asdf prepend `~/.volta/bin` etc.), which would return a
+ * per-user shim the account cannot run. So we resolve `anon-pi` in a SANITIZED
+ * login shell (`env -i ... sh -lc 'command -v anon-pi'`): `env -i` drops the
+ * caller's env (incl. the polluted PATH), and `sh -l` reads /etc/profile so PATH
+ * becomes the SYSTEM login PATH (`/usr/local/bin:/usr/bin:...`) - exactly what
+ * `sudo -u anon -i` gives the account. We do NOT realpath the result: a system
+ * npm-global bin is a stable SYMLINK (`/usr/local/bin/anon-pi`) whose target
+ * (`dist/cli.js`) moves on version bumps, so keeping the symlink makes the
+ * sudoers rule version-stable. Falls back to this cli.js entrypoint only when the
+ * sanitized resolve finds nothing (the preflight then reports "install
+ * system-wide"; that fallback path is under the login home, so the suitability
+ * check still refuses it).
  */
 function anonPiBinaryPath(): string {
-	const which = spawnSync('command', ['-v', 'anon-pi'], {
-		encoding: 'utf8',
-		shell: true,
-	});
-	if (which.status === 0) {
-		const p = which.stdout.trim();
-		if (p) {
-			try {
-				return realpathSync(p);
-			} catch {
-				return p;
-			}
-		}
-	}
+	const sys = systemResolvedAnonPi();
+	if (sys !== undefined) return sys;
 	return fileURLToPath(import.meta.url);
+}
+
+/**
+ * Resolve `anon-pi` as the `anon` account would: in a sanitized login shell
+ * (`env -i` clears the caller's polluted PATH; `sh -l` loads the SYSTEM login
+ * PATH from /etc/profile). Returns the resolved path (NOT realpath'd - keep the
+ * stable bin symlink) or undefined when it is not on the system PATH. HOME is
+ * pointed at a nonexistent dir so no per-user shell rc can re-inject a Volta PATH.
+ */
+function systemResolvedAnonPi(): string | undefined {
+	const res = spawnSync(
+		'env',
+		['-i', 'HOME=/nonexistent', 'TERM=dumb', 'sh', '-lc', 'command -v anon-pi'],
+		{encoding: 'utf8'},
+	);
+	if (res.status !== 0) return undefined;
+	const p = res.stdout.trim();
+	return p === '' ? undefined : p;
 }
 
 /**
@@ -3378,10 +3394,11 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 
 		// SEPARATE STEP: the anon-pi-binary requirement. This is a precondition on
 		// anon-pi ITSELF (it must be system-installed so the account can run it), NOT
-		// a root-shell command. Re-checking in this SAME init session cannot fix it
-		// (the running process is still the unsuitable binary), so we do NOT enter the
-		// "paste root commands + press Enter to re-check" loop for it: we print its own
-		// remediation and ask the user to reinstall + RE-RUN init (or skip).
+		// a root-shell command. It IS resumable: anonPiBinaryPath resolves via a
+		// SANITIZED login shell (the system PATH), so once the user installs a system
+		// anon-pi, a re-check finds it - even while a per-user Volta anon-pi still
+		// exists on their own PATH. So we print its own remediation and let the user
+		// press Enter to RE-CHECK (or skip), just like the root-commands flow.
 		const binaryFailure = plan.failures.find((f) => f.id === 'anon-pi-binary');
 		if (binaryFailure !== undefined) {
 			process.stdout.write(
@@ -3390,25 +3407,21 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 					'\n\n',
 			);
 			process.stdout.write(`  ${binaryFailure.remediation}\n`);
-			// The account-provisioning failures (if any) are shown too, but as a
-			// "you'll do these after reinstalling + re-running" note, not a paste-now
-			// prompt (the root commands need the system-installed binary in their
-			// sudoers rule anyway).
 			const others = plan.failures.filter((f) => f.id !== 'anon-pi-binary');
 			if (others.length > 0) {
 				process.stdout.write(
 					c.dim(
-						`\n  (After that, re-running init will print the remaining root commands\n` +
-							`  to provision the account. ${others.length} other check${others.length === 1 ? '' : 's'} still pending.)`,
+						`\n  (${others.length} other check${others.length === 1 ? '' : 's'} still pending; init will show the remaining\n` +
+							`  root commands once anon-pi is system-installed.)`,
 					) + '\n',
 				);
 			}
 			const cont = promptLine(
-				`\n  Install anon-pi system-wide + remove the per-user one, then ${c.bold('re-run `anon-pi init`')}.\n` +
-					`  Press Enter to abort init now, or type ${c.bold('skip')} to install non-hardened: `,
+				`\n  Install anon-pi system-wide (see above), then press Enter to ${c.bold('re-check')}\n` +
+					`  (or type ${c.bold('skip')} to install non-hardened): `,
 			);
 			if (cont !== undefined && /^skip$/i.test(cont.trim())) return false;
-			return ABORT; // reinstall needed; a re-check in this session cannot help.
+			continue; // re-probe: a system install is now found even if Volta remains.
 		}
 
 		// wait-for-account (binary IS suitable): PRINT what is missing (the checks),

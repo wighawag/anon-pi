@@ -783,10 +783,7 @@ export const VERSION_MANAGER_DIRS = [
 
 /** Why a resolved binary is unsuitable to run as the dedicated account. */
 export type CrossAccountBinaryReason =
-	| 'no-binary'
-	| 'under-login-home'
-	| 'version-manager-shim'
-	| 'non-executable-js';
+	'no-binary' | 'under-login-home' | 'version-manager-shim';
 
 /**
  * PURE: is a resolved binary path UNSUITABLE to run as the dedicated `anon`
@@ -803,12 +800,15 @@ export type CrossAccountBinaryReason =
  *     per-user Volta/nvm/asdf/... shim that also needs that manager's env to
  *     resolve the real tool, which `anon`'s clean `sudo -i` login shell lacks).
  *     Secondary/best-effort; `under-login-home` already catches the common case.
- *   - `non-executable-js`: a `.js` entry (e.g. the `import.meta.url` fallback):
- *     not directly executable (needs `node`), so never a valid sudoers/exec
- *     target.
- * Returns `{unsuitable:false}` when the path is a real, non-home, non-shim,
- * non-`.js` executable (a system install like `/usr/local/bin/anon-pi`). All
- * inputs are injected; nothing here spawns or touches the fs.
+ * A system npm-global install is a `bin` SYMLINK pointing at a shebang'd
+ * `dist/cli.js` (e.g. `/usr/local/bin/anon-pi -> ../lib/node_modules/anon-pi/dist/
+ * cli.js`); that is a PERFECTLY RUNNABLE target for `anon` (root-owned,
+ * world-executable, `#!/usr/bin/env node`), so a `.js` suffix is NOT a
+ * disqualifier - the caller passes the stable bin path (not its realpath), and
+ * even a realpath'd cli.js is fine as long as it is not under the login home.
+ * Returns `{unsuitable:false}` for a real, non-home, non-shim path (a system
+ * install like `/usr/local/bin/anon-pi`). All inputs are injected; nothing here
+ * spawns or touches the fs.
  */
 export function crossAccountBinaryUnsuitable(args: {
 	/** The RESOLVED (realpath'd) binary path, or undefined/empty when none resolved. */
@@ -832,9 +832,6 @@ export function crossAccountBinaryUnsuitable(args: {
 		)
 	) {
 		return {unsuitable: true, reason: 'version-manager-shim'};
-	}
-	if (path.endsWith('.js')) {
-		return {unsuitable: true, reason: 'non-executable-js'};
 	}
 	return {unsuitable: false};
 }
@@ -5246,12 +5243,10 @@ export function anonPiBinaryRemediation(
 			: '(not found on PATH)';
 	const why =
 		reason === 'no-binary'
-			? `anon-pi could not resolve its own binary path`
+			? `anon-pi is not installed on the system PATH (only a per-user install was found)`
 			: reason === 'under-login-home'
 				? `anon-pi ${where} is under your login home, which the \`${account}\` account cannot reach or execute`
-				: reason === 'version-manager-shim'
-					? `anon-pi ${where} is a per-user Node manager (Volta/nvm/asdf) install, which the \`${account}\` account cannot execute from its own login shell`
-					: `anon-pi ${where} is a \`.js\` entry, not a directly executable binary`;
+				: `anon-pi ${where} is a per-user Node manager (Volta/nvm/asdf) install, which the \`${account}\` account cannot execute from its own login shell`;
 	return (
 		`Because you chose the HARDENED deployment, anon-pi runs AS the \`${account}\` ` +
 		`account (\`sudo -u ${account} -i anon-pi ...\`), so anon-pi must be installed ` +

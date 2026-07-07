@@ -290,13 +290,16 @@ describe('crossAccountBinaryUnsuitable (can the dedicated account run this anon-
 		).toEqual({unsuitable: true, reason: 'version-manager-shim'});
 	});
 
-	it('UNSUITABLE non-executable-js: the cli.js fallback', () => {
+	it('SUITABLE: a system cli.js on a system path (a shebang npm-global bin target)', () => {
+		// a `.js` suffix is NOT a disqualifier: `/usr/local/bin/anon-pi` is a symlink
+		// to a root-owned, world-executable `dist/cli.js` with `#!/usr/bin/env node`,
+		// which the account runs fine. Only login-home / version-manager paths fail.
 		expect(
 			crossAccountBinaryUnsuitable({
-				resolvedPath: '/opt/anon-pi/dist/cli.js',
-				loginHome: '/root',
+				resolvedPath: '/usr/local/lib/node_modules/anon-pi/dist/cli.js',
+				loginHome: '/home/wighawag',
 			}),
-		).toEqual({unsuitable: true, reason: 'non-executable-js'});
+		).toEqual({unsuitable: false});
 	});
 
 	it('UNSUITABLE no-binary: empty/undefined path', () => {

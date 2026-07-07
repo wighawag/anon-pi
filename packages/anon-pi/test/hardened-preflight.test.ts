@@ -147,14 +147,15 @@ describe('evaluateHardenedPreflight: the anon-pi-binary cross-account check', ()
 		);
 	});
 
-	it('FAILS for the .js fallback (non-executable) and for no binary', () => {
+	it('PASSES a system cli.js (shebang npm-global bin), FAILS for no binary', () => {
+		// a system-path `.js` (the npm-global bin target) is runnable by the account.
 		expect(
 			evaluateHardenedPreflight({
 				...allPass,
-				loginHome: '/root',
-				anonPiResolvedPath: '/opt/anon-pi/dist/cli.js',
+				loginHome: '/home/wighawag',
+				anonPiResolvedPath: '/usr/local/lib/node_modules/anon-pi/dist/cli.js',
 			}).failures.some((f) => f.id === 'anon-pi-binary'),
-		).toBe(true);
+		).toBe(false);
 		expect(
 			evaluateHardenedPreflight({
 				...allPass,
