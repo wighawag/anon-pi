@@ -65,6 +65,7 @@ const base: PersonaAddInputs = {
 	account: personaAccount('alice'),
 	loginUser: 'operator',
 	anonPiPath: '/usr/local/bin/anon-pi',
+	loginHome: '/home/operator',
 	accountExists: false,
 };
 
@@ -123,6 +124,7 @@ describe('planPersonaAdd: resumable across account creation', () => {
 			account: ANON_ACCOUNT,
 			loginUser: 'operator',
 			anonPiPath: '/usr/local/bin/anon-pi',
+			loginHome: '/home/operator',
 			accountExists: false,
 		});
 		expect(plan.kind).toBe('wait-for-account');

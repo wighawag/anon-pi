@@ -36,6 +36,8 @@ import {
 	resolveProjectsRoot,
 	projectsRootLeaksLogin,
 	resolveInitProjectsDefault,
+	crossAccountBinaryUnsuitable,
+	anonPiVersionMismatch,
 	resolveProxy,
 	type AnonPiConfig,
 	type AnonPiEnv,
@@ -247,6 +249,89 @@ describe('projectsRootLeaksLogin (hardened projects root must avoid the login ho
 				hardened: true,
 			}),
 		).toBe(false);
+	});
+});
+
+describe('crossAccountBinaryUnsuitable (can the dedicated account run this anon-pi?)', () => {
+	const loginHome = '/home/wighawag';
+
+	it('SUITABLE: a system path (not under home, not a shim, not .js)', () => {
+		expect(
+			crossAccountBinaryUnsuitable({
+				resolvedPath: '/usr/local/bin/anon-pi',
+				loginHome,
+			}),
+		).toEqual({unsuitable: false});
+		expect(
+			crossAccountBinaryUnsuitable({
+				resolvedPath: '/usr/bin/anon-pi',
+				loginHome,
+			}),
+		).toEqual({unsuitable: false});
+	});
+
+	it('UNSUITABLE under-login-home: the Volta shim (the reported bug)', () => {
+		expect(
+			crossAccountBinaryUnsuitable({
+				resolvedPath: '/home/wighawag/.volta/bin/volta-shim',
+				loginHome,
+			}),
+		).toEqual({unsuitable: true, reason: 'under-login-home'});
+	});
+
+	it('UNSUITABLE version-manager-shim: a manager dir OUTSIDE the home', () => {
+		// login home is /root here, so under-login-home does not fire; the `.nvm`
+		// segment is what makes it a shim.
+		expect(
+			crossAccountBinaryUnsuitable({
+				resolvedPath: '/opt/.nvm/versions/node/x/bin/anon-pi',
+				loginHome: '/root',
+			}),
+		).toEqual({unsuitable: true, reason: 'version-manager-shim'});
+	});
+
+	it('UNSUITABLE non-executable-js: the cli.js fallback', () => {
+		expect(
+			crossAccountBinaryUnsuitable({
+				resolvedPath: '/opt/anon-pi/dist/cli.js',
+				loginHome: '/root',
+			}),
+		).toEqual({unsuitable: true, reason: 'non-executable-js'});
+	});
+
+	it('UNSUITABLE no-binary: empty/undefined path', () => {
+		expect(
+			crossAccountBinaryUnsuitable({resolvedPath: undefined, loginHome}),
+		).toEqual({unsuitable: true, reason: 'no-binary'});
+		expect(
+			crossAccountBinaryUnsuitable({resolvedPath: '   ', loginHome}),
+		).toEqual({unsuitable: true, reason: 'no-binary'});
+	});
+
+	it('does NOT trip on a sibling-prefix home dir (/home/wighawag-old)', () => {
+		expect(
+			crossAccountBinaryUnsuitable({
+				resolvedPath: '/home/wighawag-old/bin/anon-pi',
+				loginHome,
+			}),
+		).toEqual({unsuitable: false});
+	});
+});
+
+describe('anonPiVersionMismatch (hardened login vs account version divergence)', () => {
+	it('is TRUE when both known and different', () => {
+		expect(anonPiVersionMismatch('0.25.2', '0.26.0')).toBe(true);
+	});
+
+	it('is FALSE when equal', () => {
+		expect(anonPiVersionMismatch('0.26.0', '0.26.0')).toBe(false);
+	});
+
+	it('is FALSE when either is unknown (never block on missing info)', () => {
+		expect(anonPiVersionMismatch(undefined, '0.26.0')).toBe(false);
+		expect(anonPiVersionMismatch('0.26.0', undefined)).toBe(false);
+		expect(anonPiVersionMismatch('', '0.26.0')).toBe(false);
+		expect(anonPiVersionMismatch(undefined, undefined)).toBe(false);
 	});
 });
 

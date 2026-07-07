@@ -108,6 +108,8 @@ import {
 	resolvePersonaSelection,
 	stripAsFlag,
 	buildAnonSudoArgv,
+	PARENT_VERSION_FLAG,
+	anonPiVersionMismatch,
 	INIT_APPLY_SUBCOMMAND,
 	HARDENED_HOME_MODE,
 	type InitApplyPayload,
@@ -178,7 +180,30 @@ import {
 const ANON_PI_KEY_LABEL = 'anon-pi.key';
 
 function main(argv: string[]): number {
-	const rawArgs = argv.slice(2);
+	let rawArgs = argv.slice(2);
+
+	// HARDENED version-match: the login-side parent forwards its version as
+	// `PARENT_VERSION_FLAG <v>` across the `sudo -u <account> -i anon-pi` crossing
+	// (sudo -i strips the env, so a flag is the channel). We (the account-side
+	// child) STRIP it here and, if it differs from OUR own version, REFUSE: a
+	// per-user (Volta/nvm) login install and the system account install must not
+	// silently diverge. Done before persona selection/dispatch so the flag never
+	// reaches the launch grammar. An absent flag (older parent, or non-hardened) is
+	// a no-op.
+	if (rawArgs[0] === PARENT_VERSION_FLAG) {
+		const parentVersion = rawArgs[1];
+		rawArgs = rawArgs.slice(2);
+		if (anonPiVersionMismatch(parentVersion, anonPiVersion())) {
+			process.stderr.write(
+				`anon-pi: version mismatch on this hardened install. You ran anon-pi ` +
+					`${parentVersion} (your login install), but the \`${currentUsername() ?? ANON_ACCOUNT}\` ` +
+					`account runs anon-pi ${anonPiVersion() ?? '(unknown)'} (the system install). ` +
+					`Align them: install the SAME version system-wide and for your login user ` +
+					`(or remove the per-user one so only the system install remains), then retry.\n`,
+			);
+			return 1;
+		}
+	}
 
 	// `--version`/`-V` prints anon-pi's own version and exits (before the launch
 	// grammar AND before any persona selection/redirect, so it is never parsed as a
@@ -479,9 +504,17 @@ function maybeRedirectToPersona(
 	) {
 		return undefined;
 	}
+	// Forward THIS (login-side) anon-pi's version to the account-side child so it
+	// can refuse a silent version mismatch (a per-user Volta vs system install
+	// divergence). `sudo -i` strips the env, so a flag is the only reliable channel;
+	// the child strips it before any dispatch (mirroring `--as`).
+	const version = anonPiVersion();
+	const forwarded = version
+		? [PARENT_VERSION_FLAG, version, ...args]
+		: [...args];
 	const argv = buildAnonSudoArgv({
 		anonPiPath: anonPiBinaryPath(),
-		forwardedArgs: args,
+		forwardedArgs: forwarded,
 		account: selectedAccount,
 	});
 	const [cmd, ...rest] = argv;
@@ -605,6 +638,10 @@ function runInitApply(): number {
  */
 function probeHardenedPreflight(account: string): HardenedPreflightProbes {
 	return {
+		// The resolved anon-pi path the crossing would exec as the account: a
+		// per-user Volta/nvm shim or a login-home path fails the cross-account check.
+		anonPiResolvedPath: anonPiBinaryPath(),
+		loginHome: envFromProcess(process.env).home,
 		subidRangesPresent:
 			subidRangePresent('/etc/subuid', account) &&
 			subidRangePresent('/etc/subgid', account),
@@ -3166,6 +3203,7 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 			account: ANON_ACCOUNT,
 			loginUser,
 			anonPiPath,
+			loginHome: env.home,
 			anonHome: anonWorkspace,
 		});
 
@@ -3495,6 +3533,7 @@ function runPersona(personaArgs: string[]): number {
 				account,
 				loginUser,
 				anonPiPath,
+				loginHome: envFromProcess(process.env).home,
 				accountExists,
 				anonHome,
 				config,

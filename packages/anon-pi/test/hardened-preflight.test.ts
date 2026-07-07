@@ -11,6 +11,7 @@ import {
 	subidRemediation,
 	tunRemediation,
 	xdgRuntimeRemediation,
+	anonPiBinaryRemediation,
 	type HardenedPreflightProbes,
 } from '../src/index.js';
 
@@ -25,6 +26,9 @@ import {
 
 /** All-pass probe inputs; individual tests flip ONE field to exercise a failure. */
 const allPass: HardenedPreflightProbes = {
+	// a real SYSTEM anon-pi path (not under a home, not a shim, not .js): suitable.
+	anonPiResolvedPath: '/usr/local/bin/anon-pi',
+	loginHome: '/home/wighawag',
 	subidRangesPresent: true,
 	lingerEnabled: true,
 	tunAccessible: true,
@@ -98,6 +102,60 @@ describe('evaluateHardenedPreflight: all-pass', () => {
 		const res = evaluateHardenedPreflight(allPass);
 		expect(res.ok).toBe(true);
 		expect(res.failures).toEqual([]);
+	});
+});
+
+describe('evaluateHardenedPreflight: the anon-pi-binary cross-account check', () => {
+	it('PASSES for a system anon-pi path', () => {
+		expect(evaluateHardenedPreflight(allPass).ok).toBe(true);
+	});
+
+	it('FAILS for a Volta per-user shim (the reported bug), with remediation', () => {
+		const path = '/home/wighawag/.volta/bin/volta-shim';
+		const res = evaluateHardenedPreflight({
+			...allPass,
+			anonPiResolvedPath: path,
+		});
+		const f = res.failures.find((x) => x.id === 'anon-pi-binary');
+		expect(f).toBeDefined();
+		// under-login-home wins (it is under /home/wighawag), so that is the reason.
+		expect(f?.remediation).toBe(
+			anonPiBinaryRemediation(path, 'under-login-home', ANON_ACCOUNT),
+		);
+		expect(f?.remediation).toContain('SYSTEM-WIDE');
+		expect(f?.remediation).toContain('REMOVE the per-user');
+	});
+
+	it('FAILS for a shim OUTSIDE the home (version-manager-dir reason)', () => {
+		const res = evaluateHardenedPreflight({
+			...allPass,
+			loginHome: '/root',
+			anonPiResolvedPath: '/opt/.nvm/versions/node/x/bin/anon-pi',
+		});
+		const f = res.failures.find((x) => x.id === 'anon-pi-binary');
+		expect(f?.remediation).toBe(
+			anonPiBinaryRemediation(
+				'/opt/.nvm/versions/node/x/bin/anon-pi',
+				'version-manager-shim',
+				ANON_ACCOUNT,
+			),
+		);
+	});
+
+	it('FAILS for the .js fallback (non-executable) and for no binary', () => {
+		expect(
+			evaluateHardenedPreflight({
+				...allPass,
+				loginHome: '/root',
+				anonPiResolvedPath: '/opt/anon-pi/dist/cli.js',
+			}).failures.some((f) => f.id === 'anon-pi-binary'),
+		).toBe(true);
+		expect(
+			evaluateHardenedPreflight({
+				...allPass,
+				anonPiResolvedPath: undefined,
+			}).failures.some((f) => f.id === 'anon-pi-binary'),
+		).toBe(true);
 	});
 });
 
@@ -196,6 +254,8 @@ describe('evaluateHardenedPreflight: netcage version pass/fail/absent/unparseabl
 describe('evaluateHardenedPreflight: composition (ordered list of all failures)', () => {
 	it('reports EVERY failure in the fixed check order', () => {
 		const res = evaluateHardenedPreflight({
+			anonPiResolvedPath: undefined,
+			loginHome: '/home/wighawag',
 			subidRangesPresent: false,
 			lingerEnabled: false,
 			tunAccessible: false,
@@ -204,6 +264,7 @@ describe('evaluateHardenedPreflight: composition (ordered list of all failures)'
 		});
 		expect(res.ok).toBe(false);
 		expect(res.failures.map((f) => f.id)).toEqual([
+			'anon-pi-binary',
 			'subid',
 			'linger',
 			'tun',
@@ -216,6 +277,8 @@ describe('evaluateHardenedPreflight: composition (ordered list of all failures)'
 describe('the preflight introduces NO NETCAGE_GRAPHROOT knob', () => {
 	it('no remediation mentions NETCAGE_GRAPHROOT (uid-scoped store handles itself)', () => {
 		const res = evaluateHardenedPreflight({
+			anonPiResolvedPath: '/usr/local/bin/anon-pi',
+			loginHome: '/home/wighawag',
 			subidRangesPresent: false,
 			lingerEnabled: false,
 			tunAccessible: false,

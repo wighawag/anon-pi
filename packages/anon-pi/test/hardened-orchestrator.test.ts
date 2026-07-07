@@ -18,8 +18,10 @@ import {
 // NOTHING here spawns, probes, sudo's, or touches the fs. The two seams the task
 // calls out: missing-account -> print-script-and-wait; passing -> continue.
 
-/** All-pass probe inputs (a fully-provisioned `anon` account). */
+/** All-pass probe inputs (a fully-provisioned `anon` account + a system anon-pi). */
 const allPassProbes: HardenedPreflightProbes = {
+	anonPiResolvedPath: '/usr/local/bin/anon-pi',
+	loginHome: '/home/operator',
 	subidRangesPresent: true,
 	lingerEnabled: true,
 	tunAccessible: true,
@@ -29,6 +31,8 @@ const allPassProbes: HardenedPreflightProbes = {
 
 /** A missing/half-provisioned account (no subuid ranges, no linger, ...). */
 const missingAccountProbes: HardenedPreflightProbes = {
+	anonPiResolvedPath: '/usr/local/bin/anon-pi',
+	loginHome: '/home/operator',
 	subidRangesPresent: false,
 	lingerEnabled: false,
 	tunAccessible: true,
@@ -45,6 +49,7 @@ function inputs(
 		account: ANON_ACCOUNT,
 		loginUser: 'operator',
 		anonPiPath: '/usr/local/bin/anon-pi',
+		loginHome: '/home/operator',
 		anonHome: '/home/anon/.anon-pi',
 		...over,
 	};
@@ -85,6 +90,7 @@ describe('planHardeningStep: account missing/half-provisioned -> print-and-wait'
 				account: ANON_ACCOUNT,
 				loginUser: 'operator',
 				anonPiPath: '/usr/local/bin/anon-pi',
+				loginHome: '/home/operator',
 			}),
 		);
 		// the instruction tells the human to run it with sudo elsewhere and continue.

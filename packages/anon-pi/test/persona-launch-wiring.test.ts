@@ -42,6 +42,19 @@ const cli = join(
 	'cli.js',
 );
 
+/**
+ * The FORWARDED args the redirect passed to the account-side child: sudo argv is
+ * `-u <acct> -i <anon-pi-path> [--anon-pi-parent-version <v>] <...forwarded>`.
+ * Strip the `-u <acct> -i` prefix (indices 0-2), the anon-pi path (index 3), and
+ * the internal parent-version pair when present (dynamic version, so we strip by
+ * flag name, not a hardcoded value).
+ */
+function forwarded(argv: string[]): string[] {
+	let rest = argv.slice(4);
+	if (rest[0] === '--anon-pi-parent-version') rest = rest.slice(2);
+	return rest;
+}
+
 const scratch: string[] = [];
 afterEach(() => {
 	for (const d of scratch.splice(0)) rmSync(d, {recursive: true, force: true});
@@ -134,9 +147,10 @@ describe('multi-persona launch: `--as <name>` selects + re-execs into the person
 		const argv = readFileSync(sudoLog, 'utf8').trim().split('\n');
 		// sudo saw: -u anon-alice -i <anon-pi> --as alice recon --mount /tmp/x
 		expect(argv.slice(0, 3)).toEqual(['-u', 'anon-alice', '-i']);
-		// the 4th arg is the anon-pi binary path; then the forwarded args verbatim,
-		// with `--as alice` PRESERVED so the child re-derives its persona + loop-guards.
-		expect(argv.slice(4)).toEqual([
+		// the 4th arg is the anon-pi binary path; then (after the internal
+		// parent-version pair) the forwarded args, with `--as alice` PRESERVED so the
+		// child re-derives its persona + loop-guards.
+		expect(forwarded(argv)).toEqual([
 			'--as',
 			'alice',
 			'recon',
@@ -156,7 +170,7 @@ describe('multi-persona launch: `--as <name>` selects + re-execs into the person
 		const argv = readFileSync(sudoLog, 'utf8').trim().split('\n');
 		// byte-identical to v1's hardened-wiring test: -u anon -i <anon-pi> recon …
 		expect(argv.slice(0, 3)).toEqual(['-u', 'anon', '-i']);
-		expect(argv.slice(4)).toEqual(['recon', '--mount', '/tmp/x']);
+		expect(forwarded(argv)).toEqual(['recon', '--mount', '/tmp/x']);
 		// the default path carries NO `--as` token into the re-exec.
 		expect(argv).not.toContain('--as');
 	});
@@ -223,7 +237,7 @@ describe('multi-persona launch: `--as <name>` selects + re-execs into the person
 		expect(r.status).toBe(0);
 		const argv = readFileSync(sudoLog, 'utf8').trim().split('\n');
 		expect(argv.slice(0, 3)).toEqual(['-u', 'anon-alice', '-i']);
-		expect(argv.slice(4)).toEqual(['--as', 'alice', 'machine', 'list']);
+		expect(forwarded(argv)).toEqual(['--as', 'alice', 'machine', 'list']);
 	});
 });
 

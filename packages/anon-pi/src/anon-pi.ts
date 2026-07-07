@@ -761,6 +761,84 @@ export function projectsRootLeaksLogin(args: {
  * the caller before the leak test; `builtin` is the account-tree default the CLI
  * computed. Nothing here spawns or touches the fs.
  */
+/**
+ * The per-user directory NAMES a Node/tool version-manager keeps its shims/tools
+ * under. A resolved binary that traverses one of these is per-user (the `anon`
+ * account cannot execute it from its own clean login shell), even in the rare
+ * case the dir is not under $HOME. This is a SECONDARY, best-effort signal: the
+ * PRIMARY rule is `under-login-home` (which already covers all of these on a
+ * normal box, since they live in $HOME). A future manager is caught by the
+ * home-containment rule regardless.
+ */
+export const VERSION_MANAGER_DIRS = [
+	'.volta',
+	'.nvm',
+	'.asdf',
+	'.fnm',
+	'.n',
+	'.local',
+	'.rbenv',
+	'.rvm',
+] as const;
+
+/** Why a resolved binary is unsuitable to run as the dedicated account. */
+export type CrossAccountBinaryReason =
+	| 'no-binary'
+	| 'under-login-home'
+	| 'version-manager-shim'
+	| 'non-executable-js';
+
+/**
+ * PURE: is a resolved binary path UNSUITABLE to run as the dedicated `anon`
+ * account? On a hardened install anon-pi crosses into `anon` by spawning `sudo
+ * -u anon -i <path> ...`, so `<path>` must be an executable the `anon` account
+ * can reach + run from its OWN clean login shell. It CANNOT run:
+ *   - `no-binary`: an empty/undefined path (nothing resolved).
+ *   - `under-login-home`: anything under the login user's $HOME. The login home
+ *     is not world-traversable on a hardened box (and it would leak the login
+ *     username into a root sudoers rule + point that rule at a caller-WRITABLE
+ *     target). This is the PRIMARY, denylist-independent rule (separator-aware,
+ *     so `/home/u-old` is not treated as under `/home/u`).
+ *   - `version-manager-shim`: a path with a `VERSION_MANAGER_DIRS` segment (a
+ *     per-user Volta/nvm/asdf/... shim that also needs that manager's env to
+ *     resolve the real tool, which `anon`'s clean `sudo -i` login shell lacks).
+ *     Secondary/best-effort; `under-login-home` already catches the common case.
+ *   - `non-executable-js`: a `.js` entry (e.g. the `import.meta.url` fallback):
+ *     not directly executable (needs `node`), so never a valid sudoers/exec
+ *     target.
+ * Returns `{unsuitable:false}` when the path is a real, non-home, non-shim,
+ * non-`.js` executable (a system install like `/usr/local/bin/anon-pi`). All
+ * inputs are injected; nothing here spawns or touches the fs.
+ */
+export function crossAccountBinaryUnsuitable(args: {
+	/** The RESOLVED (realpath'd) binary path, or undefined/empty when none resolved. */
+	resolvedPath?: string;
+	/** The login user's $HOME. */
+	loginHome: string;
+}): {unsuitable: boolean; reason?: CrossAccountBinaryReason} {
+	const p = args.resolvedPath?.trim();
+	if (p === undefined || p === '') {
+		return {unsuitable: true, reason: 'no-binary'};
+	}
+	const path = resolve(p);
+	const home = resolve(args.loginHome);
+	if (path === home || path.startsWith(home + sep)) {
+		return {unsuitable: true, reason: 'under-login-home'};
+	}
+	const segments = path.split(sep);
+	if (
+		segments.some((s) =>
+			(VERSION_MANAGER_DIRS as readonly string[]).includes(s),
+		)
+	) {
+		return {unsuitable: true, reason: 'version-manager-shim'};
+	}
+	if (path.endsWith('.js')) {
+		return {unsuitable: true, reason: 'non-executable-js'};
+	}
+	return {unsuitable: false};
+}
+
 export function resolveInitProjectsDefault(args: {
 	/** The RESOLVED (absolute) stored projects root, or undefined when unset. */
 	currentResolved?: string;
@@ -4694,12 +4772,59 @@ export interface Tier2ProvisioningInputs {
 	 */
 	anonPiPath: string;
 	/**
+	 * The login user's $HOME. Used to REFUSE emitting a sudoers rule scoped to an
+	 * anon-pi path the account cannot run (a login-home / per-user shim path):
+	 * such a rule is both broken for the account AND points at a caller-WRITABLE
+	 * target (a privilege-scoping hole). When the path is unsuitable the block
+	 * emits a WARNING in place of the sudoers line. Injected.
+	 */
+	loginHome: string;
+	/**
 	 * Opt-in `--nopasswd`: emit a NOPASSWD sudoers rule (no password prompt when
 	 * crossing). OFF by default (undefined / false) so the password is KEPT: the
 	 * password is the deliberate-crossing feature (ADR-0006). Only for a
 	 * single-user trusted box.
 	 */
 	nopasswd?: boolean;
+}
+
+/**
+ * The netcage system-wide install one-liner anon-pi prints in the Tier-2 root
+ * block, so the dedicated account can run netcage (its per-user `~/.local/bin`
+ * default is unreachable cross-account). netcage's own installer supports
+ * `PREFIX`, so this is a STABLE mechanism (not a distro-guess): in the root shell
+ * `PREFIX=/usr/local/bin` writes both `netcage` + `netcage-dns` to a shared PATH.
+ */
+export const NETCAGE_SYSTEM_INSTALL_CMD =
+	'curl -fsSL https://github.com/wighawag/netcage/releases/latest/download/install.sh | PREFIX=/usr/local/bin sh';
+
+/**
+ * The internal forwarded flag the hardened redirect uses to carry the LOGIN-side
+ * anon-pi version across `sudo -u <account> -i anon-pi` (which strips the env, so
+ * a flag is the only reliable channel). The `anon` child reads it, compares to
+ * its OWN version (anonPiVersionMismatch), and strips it before any dispatch
+ * (mirroring `--as`). INTERNAL: a human never types it.
+ */
+export const PARENT_VERSION_FLAG = '--anon-pi-parent-version';
+
+/**
+ * PURE: on a hardened install every login-user invocation self-re-execs as the
+ * account (`sudo -u <account> -i anon-pi ...`). The login-side anon-pi and the
+ * account-side anon-pi are SEPARATE installs (per-user vs system) and can be
+ * DIFFERENT versions, which is silently confusing. Given the parent's forwarded
+ * version and the child's own version, is there a mismatch worth refusing on?
+ * Returns false when either is unknown (undefined/empty: never block on missing
+ * info, and old parents that don't forward a version stay compatible) or when
+ * they are equal; true only when BOTH are known and differ.
+ */
+export function anonPiVersionMismatch(
+	parentVersion: string | undefined,
+	childVersion: string | undefined,
+): boolean {
+	const p = parentVersion?.trim();
+	const c = childVersion?.trim();
+	if (!p || !c) return false;
+	return p !== c;
 }
 
 /**
@@ -4729,11 +4854,30 @@ export interface Tier2ProvisioningInputs {
 export function buildTier2ProvisioningScript(
 	inputs: Tier2ProvisioningInputs,
 ): string {
-	const {account, loginUser, anonPiPath, nopasswd = false} = inputs;
+	const {account, loginUser, anonPiPath, loginHome, nopasswd = false} = inputs;
+	const sudoersFile = `/etc/sudoers.d/anon-pi-${account}`;
+	// GUARD: never emit a sudoers rule scoped to an anon-pi path the account cannot
+	// run (a login-home / per-user Volta/nvm shim). Such a rule is broken AND, being
+	// a caller-writable target, is a privilege-scoping hole. When unsuitable, emit a
+	// warning where the rule would go (the preflight already blocks progress on
+	// this, so the human sees the fix; the block must not carry a bad rule).
+	const binCheck = crossAccountBinaryUnsuitable({
+		resolvedPath: anonPiPath,
+		loginHome,
+	});
 	const sudoersRule = nopasswd
 		? `${loginUser} ALL=(${account}) NOPASSWD: ${anonPiPath}`
 		: `${loginUser} ALL=(${account}) ${anonPiPath}`;
-	const sudoersFile = `/etc/sudoers.d/anon-pi-${account}`;
+	const sudoersStep = binCheck.unsuitable
+		? `# 4. Scoped sudoers rule: SKIPPED - anon-pi at ${anonPiPath} is not
+#    system-executable by ${account} (${binCheck.reason}). Install anon-pi
+#    system-wide + remove the per-user install (see the anon-pi error above),
+#    then re-run; anon-pi will emit the rule scoped to the system path.`
+		: `# 4. Scoped sudoers rule: ${loginUser} may run ONLY anon-pi as ${account}.
+#    Password ${nopasswd ? 'NOT required (--nopasswd opted in)' : 'KEPT (crossing the boundary is deliberate)'}.
+#    Written to a temp file, validated with visudo -cf, then installed mode-0440,
+#    so a syntax error can never lock you out.
+tmp="$(mktemp)" && printf '%s\\n' '${sudoersRule}' >"$tmp" && visudo -cf "$tmp" && install -m 0440 -o root -g root "$tmp" '${sudoersFile}' && rm -f "$tmp"`;
 	return `# anon-pi Tier-2 provisioning (REVIEW, then run yourself). anon-pi
 # GENERATED these commands and NEVER runs them: the root-requiring steps are
 # explicit + auditable. Become root FIRST, then paste the rest into that shell
@@ -4750,11 +4894,13 @@ useradd -m ${account}
 # 2. Enable linger so $XDG_RUNTIME_DIR exists without an interactive login.
 loginctl enable-linger ${account}
 
-# 3. Scoped sudoers rule: ${loginUser} may run ONLY anon-pi as ${account}.
-#    Password ${nopasswd ? 'NOT required (--nopasswd opted in)' : 'KEPT (crossing the boundary is deliberate)'}.
-#    Written to a temp file, validated with visudo -cf, then installed mode-0440,
-#    so a syntax error can never lock you out.
-tmp="$(mktemp)" && printf '%s\\n' '${sudoersRule}' >"$tmp" && visudo -cf "$tmp" && install -m 0440 -o root -g root "$tmp" '${sudoersFile}' && rm -f "$tmp"
+# 3. Install netcage SYSTEM-WIDE so the ${account} account can run it (its
+#    per-user ~/.local/bin default is unreachable cross-account). PREFIX writes
+#    both netcage + netcage-dns to /usr/local/bin. Remove any per-user
+#    (~/.local/bin) netcage afterwards to avoid running two versions.
+${NETCAGE_SYSTEM_INSTALL_CMD}
+
+${sudoersStep}
 `;
 }
 
@@ -4866,11 +5012,29 @@ export interface HardenedPreflightProbes {
 	 * found"; a present-but-unparseable string is fail-loud too (see the check).
 	 */
 	netcageVersion?: string;
+	/**
+	 * The RESOLVED anon-pi binary path (realpath of `command -v anon-pi`, else the
+	 * cli.js fallback) the hardened crossing WOULD scope its sudoers rule to and
+	 * exec as `anon`. Fed to crossAccountBinaryUnsuitable: a per-user (Volta/nvm)
+	 * shim or a login-home path FAILS (the `anon` account cannot run it). undefined
+	 * = nothing resolved (also a failure). See anonPiBinaryRemediation.
+	 */
+	anonPiResolvedPath?: string;
+	/**
+	 * The login user's $HOME, so the pure check can test the resolved anon-pi path
+	 * for login-home containment. Injected (the impure `os.userInfo().homedir`).
+	 */
+	loginHome: string;
 }
 
 /** The stable id of each preflight check (so a caller can key off a specific failure). */
 export type HardenedPreflightCheckId =
-	'subid' | 'linger' | 'tun' | 'xdg-runtime' | 'netcage-version';
+	| 'anon-pi-binary'
+	| 'subid'
+	| 'linger'
+	| 'tun'
+	| 'xdg-runtime'
+	| 'netcage-version';
 
 /** One failing preflight check: its id + the EXACT remediation string to print. */
 export interface HardenedPreflightFailure {
@@ -4975,20 +5139,73 @@ export function netcageVersionRemediation(found: string | undefined): string {
 }
 
 /**
+ * PURE: the EXACT remediation for the anon-pi-binary check. Names WHERE anon-pi
+ * resolved and WHY that path cannot run as the account (per
+ * crossAccountBinaryUnsuitable's reason), then insists on a SYSTEM-WIDE install
+ * plus REMOVING the per-user (Volta/nvm) one to avoid running two versions. No
+ * install commands are printed (deliberately: a system Node + global install has
+ * too many distro-specific, staleness-prone forms to bake in honestly).
+ */
+export function anonPiBinaryRemediation(
+	resolvedPath: string | undefined,
+	reason: CrossAccountBinaryReason,
+	account: string = ANON_ACCOUNT,
+): string {
+	const where =
+		resolvedPath && resolvedPath.trim() !== ''
+			? `at ${resolvedPath}`
+			: '(not found on PATH)';
+	const why =
+		reason === 'no-binary'
+			? `anon-pi could not resolve its own binary path`
+			: reason === 'under-login-home'
+				? `anon-pi ${where} is under your login home, which the \`${account}\` account cannot traverse or execute`
+				: reason === 'version-manager-shim'
+					? `anon-pi ${where} is a per-user Node manager (Volta/nvm/asdf) install, which the \`${account}\` account cannot execute from its own login shell`
+					: `anon-pi ${where} is a \`.js\` entry, not a directly executable binary`;
+	return (
+		`anon-pi: ${why}. The hardened deployment runs anon-pi AS the \`${account}\` ` +
+		`account (\`sudo -u ${account} -i anon-pi ...\`), so anon-pi must be installed ` +
+		`SYSTEM-WIDE on a shared PATH (e.g. /usr/local/bin or /usr/bin) that the ` +
+		`\`${account}\` account can run. Install anon-pi system-wide, and REMOVE the ` +
+		`per-user install (e.g. the Volta/nvm one) so you never run two different ` +
+		`versions. Then re-run.`
+	);
+}
+
+/**
  * PURE: evaluate the hardened-deployment preflight over INJECTED probe results.
- * Runs every check in a FIXED order (subuid/subgid, linger, /dev/net/tun,
- * account $XDG_RUNTIME_DIR, netcage version) and returns an all-pass result or
- * the ORDERED list of failures, each carrying its EXACT remediation string. The
- * netcage check FAILS on `< NETCAGE_MIN_VERSION`, on an ABSENT netcage
- * (undefined), and on an UNPARSEABLE version string (fail-loud, never a silent
- * pass). Nothing here touches the fs or spawns: it only reads `probes`.
- * `account` defaults to ANON_ACCOUNT (canonically `anon`).
+ * Runs every check in a FIXED order (anon-pi-binary FIRST, then subuid/subgid,
+ * linger, /dev/net/tun, account $XDG_RUNTIME_DIR, netcage version) and returns
+ * an all-pass result or the ORDERED list of failures, each carrying its EXACT
+ * remediation string. The anon-pi-binary check FAILS when anon-pi resolves to a
+ * path the account cannot run (a per-user Volta/nvm shim, a login-home path, a
+ * `.js` entry, or nothing). The netcage check FAILS on `< NETCAGE_MIN_VERSION`,
+ * an ABSENT netcage, or an UNPARSEABLE version (fail-loud). Nothing here touches
+ * the fs or spawns: it only reads `probes`. `account` defaults to ANON_ACCOUNT.
  */
 export function evaluateHardenedPreflight(
 	probes: HardenedPreflightProbes,
 	account: string = ANON_ACCOUNT,
 ): HardenedPreflightResult {
 	const failures: HardenedPreflightFailure[] = [];
+	// FIRST: can anon-pi itself run as the account? If not, the whole hardened
+	// deployment is impossible (the crossing + the sudoers rule both need it), so
+	// this is the most fundamental check and is reported first.
+	const bin = crossAccountBinaryUnsuitable({
+		resolvedPath: probes.anonPiResolvedPath,
+		loginHome: probes.loginHome,
+	});
+	if (bin.unsuitable) {
+		failures.push({
+			id: 'anon-pi-binary',
+			remediation: anonPiBinaryRemediation(
+				probes.anonPiResolvedPath,
+				bin.reason ?? 'no-binary',
+				account,
+			),
+		});
+	}
 	if (!probes.subidRangesPresent) {
 		failures.push({id: 'subid', remediation: subidRemediation(account)});
 	}
@@ -5048,6 +5265,8 @@ export interface HardeningStepInputs {
 	loginUser: string;
 	/** The ABSOLUTE anon-pi binary path the Tier-2 sudoers rule scopes to (injected). */
 	anonPiPath: string;
+	/** The login user's $HOME (so the Tier-2 generator can guard the sudoers path). */
+	loginHome: string;
 	/**
 	 * The ABSOLUTE ANON_PI_HOME under the `anon` account's tree (mode-700 on
 	 * continue). cli.ts resolves it (e.g. `~anon/.anon-pi`) from the real account
@@ -5113,8 +5332,15 @@ export const HARDENED_HOME_MODE = 0o700;
 export function planHardeningStep(
 	inputs: HardeningStepInputs,
 ): HardeningStepPlan {
-	const {preflight, account, loginUser, anonPiPath, anonHome, nopasswd} =
-		inputs;
+	const {
+		preflight,
+		account,
+		loginUser,
+		anonPiPath,
+		loginHome,
+		anonHome,
+		nopasswd,
+	} = inputs;
 	if (preflight.ok) {
 		return {kind: 'continue-tier1', anonHome, mode: HARDENED_HOME_MODE};
 	}
@@ -5122,6 +5348,7 @@ export function planHardeningStep(
 		account,
 		loginUser,
 		anonPiPath,
+		loginHome,
 		nopasswd,
 	});
 	const instruction =
@@ -5235,6 +5462,8 @@ export interface PersonaAddInputs {
 	loginUser: string;
 	/** The ABSOLUTE anon-pi binary path the Tier-2 sudoers rule scopes to (injected). */
 	anonPiPath: string;
+	/** The login user's $HOME (so the Tier-2 generator can guard the sudoers path). */
+	loginHome: string;
 	/**
 	 * Whether the persona's Unix account ALREADY EXISTS (from the impure `getent
 	 * passwd <account>` probe). This is the resumable GATE: while it is false the
@@ -5340,6 +5569,7 @@ export function planPersonaAdd(inputs: PersonaAddInputs): PersonaAddPlan {
 		account,
 		loginUser,
 		anonPiPath,
+		loginHome,
 		accountExists,
 		anonHome,
 		config,
@@ -5354,6 +5584,7 @@ export function planPersonaAdd(inputs: PersonaAddInputs): PersonaAddPlan {
 			account,
 			loginUser,
 			anonPiPath,
+			loginHome,
 			nopasswd,
 		});
 		const instruction =

@@ -35,6 +35,13 @@ const cli = join(
 	'cli.js',
 );
 
+/** The forwarded args past `-u <acct> -i <path> [--anon-pi-parent-version <v>]`. */
+function forwarded(argv: string[]): string[] {
+	let rest = argv.slice(4);
+	if (rest[0] === '--anon-pi-parent-version') rest = rest.slice(2);
+	return rest;
+}
+
 const scratch: string[] = [];
 afterEach(() => {
 	for (const d of scratch.splice(0)) rmSync(d, {recursive: true, force: true});
@@ -120,8 +127,9 @@ describe('hardened self-re-exec: a login-user launch redirects via sudo -u anon 
 		const argv = readFileSync(sudoLog, 'utf8').trim().split('\n');
 		// sudo saw: -u anon -i <anon-pi> recon --mount /tmp/x
 		expect(argv.slice(0, 3)).toEqual(['-u', 'anon', '-i']);
-		// the 4th arg is the anon-pi binary path; then the forwarded args verbatim.
-		expect(argv.slice(4)).toEqual(['recon', '--mount', '/tmp/x']);
+		// the 4th arg is the anon-pi binary path; then (after the internal
+		// parent-version pair) the forwarded args verbatim.
+		expect(forwarded(argv)).toEqual(['recon', '--mount', '/tmp/x']);
 	});
 
 	it('does NOT redirect (no sudo) on a NON-hardened install', () => {
@@ -160,7 +168,7 @@ describe('hardened self-re-exec: a login-user launch redirects via sudo -u anon 
 		expect(r.status).toBe(0);
 		const argv = readFileSync(sudoLog, 'utf8').trim().split('\n');
 		expect(argv.slice(0, 3)).toEqual(['-u', 'anon', '-i']);
-		expect(argv.slice(4)).toEqual(['machine', 'list']);
+		expect(forwarded(argv)).toEqual(['machine', 'list']);
 	});
 });
 

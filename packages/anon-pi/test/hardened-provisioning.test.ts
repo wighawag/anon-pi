@@ -2,6 +2,7 @@ import {describe, it, expect} from 'vitest';
 import {
 	ANON_ACCOUNT,
 	buildTier2ProvisioningScript,
+	NETCAGE_SYSTEM_INSTALL_CMD,
 	personaAccount,
 	type Tier2ProvisioningInputs,
 } from '../src/index.js';
@@ -23,6 +24,7 @@ const baseInputs: Tier2ProvisioningInputs = {
 	account: ANON_ACCOUNT,
 	loginUser: 'operator',
 	anonPiPath: '/usr/local/bin/anon-pi',
+	loginHome: '/home/operator',
 };
 
 describe('Tier-2 provisioning: copy-paste commands, NOT a #!/bin/sh script file', () => {
@@ -124,6 +126,7 @@ describe('Tier-2 provisioning: PURE + injected, both default and persona account
 			account: ANON_ACCOUNT,
 			loginUser: 'alice',
 			anonPiPath: '/opt/tools/anon-pi',
+			loginHome: '/home/alice',
 		});
 		expect(script).toContain('alice ALL=(anon) /opt/tools/anon-pi');
 		expect(script).toContain('/opt/tools/anon-pi');
@@ -136,6 +139,7 @@ describe('Tier-2 provisioning: PURE + injected, both default and persona account
 			account,
 			loginUser: 'operator',
 			anonPiPath: '/usr/local/bin/anon-pi',
+			loginHome: '/home/operator',
 		});
 		expect(script).toContain('useradd -m anon-alice');
 		expect(script).toContain('loginctl enable-linger anon-alice');
@@ -151,5 +155,31 @@ describe('Tier-2 provisioning: PURE + injected, both default and persona account
 		expect(buildTier2ProvisioningScript(baseInputs)).toBe(
 			buildTier2ProvisioningScript(baseInputs),
 		);
+	});
+});
+
+describe('Tier-2 provisioning: system-wide netcage install', () => {
+	it('emits the netcage system-wide install one-liner (PREFIX=/usr/local/bin)', () => {
+		const script = buildTier2ProvisioningScript(baseInputs);
+		expect(script).toContain(NETCAGE_SYSTEM_INSTALL_CMD);
+		expect(NETCAGE_SYSTEM_INSTALL_CMD).toContain('PREFIX=/usr/local/bin');
+		expect(NETCAGE_SYSTEM_INSTALL_CMD).toContain('install.sh');
+	});
+});
+
+describe('Tier-2 provisioning: REFUSES a sudoers rule for a non-system anon-pi path', () => {
+	it('does NOT emit a rule when anon-pi is a login-home / Volta path (the bug)', () => {
+		const script = buildTier2ProvisioningScript({
+			...baseInputs,
+			anonPiPath: '/home/operator/.volta/bin/volta-shim',
+		});
+		// no scoped sudoers rule pointing at the caller-writable/home path.
+		expect(script).not.toContain(
+			'operator ALL=(anon) /home/operator/.volta/bin/volta-shim',
+		);
+		expect(script).not.toMatch(/visudo -cf/);
+		// instead, a SKIPPED note explaining why.
+		expect(script).toContain('SKIPPED');
+		expect(script).toContain('system-wide');
 	});
 });
