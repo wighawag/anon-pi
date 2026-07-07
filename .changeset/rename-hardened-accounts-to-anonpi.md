@@ -1,5 +1,5 @@
 ---
-'anon-pi': major
+'anon-pi': minor
 ---
 
 Rename the dedicated hardened-deployment Unix accounts off the generic `anon` namespace onto anon-pi's own `anonpi` namespace. The default persona account is now `anonpi` (was `anon`) and named personas are `anonpi-<name>` (was `anon-<name>`). This is a BREAKING change: an existing hardened install's `anon` / `anon-<name>` accounts, their mode-700 homes, sudoers rules, and stored per-persona proxies do not carry over, so re-provision under the new names (`anon-pi init`, `anon-pi persona add <name>`) and `userdel -r` the old ones.
