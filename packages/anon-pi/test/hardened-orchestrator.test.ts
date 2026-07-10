@@ -27,7 +27,7 @@ const allPassProbes: HardenedPreflightProbes = {
 	lingerEnabled: true,
 	tunAccessible: true,
 	xdgRuntimeDirPresent: true,
-	netcageVersion: 'netcage 0.11.0',
+	netcageVersion: 'netcage 0.12.0',
 };
 
 /** A missing/half-provisioned account (no subuid ranges, no linger, ...). */
@@ -38,7 +38,7 @@ const missingAccountProbes: HardenedPreflightProbes = {
 	lingerEnabled: false,
 	tunAccessible: true,
 	xdgRuntimeDirPresent: false,
-	netcageVersion: 'netcage 0.11.0',
+	netcageVersion: 'netcage 0.12.0',
 };
 
 function inputs(

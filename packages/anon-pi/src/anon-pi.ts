@@ -18,7 +18,7 @@
 //     on exit. Durable state is EXPLICIT and image-based (snapshot a running
 //     container into a named image, then a machine pinned to it); the machine
 //     home persists regardless (it is a host mount). See docs/adr/0004.
-//   - Open exactly ONE direct hole (--allow-direct <llm>) so pi can reach a
+//   - Open exactly ONE direct hole (--allow <llm>) so pi can reach a
 //     local model while ALL other egress stays forced through the socks5h proxy
 //     (fail-closed; the proxy is REQUIRED and never guessed).
 //   - Seed-if-fresh (marker-guarded, per MACHINE home): on a fresh home, promote
@@ -242,7 +242,7 @@ export function machineJsonPath(env: AnonPiEnv, name: string): string {
 /**
  * The GLOBAL local-model models.json seed: `<home>/models.json`. The local model
  * is a WORKSPACE-level thing (config.json holds ONE global `llm`, the single
- * `--allow-direct` hole shared by every machine), so its generated models.json
+ * `--allow` hole shared by every machine), so its generated models.json
  * lives once at the workspace root and seeds EVERY machine's fresh home. A
  * machine may override it with its own `machines/<M>/models.json` (see
  * resolveModelsSeedPath) for the rare "this machine uses a different local
@@ -931,7 +931,7 @@ export function resolveLaunchImage(args: {
 // (machine + mode + project token + the forced-egress inputs), compose the
 // netcage argv for every mode, ALWAYS carrying the two invariant mounts
 // (<home>:/root, <projects-root>:/projects) and the forced-egress flags
-// (--proxy + exactly one --allow-direct). PURE: no spawn, no fs.
+// (--proxy + exactly one --allow). PURE: no spawn, no fs.
 //
 // This REPLACED the old per-workdir buildRunPlan's shape with a per-machine one.
 
@@ -995,7 +995,7 @@ export interface LaunchIntent {
 	piArgs?: string[];
 	/** The resolved socks5h proxy (REQUIRED; the resolver fails closed without it). */
 	proxy: string;
-	/** The resolved local-model direct target (REQUIRED: the one --allow-direct hole). */
+	/** The resolved local-model direct target (REQUIRED: the one --allow hole). */
 	llmDirect: string;
 	/**
 	 * The host models.json to mount read-only for the first-launch seed, keyed to
@@ -1763,7 +1763,7 @@ export function parseLaunchArgs(args: readonly string[]): ParsedLaunch {
  * Invariants held on EVERY composed argv:
  *   - the two mounts <home>:/root and <projectsRoot>:/projects, always;
  *   - --mount adds EXACTLY <parent>:/work and re-roots cwd, nothing else;
- *   - --proxy <p> + exactly one --allow-direct <llm> (forced egress, fail-closed);
+ *   - --proxy <p> + exactly one --allow <llm> (forced egress, fail-closed);
  *   - --rm on every THROWAWAY launch (throwaway is the default; ADR-0004).
  *
  * The one PARAMETER on this is intent.durable (the explicit `container` noun):
@@ -1859,7 +1859,7 @@ export function resolveRunPlan(
 		netcageArgs.push('--label', `${ANON_PI_CONTAINER_LABEL}=${durable.name}`);
 	}
 	// Forced egress: the proxy + the ONE direct hole. Never omitted.
-	netcageArgs.push('--proxy', proxy, '--allow-direct', directTarget);
+	netcageArgs.push('--proxy', proxy, '--allow', directTarget);
 	if (!headless) netcageArgs.push('-it');
 	// The TWO invariant mounts, ALWAYS.
 	netcageArgs.push('-v', `${machine.home}:${CONTAINER_HOME_ROOT}`);
@@ -2885,11 +2885,11 @@ export interface HostProviderMatch {
  * PURE: find, in a parsed host `~/.pi/agent/models.json`, the provider whose
  * `baseUrl` points at `llmEndpoint` (matched via hostPortKey), and return ONLY
  * that provider's models + apiKey. This is the anonymity-critical scoping: the
- * ONLY provider considered is the one served by the `--allow-direct` endpoint,
+ * ONLY provider considered is the one served by the `--allow` endpoint,
  * so no other provider (etherplay/google/a paid API) — and no other provider's
  * key — can ever enter the seed. Returns undefined when no provider matches.
  *
- * The `--allow-direct` target and this match both go through hostPortKey, so a
+ * The `--allow` target and this match both go through hostPortKey, so a
  * URL / ip:port / bare-ip host config all match the same endpoint.
  */
 export function pickLocalProviderModels(
@@ -2926,7 +2926,7 @@ export function pickLocalProviderModels(
  * endpoint's live `/v1/models` ids (`configured: false` for any the host did not
  * already carry), into ONE deduped, sorted candidate list. Host config wins on
  * an id present in both (it has the real config). Every candidate here is served
- * by the endpoint, so every one is `--allow-direct`-reachable; the merge just
+ * by the endpoint, so every one is `--allow`-reachable; the merge just
  * unions "what you already configured" with "what the server also offers".
  */
 export function mergeModelSources(
@@ -5034,16 +5034,22 @@ ${numbered}
 // introduces a graphroot knob.
 
 /**
- * The netcage version FLOOR the hardened deployment requires: `0.11.0`, the
- * release that shipped the UID-SCOPED store (netcage ADR-0017 / prd
- * `uid-scoped-graphroot-multi-user-fix`). Running netcage as `anonpi` needs this so
- * its store lands in the account's own uid-scoped path (`netcage-storage-<uid>`)
- * instead of colliding on the shared `/var/tmp/netcage-storage` of pre-0.11.0.
- * CONFIRMED (verified against the installed 0.10.0 vs 0.11.0 binaries). Kept as
- * the ONE named constant (a future bump is a single-line change), never a
- * scattered literal.
+ * The netcage version FLOOR anon-pi requires: `0.12.0`. It is a floor for TWO
+ * reasons now, both load-bearing on EVERY launch:
+ *   - the UID-SCOPED store (shipped in netcage 0.11.0; netcage ADR-0017 / prd
+ *     `uid-scoped-graphroot-multi-user-fix`). Running netcage as `anonpi` needs
+ *     this so its store lands in the account's own uid-scoped path
+ *     (`netcage-storage-<uid>`) instead of colliding on the shared
+ *     `/var/tmp/netcage-storage` of pre-0.11.0.
+ *   - the `--allow` FLAG (shipped in netcage 0.12.0, which renamed the
+ *     split-tunnel `--allow-direct` -> `--allow` and made it port-mandatory).
+ *     anon-pi composes the direct hole as `--allow <host:port>` on every launch,
+ *     so a netcage below 0.12.0 does not understand the flag at all.
+ * CONFIRMED (0.11.1 still exposes `--allow-direct`; 0.12.0 exposes `--allow`).
+ * Kept as the ONE named constant (a future bump is a single-line change), never
+ * a scattered literal.
  */
-export const NETCAGE_MIN_VERSION = '0.11.0';
+export const NETCAGE_MIN_VERSION = '0.12.0';
 
 /**
  * PURE: parse a netcage version STRING into a `[major, minor, patch]` numeric
@@ -5230,10 +5236,11 @@ export function xdgRuntimeRemediation(account: string): string {
 export function netcageVersionRemediation(found: string | undefined): string {
 	if (found === undefined) {
 		return (
-			`anon-pi: netcage was not found. The hardened deployment needs netcage ` +
-			`>= ${NETCAGE_MIN_VERSION} (its uid-scoped store, so running as \`${ANON_ACCOUNT}\` ` +
-			`does not collide with your login user's store). Install netcage ` +
-			`>= ${NETCAGE_MIN_VERSION}, then re-run.`
+			`anon-pi: netcage was not found. anon-pi needs netcage ` +
+			`>= ${NETCAGE_MIN_VERSION} (for its \`--allow\` flag, renamed from ` +
+			`\`--allow-direct\` in netcage 0.12.0, AND its uid-scoped store, so running ` +
+			`as \`${ANON_ACCOUNT}\` does not collide with your login user's store). ` +
+			`Install netcage >= ${NETCAGE_MIN_VERSION}, then re-run.`
 		);
 	}
 	const parsed = parseNetcageVersion(found);
@@ -5241,10 +5248,11 @@ export function netcageVersionRemediation(found: string | undefined): string {
 		? `found ${parsed.join('.')}`
 		: `could not parse the version from ${JSON.stringify(found)}`;
 	return (
-		`anon-pi: netcage is too old (${gotDesc}); the hardened deployment needs ` +
-		`>= ${NETCAGE_MIN_VERSION} for its uid-scoped store (so running as ` +
-		`\`${ANON_ACCOUNT}\` does not collide with your login user's store). Upgrade ` +
-		`netcage to >= ${NETCAGE_MIN_VERSION}, then re-run.`
+		`anon-pi: netcage is too old (${gotDesc}); anon-pi needs ` +
+		`>= ${NETCAGE_MIN_VERSION} (for its \`--allow\` flag, renamed from ` +
+		`\`--allow-direct\` in netcage 0.12.0, AND its uid-scoped store, so running ` +
+		`as \`${ANON_ACCOUNT}\` does not collide with your login user's store). ` +
+		`Upgrade netcage to >= ${NETCAGE_MIN_VERSION}, then re-run.`
 	);
 }
 
@@ -5841,5 +5849,5 @@ ENVIRONMENT
 
 PLATFORM
   Linux only (via netcage's netns/nft jail). On macOS/Windows it works only
-  inside a Linux VM, where --allow-direct to a LAN model is VM-boundary-sensitive.
+  inside a Linux VM, where --allow to a LAN model is VM-boundary-sensitive.
 `;

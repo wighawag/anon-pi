@@ -93,7 +93,7 @@ function fakeBin(opts: {accountHome?: string; torSocks5?: boolean}): string {
 		join(bin, 'netcage'),
 		`#!/bin/sh\n` +
 			`if [ "$1" = detect-proxy ]; then printf '%s' '${detect}'; exit 0; fi\n` +
-			`if [ "$1" = --version ]; then echo 'netcage 0.11.0'; exit 0; fi\n` +
+			`if [ "$1" = --version ]; then echo 'netcage 0.12.0'; exit 0; fi\n` +
 			`echo "TRIPWIRE: real netcage $1 was invoked" >&2\nexit 97\n`,
 	);
 	// `sudo` is the AS-ACCOUNT crossing (real: `sudo -u <account> -i <anon-pi>

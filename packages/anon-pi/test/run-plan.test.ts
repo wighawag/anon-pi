@@ -137,7 +137,7 @@ describe('resolveRunPlan — modes', () => {
 		expect(p.netcageArgs).not.toContain('-it');
 		// but the forced-egress flags are STILL present (see the invariant suite)
 		expect(p.netcageArgs).toContain('--proxy');
-		expect(p.netcageArgs).toContain('--allow-direct');
+		expect(p.netcageArgs).toContain('--allow');
 	});
 
 	it('a pi session-resume launch (no project) cwds at the projects ROOT, INTERACTIVE', () => {
@@ -355,10 +355,10 @@ describe('resolveRunPlan — durable (the `container` noun: no --rm)', () => {
 		);
 	});
 
-	it('KEEPS forced egress: --proxy + EXACTLY one --allow-direct, unchanged', () => {
+	it('KEEPS forced egress: --proxy + EXACTLY one --allow, unchanged', () => {
 		const args = durable().netcageArgs;
 		expect(args).toContain('--proxy');
-		expect(args.filter((a) => a === '--allow-direct')).toHaveLength(1);
+		expect(args.filter((a) => a === '--allow')).toHaveLength(1);
 	});
 
 	it('freezes the cwd into the plan (the create-time mode word)', () => {
@@ -447,7 +447,7 @@ describe('resolveRunPlan — seed-if-fresh (per machine home)', () => {
 
 describe('resolveRunPlan — forced egress (HARD invariant, EVERY mode)', () => {
 	// every mode that composes a netcage argv must carry --proxy + exactly one
-	// --allow-direct and nothing that could leak.
+	// --allow and nothing that could leak.
 	const modes: Array<Partial<LaunchIntent>> = [
 		{mode: 'pi', project: 'recon'},
 		{mode: 'pi', project: '.'},
@@ -459,15 +459,15 @@ describe('resolveRunPlan — forced egress (HARD invariant, EVERY mode)', () => 
 		{mode: 'shell', mountParent: '/host/dev', project: undefined},
 	];
 
-	it('EVERY composed argv carries --proxy <p> and exactly one --allow-direct <llm>', () => {
+	it('EVERY composed argv carries --proxy <p> and exactly one --allow <llm>', () => {
 		for (const over of modes) {
 			const p = launch(over);
 			const args = p.netcageArgs;
 			const pi = args.indexOf('--proxy');
 			expect(pi).toBeGreaterThan(-1);
 			expect(args[pi + 1]).toBe('socks5h://127.0.0.1:9050');
-			expect(args.filter((a) => a === '--allow-direct')).toHaveLength(1);
-			const di = args.indexOf('--allow-direct');
+			expect(args.filter((a) => a === '--allow')).toHaveLength(1);
+			const di = args.indexOf('--allow');
 			expect(args[di + 1]).toBe('192.168.1.150:8080');
 		}
 	});
@@ -494,14 +494,14 @@ describe('resolveRunPlan — forced egress (HARD invariant, EVERY mode)', () => 
 		).toThrow(AnonPiError);
 	});
 
-	it('normalizes a URL-form llm for --allow-direct (strips scheme/path)', () => {
+	it('normalizes a URL-form llm for --allow (strips scheme/path)', () => {
 		for (const llm of [
 			'http://192.168.1.150:8080',
 			'http://192.168.1.150:8080/v1',
 			'192.168.1.150:8080',
 		]) {
 			const args = launch({llmDirect: llm}).netcageArgs;
-			const di = args.indexOf('--allow-direct');
+			const di = args.indexOf('--allow');
 			expect(args[di + 1]).toBe('192.168.1.150:8080');
 		}
 	});

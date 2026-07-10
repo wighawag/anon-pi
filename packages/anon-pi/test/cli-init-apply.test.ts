@@ -60,7 +60,7 @@ function apply(anonHome: string, payload: unknown) {
 
 /**
  * A temp bin dir on PATH holding a FAKE `netcage` whose `images --format json`
- * reports the given tags, `--version` answers 0.11.0, and everything else (incl.
+ * reports the given tags, `--version` answers 0.12.0, and everything else (incl.
  * `build`) is a tripwire (we only assert the exists-check dispatch here).
  */
 function fakeNetcageBin(tags: string[]): string {
@@ -70,7 +70,7 @@ function fakeNetcageBin(tags: string[]): string {
 		join(bin, 'netcage'),
 		`#!/bin/sh\n` +
 			`if [ "$1" = images ]; then printf '%s' '${images}'; exit 0; fi\n` +
-			`if [ "$1" = --version ]; then echo 'netcage 0.11.0'; exit 0; fi\n` +
+			`if [ "$1" = --version ]; then echo 'netcage 0.12.0'; exit 0; fi\n` +
 			`echo "TRIPWIRE: netcage $1" >&2; exit 97\n`,
 	);
 	chmodSync(join(bin, 'netcage'), 0o755);
