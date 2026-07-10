@@ -68,6 +68,8 @@ beforeAll(() => {
 	// a fake `netcage` that appends its argv (JSON) to $ANON_PI_ARGV_LOG then
 	// exits 0. `netcage --help` (the install probe) and `netcage ps` (the kept
 	// query) must also succeed; the query prints nothing (an empty listing).
+	// `netcage --version` prints a version >= NETCAGE_MIN_VERSION so the
+	// launch-time netcage-version gate passes (a jail-entering spawn probes it).
 	const nc = join(fakeBin, 'netcage');
 	writeFileSync(
 		nc,
@@ -75,6 +77,7 @@ beforeAll(() => {
 			'#!/usr/bin/env node',
 			'const fs = require("fs");',
 			'const argv = process.argv.slice(2);',
+			'if (argv[0] === "--version") { process.stdout.write("netcage 0.12.0\\n"); process.exit(0); }',
 			'if (argv[0] === "--help") process.exit(0);',
 			'if (argv[0] === "ps") process.exit(0);', // empty kept listing
 			'if (process.env.ANON_PI_ARGV_LOG) {',
@@ -99,7 +102,7 @@ describe('anon-pi <project> <pi-args…> (headless: runs without a TTY)', () => 
 		expect(argv.slice(-3)).toEqual(['pi', '-p', 'do a thing']);
 	});
 
-	it('the composed argv ALWAYS carries --proxy + the one --allow-direct (forced egress)', () => {
+	it('the composed argv ALWAYS carries --proxy + the one --allow (forced egress)', () => {
 		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
 		const r = run(['recon', '-p', 'x'], {home});
 		expect(r.status).toBe(0);
@@ -107,8 +110,8 @@ describe('anon-pi <project> <pi-args…> (headless: runs without a TTY)', () => 
 		const pi = argv.indexOf('--proxy');
 		expect(pi).toBeGreaterThan(-1);
 		expect(argv[pi + 1]).toBe('socks5h://127.0.0.1:1080');
-		expect(argv.filter((a) => a === '--allow-direct')).toHaveLength(1);
-		const di = argv.indexOf('--allow-direct');
+		expect(argv.filter((a) => a === '--allow')).toHaveLength(1);
+		const di = argv.indexOf('--allow');
 		expect(argv[di + 1]).toBe('192.168.1.150:8080');
 	});
 
@@ -123,13 +126,16 @@ describe('anon-pi <project> <pi-args…> (headless: runs without a TTY)', () => 
 
 	it('propagates a non-zero netcage exit code', () => {
 		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
-		// a netcage that exits 7 for `run`
+		// a netcage whose `run` exits 7, but whose `--version` still reports a
+		// satisfying version so the launch-time gate passes and the exit-7 `run`
+		// is actually reached (the gate must not mask exit-code propagation).
 		const nc = join(fakeBin, 'netcage');
 		writeFileSync(
 			nc,
 			[
 				'#!/usr/bin/env node',
 				'const argv = process.argv.slice(2);',
+				'if (argv[0] === "--version") { process.stdout.write("netcage 0.12.0\\n"); process.exit(0); }',
 				'if (argv[0] === "--help" || argv[0] === "ps") process.exit(0);',
 				'process.exit(7);',
 			].join('\n'),
@@ -144,6 +150,7 @@ describe('anon-pi <project> <pi-args…> (headless: runs without a TTY)', () => 
 				'#!/usr/bin/env node',
 				'const fs = require("fs");',
 				'const argv = process.argv.slice(2);',
+				'if (argv[0] === "--version") { process.stdout.write("netcage 0.12.0\\n"); process.exit(0); }',
 				'if (argv[0] === "--help" || argv[0] === "ps") process.exit(0);',
 				'if (process.env.ANON_PI_ARGV_LOG) fs.appendFileSync(process.env.ANON_PI_ARGV_LOG, JSON.stringify(argv) + "\\n");',
 				'process.exit(0);',
@@ -397,5 +404,111 @@ describe('-i / --image (ephemeral per-launch image override)', () => {
 		expect(r.stdout).toContain('ephemeral');
 		// the store boundary (no auto-pull) is stated so a "not found" is understood.
 		expect(r.stdout.toLowerCase()).toContain('auto-pull');
+	});
+});
+
+// The LAUNCH-TIME netcage-version gate: a jail-entering launch probes `netcage
+// --version` at the spawn seam and REFUSES (remediation + non-zero exit) BEFORE
+// spawning `netcage run` with `--allow` when netcage is below NETCAGE_MIN_VERSION
+// (0.12.0), ABSENT, or an UNPARSEABLE version. Reuses the SAME pure helpers as
+// the hardened preflight, so the parse/compare + remediation text stay
+// single-sourced. Each case uses its OWN fake `netcage` (a distinct temp bin) so
+// the `--version` answer is scriptable per-test; a gate-refused launch must NOT
+// record a `run` argv (it never reached the spawn).
+describe('launch-time netcage-version gate (refuses old/absent/unparseable)', () => {
+	// A fake `netcage` whose `--version` prints `versionLine` (or, when undefined,
+	// exits non-zero so probeNetcageVersion sees it as ABSENT). Records any `run`
+	// argv to its own log, so a test can assert the launch did NOT spawn.
+	function gateBin(versionLine: string | undefined): {
+		bin: string;
+		log: string;
+	} {
+		const bin = mkdtempSync(join(tmpdir(), 'anon-pi-gatebin-'));
+		const log = join(bin, 'argv.log');
+		const versionBranch =
+			versionLine === undefined
+				? 'if (argv[0] === "--version") process.exit(1);' // absent: probe fails
+				: `if (argv[0] === "--version") { process.stdout.write(${JSON.stringify(
+						versionLine + '\n',
+					)}); process.exit(0); }`;
+		writeFileSync(
+			join(bin, 'netcage'),
+			[
+				'#!/usr/bin/env node',
+				'const fs = require("fs");',
+				'const argv = process.argv.slice(2);',
+				versionBranch,
+				'if (argv[0] === "--help") process.exit(0);',
+				'if (argv[0] === "ps") process.exit(0);',
+				`fs.appendFileSync(${JSON.stringify(
+					log,
+				)}, JSON.stringify(argv) + "\\n");`,
+				'process.exit(0);',
+			].join('\n'),
+			{mode: 0o755},
+		);
+		return {bin, log};
+	}
+
+	function runWithNetcage(versionLine: string | undefined): {
+		status: number | null;
+		stderr: string;
+		ranRun: boolean;
+	} {
+		const {bin, log} = gateBin(versionLine);
+		const home = mkdtempSync(join(tmpdir(), 'anon-pi-home-'));
+		const r = spawnSync(process.execPath, [cli, 'recon', '-p', 'x'], {
+			encoding: 'utf8',
+			env: {
+				...process.env,
+				PATH: `${bin}:${process.env.PATH ?? ''}`,
+				ANON_PI_IMAGE: 'my/pi:tag',
+				ANON_PI_LLM: '192.168.1.150:8080',
+				ANON_PI_PROXY: 'socks5h://127.0.0.1:1080',
+				ANON_PI_HOME: home,
+			},
+		});
+		const ranRun = existsSync(log)
+			? readFileSync(log, 'utf8')
+					.split('\n')
+					.some((l) => l.startsWith('["run"'))
+			: false;
+		return {status: r.status, stderr: r.stderr, ranRun};
+	}
+
+	it('REFUSES a too-old netcage (0.11.1) with the remediation + non-zero exit', () => {
+		const r = runWithNetcage('netcage 0.11.1');
+		expect(r.status).not.toBe(0);
+		expect(r.stderr).toContain('too old');
+		expect(r.stderr).toContain('0.12.0');
+		expect(r.stderr).toContain('--allow');
+		// it never spawned `netcage run` with the new flag.
+		expect(r.ranRun).toBe(false);
+	});
+
+	it('REFUSES an ABSENT netcage (probe fails) with the not-found remediation', () => {
+		const r = runWithNetcage(undefined);
+		expect(r.status).not.toBe(0);
+		expect(r.stderr).toContain('0.12.0');
+		expect(r.ranRun).toBe(false);
+	});
+
+	it('REFUSES an UNPARSEABLE version (fail-loud, never a silent pass)', () => {
+		const r = runWithNetcage('netcage version ?');
+		expect(r.status).not.toBe(0);
+		expect(r.stderr).toContain('could not parse');
+		expect(r.ranRun).toBe(false);
+	});
+
+	it('PROCEEDS on exactly the floor (0.12.0): the gate is a floor, not a pin', () => {
+		const r = runWithNetcage('netcage 0.12.0');
+		expect(r.status).toBe(0);
+		expect(r.ranRun).toBe(true);
+	});
+
+	it('PROCEEDS on a NEWER netcage (0.13.0)', () => {
+		const r = runWithNetcage('netcage 0.13.0');
+		expect(r.status).toBe(0);
+		expect(r.ranRun).toBe(true);
 	});
 });

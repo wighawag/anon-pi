@@ -33,12 +33,12 @@ const allPass: HardenedPreflightProbes = {
 	lingerEnabled: true,
 	tunAccessible: true,
 	xdgRuntimeDirPresent: true,
-	netcageVersion: 'netcage 0.11.0',
+	netcageVersion: 'netcage 0.12.0',
 };
 
 describe('NETCAGE_MIN_VERSION: the version floor is ONE named constant', () => {
-	it('is the confirmed 0.11.0 (uid-scoped store, netcage ADR-0017)', () => {
-		expect(NETCAGE_MIN_VERSION).toBe('0.11.0');
+	it('is the confirmed 0.12.0 (the `--allow` flag rename + uid-scoped store)', () => {
+		expect(NETCAGE_MIN_VERSION).toBe('0.12.0');
 	});
 });
 
@@ -80,13 +80,14 @@ describe('compareVersionTriples: the comparator contract', () => {
 
 describe('netcageVersionSatisfies: >= floor, with unparseable = not satisfied', () => {
 	it('passes on exactly the floor and above', () => {
-		expect(netcageVersionSatisfies('0.11.0')).toBe(true);
-		expect(netcageVersionSatisfies('0.11.1')).toBe(true);
+		expect(netcageVersionSatisfies('0.12.0')).toBe(true);
+		expect(netcageVersionSatisfies('0.12.1')).toBe(true);
 		expect(netcageVersionSatisfies('1.0.0')).toBe(true);
-		expect(netcageVersionSatisfies('netcage 0.12.3')).toBe(true);
+		expect(netcageVersionSatisfies('netcage 0.13.3')).toBe(true);
 	});
 
-	it('FAILS below the floor (e.g. 0.10.0)', () => {
+	it('FAILS below the floor (e.g. 0.11.1, the old --allow-direct release)', () => {
+		expect(netcageVersionSatisfies('0.11.1')).toBe(false);
 		expect(netcageVersionSatisfies('0.10.0')).toBe(false);
 		expect(netcageVersionSatisfies('0.9.99')).toBe(false);
 	});
@@ -210,21 +211,23 @@ describe('evaluateHardenedPreflight: netcage version pass/fail/absent/unparseabl
 	it('passes netcage exactly at the floor', () => {
 		const res = evaluateHardenedPreflight({
 			...allPass,
-			netcageVersion: '0.11.0',
+			netcageVersion: '0.12.0',
 		});
 		expect(res.ok).toBe(true);
 	});
 
-	it('FAILS on a too-old netcage (0.10.0) with the too-old remediation', () => {
+	it('FAILS on a too-old netcage (0.11.1) with the too-old remediation', () => {
 		const res = evaluateHardenedPreflight({
 			...allPass,
-			netcageVersion: '0.10.0',
+			netcageVersion: '0.11.1',
 		});
 		const f = res.failures.find((x) => x.id === 'netcage-version');
 		expect(f).toBeDefined();
-		expect(f?.remediation).toBe(netcageVersionRemediation('0.10.0'));
+		expect(f?.remediation).toBe(netcageVersionRemediation('0.11.1'));
 		expect(f?.remediation).toContain('too old');
 		expect(f?.remediation).toContain(NETCAGE_MIN_VERSION);
+		// the WHY now names the `--allow` flag rename alongside the uid-scoped store.
+		expect(f?.remediation).toContain('--allow');
 	});
 
 	it('FAILS LOUD when netcage is ABSENT (undefined) with the not-found remediation', () => {
@@ -252,7 +255,7 @@ describe('evaluateHardenedPreflight: netcage version pass/fail/absent/unparseabl
 
 	it('absent and too-old give DISTINCT remediations', () => {
 		expect(netcageVersionRemediation(undefined)).not.toBe(
-			netcageVersionRemediation('0.10.0'),
+			netcageVersionRemediation('0.11.1'),
 		);
 	});
 });
@@ -266,7 +269,7 @@ describe('evaluateHardenedPreflight: composition (ordered list of all failures)'
 			lingerEnabled: false,
 			tunAccessible: false,
 			xdgRuntimeDirPresent: false,
-			netcageVersion: '0.10.0',
+			netcageVersion: '0.11.1',
 		});
 		expect(res.ok).toBe(false);
 		expect(res.failures.map((f) => f.id)).toEqual([

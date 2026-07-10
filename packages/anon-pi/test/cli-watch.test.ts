@@ -76,9 +76,11 @@ function run(args: string[], home: string) {
 
 beforeAll(() => {
 	fakeBin = mkdtempSync(join(tmpdir(), 'anon-pi-watchbin-'));
-	// The fake netcage: `--help`/`ps` succeed (install probe + kept query); a
-	// `run` prints the canned JSONL stream to STDOUT (as pi would inside the jail)
-	// and records its argv.
+	// The fake netcage: `--help`/`ps` succeed (install probe + kept query);
+	// `--version` reports >= NETCAGE_MIN_VERSION so the launch-time gate passes
+	// (the WATCH path is jail-entering, so it probes the version too); a `run`
+	// prints the canned JSONL stream to STDOUT (as pi would inside the jail) and
+	// records its argv.
 	const nc = join(fakeBin, 'netcage');
 	writeFileSync(
 		nc,
@@ -86,6 +88,7 @@ beforeAll(() => {
 			'#!/usr/bin/env node',
 			'const fs = require("fs");',
 			'const argv = process.argv.slice(2);',
+			'if (argv[0] === "--version") { process.stdout.write("netcage 0.12.0\\n"); process.exit(0); }',
 			'if (argv[0] === "--help") process.exit(0);',
 			'if (argv[0] === "ps") process.exit(0);',
 			'if (process.env.ANON_PI_ARGV_LOG) {',

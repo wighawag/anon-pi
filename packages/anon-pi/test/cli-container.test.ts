@@ -39,6 +39,8 @@ let argvLog: string;
 
 // A fake `netcage` that:
 //   - `--help` (the install probe) exits 0
+//   - `--version` prints a version >= NETCAGE_MIN_VERSION (the launch-time gate
+//     probes it before a jail-entering create/enter spawns `--allow`)
 //   - `ps …` prints $ANON_PI_PS_JSON (the scripted durable-box listing), else []
 //   - `inspect <ref> --format {{.ImageName}}` prints $ANON_PI_INSPECT_IMAGE (the
 //     image ref `container list` reads back per box), else empty
@@ -54,6 +56,7 @@ function writeFakeNetcage(exitCode = 0): void {
 			'const fs = require("fs");',
 			'const argv = process.argv.slice(2);',
 			'if (argv[0] === "--help") process.exit(0);',
+			'if (argv[0] === "--version") { process.stdout.write("netcage 0.12.0\\n"); process.exit(0); }',
 			'if (process.env.ANON_PI_ARGV_LOG) {',
 			'  fs.appendFileSync(process.env.ANON_PI_ARGV_LOG, JSON.stringify(argv) + "\\n");',
 			'}',
@@ -185,14 +188,14 @@ describe('container create — composes a DURABLE launch (no --rm, named, labell
 		expect(argv[w + 1]).toBe('/projects/proj');
 	});
 
-	it('keeps forced egress intact: --proxy + EXACTLY one --allow-direct', () => {
+	it('keeps forced egress intact: --proxy + EXACTLY one --allow', () => {
 		const home = tempHome();
 		run(['container', 'create', 'newbox', '--shell'], {home});
 		const argv = argvOf('run')!;
 		const pi = argv.indexOf('--proxy');
 		expect(argv[pi + 1]).toBe('socks5h://127.0.0.1:1080');
-		expect(argv.filter((a) => a === '--allow-direct')).toHaveLength(1);
-		expect(argv[argv.indexOf('--allow-direct') + 1]).toBe('192.168.1.150:8080');
+		expect(argv.filter((a) => a === '--allow')).toHaveLength(1);
+		expect(argv[argv.indexOf('--allow') + 1]).toBe('192.168.1.150:8080');
 	});
 
 	it('freezes the image via the launch chain (-i wins over the env fallback)', () => {
@@ -253,10 +256,8 @@ describe('container enter — resumes a STOPPED box via `netcage start`', () => 
 		expect(argv![argv!.indexOf('--proxy') + 1]).toBe(
 			'socks5h://127.0.0.1:1080',
 		);
-		expect(argv!.filter((a) => a === '--allow-direct')).toHaveLength(1);
-		expect(argv![argv!.indexOf('--allow-direct') + 1]).toBe(
-			'192.168.1.150:8080',
-		);
+		expect(argv!.filter((a) => a === '--allow')).toHaveLength(1);
+		expect(argv![argv!.indexOf('--allow') + 1]).toBe('192.168.1.150:8080');
 	});
 });
 

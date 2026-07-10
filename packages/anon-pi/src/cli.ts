@@ -8,7 +8,7 @@
 // All the DECISIONS live in the pure module (anon-pi.ts); this file only does
 // I/O: fs reads/mkdirs, the netcage query, the spawn, and the TTY discipline.
 // The forced-egress invariant is the RunPlan's guarantee: the composed argv
-// ALWAYS carries --proxy + the one --allow-direct; the CLI never strips or adds
+// ALWAYS carries --proxy + the one --allow; the CLI never strips or adds
 // egress.
 
 import {
@@ -118,6 +118,8 @@ import {
 	HARDENED_HOME_MODE,
 	type InitApplyPayload,
 	evaluateHardenedPreflight,
+	netcageVersionSatisfies,
+	netcageVersionRemediation,
 	planHardeningStep,
 	parsePersonaArgs,
 	planPersonaAdd,
@@ -1770,7 +1772,7 @@ function resolveDurableLaunchIntent(
  * intent.durable so resolveRunPlan omits `--rm`, `--name`s the container, and
  * stamps the `anon-pi.container` label. FAILS FAST if a box named <name> already
  * exists (never re-enters or clobbers). Forced egress is intact (the plan owns
- * the proxy + the one --allow-direct); a durable box is still fully jailed.
+ * the proxy + the one --allow); a durable box is still fully jailed.
  */
 function containerCreate(
 	env: AnonPiEnv,
@@ -1841,7 +1843,7 @@ function containerCreate(
  * `container enter <name>`: re-enter a STOPPED durable box via `netcage start`,
  * which re-stands the jail at the box's FROZEN cwd (baked in at create) and
  * attaches. Re-supplies the forced-egress args (`netcage start` stands up the
- * jail, so it needs --proxy + the one --allow-direct just like `run`); no `-i`
+ * jail, so it needs --proxy + the one --allow just like `run`); no `-i`
  * and no re-cwd (the parser already refuses them: image + cwd are frozen). Three
  * refusals: an UNKNOWN name errors (never a silent success), and an
  * already-RUNNING box is REFUSED with guidance (it is a live instance; reach it
@@ -1905,7 +1907,7 @@ function containerEnter(env: AnonPiEnv, name: string): number {
 		'start',
 		'--proxy',
 		proxy,
-		'--allow-direct',
+		'--allow',
 		hostPortKey(llm),
 		'-it',
 		box.ref,
@@ -2511,7 +2513,7 @@ WHAT IT DOES
   2. LOCAL MODEL: captures host:port, probes it, then IMPORTS models. It merges
      your pi config's matching provider ([configured], well-tuned) with the
      endpoint's live /v1/models ([server]); you pick which to import + the
-     default. Only the provider served by this endpoint (the one --allow-direct
+     default. Only the provider served by this endpoint (the one --allow
      hole) is ever read, so no other provider or key can enter the seed. Writes
      models.json + a settings seed (the default-model selection).
   3. IMAGE: pick a shipped Dockerfile (built via podman), an existing ref, or skip.
@@ -3041,7 +3043,7 @@ interface LlmStepResult {
 /**
  * The LOCAL MODEL step: capture host:port (pre-filled from config), probe TCP
  * reachability, then IMPORT models. It merges TWO sources, both scoped to the
- * endpoint (the one `--allow-direct` hole, so no other provider can enter the
+ * endpoint (the one `--allow` hole, so no other provider can enter the
  * seed): the host `~/.pi/agent/models.json` provider whose baseUrl matches the
  * endpoint (well-tuned entries, marked [configured]) and the endpoint's live
  * `/v1/models` (bare ids, marked [server]). The user picks which to import and
@@ -4179,7 +4181,7 @@ function probeTcp(host: string, port: number): boolean {
  * undefined on any failure (unreachable / timeout / non-JSON) — init then falls
  * back to manual entry. This is a DIRECT LAN fetch on the operator's host at
  * init time (not inside the jail); it only ever touches the local-model
- * endpoint, the same host:port that becomes the one `--allow-direct` hole.
+ * endpoint, the same host:port that becomes the one `--allow` hole.
  */
 function fetchModelsListing(host: string, port: number): unknown {
 	const timeoutMs = 3000;
@@ -5041,7 +5043,7 @@ function netcageMissing(): number {
  * `run`), so `forward`/`ports`/`snapshot` can find the RUNNING container by
  * machine + project. The key is base64'd (launchIdentityKey embeds newlines) to
  * keep it a single safe label value. This is ADDITIVE and touches NO egress flag
- * (the RunPlan owns --proxy/--allow-direct).
+ * (the RunPlan owns --proxy/--allow).
  */
 function withKeyLabel(netcageArgs: string[], key: string): string[] {
 	const enc = Buffer.from(key, 'utf8').toString('base64');
@@ -5101,11 +5103,48 @@ function firstLine(path: string): string | undefined {
 	}
 }
 
+/**
+ * LAUNCH-TIME netcage-version gate: refuse a jail-entering launch when the
+ * installed netcage is below NETCAGE_MIN_VERSION (0.12.0), ABSENT, or an
+ * UNPARSEABLE version. anon-pi composes the direct hole as `--allow <host:port>`
+ * (renamed from `--allow-direct` in netcage 0.12.0), so a launch against an older
+ * netcage would otherwise die with a raw `unknown flag "--allow"` and no anon-pi
+ * guidance. Reuses the SAME pure helpers as the hardened preflight
+ * (probeNetcageVersion + netcageVersionSatisfies + netcageVersionRemediation), so
+ * the parse/compare logic and the remediation text stay single-sourced. FAIL-LOUD:
+ * an absent probe (`undefined`) is treated as a failure, never a silent pass
+ * (netcageVersionRemediation(undefined) is the distinct "not found" message).
+ *
+ * Returns undefined when the floor is met (the launch proceeds); returns the
+ * remediation STRING to print when it is not (the caller prints it to stderr and
+ * refuses with a non-zero exit). Only the three jail-entering spawns (run / watch
+ * / `container enter` -> `netcage start`, all `enteringJail: true`) call this; the
+ * non-jail netcage verbs (`forward`, `container rm`, `container commit`) carry NO
+ * `--allow` and are NOT gated, matching the task scope.
+ */
+function netcageVersionGate(): string | undefined {
+	const found = probeNetcageVersion();
+	if (found === undefined || !netcageVersionSatisfies(found)) {
+		return netcageVersionRemediation(found);
+	}
+	return undefined;
+}
+
 /** Spawn netcage with inherited stdio; propagate its exit code. */
 function spawnNetcage(
 	netcageArgs: string[],
 	opts: {enteringJail?: boolean} = {},
 ): number {
+	// A jail-entering launch carries the `--allow` flag (netcage >= 0.12.0). Gate
+	// on the netcage version BEFORE spawning, so an old/absent netcage gets the
+	// remediation + a non-zero exit instead of a raw `unknown flag "--allow"`.
+	if (opts.enteringJail) {
+		const remediation = netcageVersionGate();
+		if (remediation !== undefined) {
+			process.stderr.write(remediation + '\n');
+			return 1;
+		}
+	}
 	// Explain the pause on a LAUNCH: netcage sets up the jail (netns, firewall,
 	// DNS, container start) BEFORE pi paints, so without this line the user sees
 	// only a blinking cursor. Goes to stderr (never pollutes piped stdout), and is
@@ -5148,6 +5187,16 @@ function spawnNetcageWatch(
 	netcageArgs: string[],
 	opts: {enteringJail?: boolean} = {},
 ): Promise<number> {
+	// Same launch-time netcage-version gate as spawnNetcage (this path also carries
+	// `--allow`): refuse an old/absent netcage with the remediation + non-zero exit
+	// BEFORE spawning.
+	if (opts.enteringJail) {
+		const remediation = netcageVersionGate();
+		if (remediation !== undefined) {
+			process.stderr.write(remediation + '\n');
+			return Promise.resolve(1);
+		}
+	}
 	if (opts.enteringJail) {
 		process.stderr.write(
 			'anon-pi: entering the netcage jail (setting up forced-egress)\u2026\n',

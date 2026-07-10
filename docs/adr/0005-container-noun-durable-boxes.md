@@ -76,7 +76,7 @@ noun, which the user names on purpose.
 ### Invariants kept
 
 - **Forced egress is UNCHANGED.** A durable box is still FULLY jailed: the plan
-  composes `--proxy <p>` + exactly one `--allow-direct <llm>` and the two
+  composes `--proxy <p>` + exactly one `--allow <llm>` and the two
   invariant mounts EXACTLY as a throwaway launch. `container` never weakens the
   jail; the ONLY difference from a throwaway plan is the omitted `--rm` plus a
   container name + a durable label.
