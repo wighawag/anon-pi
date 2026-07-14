@@ -50,14 +50,14 @@ gate when you changed code.
 
 ## Build / test gate
 
-The acceptance gate (`.dorfl.json` `verify`) is:
+The acceptance gate (`dorfl.json` `verify`) is:
 
 ```
 pnpm format:check && pnpm changeset status --since=main && pnpm -r build && pnpm -r test
 ```
 
 Env-prep (run once before the first verify on a fresh worktree) is
-`pnpm install --frozen-lockfile` (`.dorfl.json` `prepare`). Keep install OUT of
+`pnpm install --frozen-lockfile` (`dorfl.json` `prepare`). Keep install OUT of
 `verify`.
 
 `pnpm changeset status --since=main` is the changeset check: it EXITS NON-ZERO
