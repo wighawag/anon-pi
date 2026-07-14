@@ -3,7 +3,7 @@ title: A `container` noun - explicit durable named boxes (create / enter / list 
 slug: container-noun
 ---
 
-> Launch snapshot - records intent at creation, NOT maintained. Current truth: `docs/adr/` (decisions) + the code; remaining work: `work/tasks/ready/` tasks. (The technical-detail sections below are trimmed by `to-task` once the work is tasked - they move into tasks/ADRs and this prd settles to its durable framing: Problem / Solution / User Stories / Out of Scope.)
+> Launch snapshot - records intent at creation, NOT maintained. Current truth: `docs/adr/` (decisions) + the code; remaining work: `work/tasks/ready/` tasks. (The technical-detail sections below are trimmed by `to-task` once the work is tasked - they move into tasks/ADRs and this spec settles to its durable framing: Problem / Solution / User Stories / Out of Scope.)
 
 ## Problem Statement
 
@@ -119,7 +119,7 @@ throwaway; durable mutable continuity is now reachable ONLY through the
 
 ## Further Notes
 
-- The `container-create-flow.md` idea note is now discharged by this tasked prd +
+- The `container-create-flow.md` idea note is now discharged by this tasked spec +
   the container ADR: delete it once `container-noun-parse-and-plan` lands the ADR
   carrying its signal (the ADR must be self-contained, not a back-pointer).
 - The `container-flag-shorthand.md` idea note is INDEPENDENT and survives (a

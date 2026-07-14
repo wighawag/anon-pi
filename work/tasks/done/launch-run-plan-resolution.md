@@ -106,7 +106,7 @@ carries `--proxy` + exactly the one `--allow-direct`.
 Goal: replace the old per-workdir `buildRunPlan` with the per-machine RunPlan
 resolver in `src/anon-pi.ts`. Compose the netcage argv for every mode (menu / pi
 `<project>` / shell `[project]` / `--mount <parent> [project]`, plus the `.` root
-token). The design decision (from the prd): TWO invariant mounts ALWAYS
+token). The design decision (from the spec): TWO invariant mounts ALWAYS
 (`<home>:/root` and `<projects-root>:/projects`); `--mount` adds EXACTLY the
 parent mount at `/work` and re-roots cwd there, changing nothing else (this
 sidesteps podman mount immutability). Throwaway (`--rm`) is the DEFAULT; `--keep`

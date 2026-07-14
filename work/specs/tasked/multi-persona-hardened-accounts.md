@@ -9,7 +9,7 @@ needsAnswers: false
 
 ## Confirmed decisions
 
-All decisions are settled; `needsAnswers` is cleared and the PRD is ready to task. Durable rationale to move into an ADR at tasking (this PRD SUPERSEDES the single-account framing of `docs/adr/0006` — a new ADR extends/replaces it).
+All decisions are settled; `needsAnswers` is cleared and the spec is ready to task. Durable rationale to move into an ADR at tasking (this spec SUPERSEDES the single-account framing of `docs/adr/0006` — a new ADR extends/replaces it).
 
 0. **Two formerly-open items, now DECIDED:**
    - **subuid/subgid allocation = let `useradd` auto-allocate.** anon-pi emits NO explicit `/etc/subuid`+`/etc/subgid` range line in the generated Tier-2 script; it trusts `useradd -m` to find a free non-overlapping block (modern shadow-utils via `SUB_UID_COUNT`/`SUB_GID_COUNT` in `/etc/login.defs`). This removes the range-collision math from anon-pi entirely. v1's single-account generator (`hardened-tier2-script-generator`, `SUBID_RANGE_START`/`SUBID_RANGE_COUNT`) is UPDATED to match (drop the hard-coded range), so the default `anon` and every additional persona use one uniform auto-allocation path. The preflight's "subuid/subgid ranges present" check still verifies a range EXISTS for the account (it just no longer asserts a specific start).
@@ -38,7 +38,7 @@ All decisions are settled; `needsAnswers` is cleared and the PRD is ready to tas
 
 ## Problem Statement
 
-v1 (prd `hardened-dedicated-account-deployment`, ADR-0006) runs ALL anonymized work under ONE shared `anon` account. That gives a single DAC wall between your login user and your anonymized work, but every persona-like activity shares one home, one netcage store, one login name, and — critically — ONE egress. Two lines of work that should be UNLINKABLE from each other (e.g. two personas that each have their own email/identity) are, under v1, trivially linkable: same account, same exit IP. The single-account model has no notion of separate personas.
+v1 (spec `hardened-dedicated-account-deployment`, ADR-0006) runs ALL anonymized work under ONE shared `anon` account. That gives a single DAC wall between your login user and your anonymized work, but every persona-like activity shares one home, one netcage store, one login name, and — critically — ONE egress. Two lines of work that should be UNLINKABLE from each other (e.g. two personas that each have their own email/identity) are, under v1, trivially linkable: same account, same exit IP. The single-account model has no notion of separate personas.
 
 The most important missing isolation is EGRESS: if `anon`'s two activities exit through the same proxy/circuit, a network observer links them by exit IP regardless of the DAC wall (which only isolates on-host data, "an issue for a tool to run in"). Real persona separation needs each persona to have its own exit.
 
@@ -75,12 +75,12 @@ anon-pi implements no privilege-switching (it spawns `sudo`/`su`), never silentl
 
 ## Tasked
 
-This PRD has been tasked into `work/tasks/` (slugs: `persona-name-mapping-and-selection`, `persona-tier2-commands-generator`, `persona-tor-egress-composition`, `persona-add-verb-wiring`, `persona-as-launch-selection-wiring`, `persona-adr-and-docs`). The durable decisions move to `docs/adr/0007-multi-persona-hardened-accounts.md` (superseding ADR-0006) at build time. The Confirmed decisions above are retained as the durable framing those tasks and the ADR formalize.
+This spec has been tasked into `work/tasks/` (slugs: `persona-name-mapping-and-selection`, `persona-tier2-commands-generator`, `persona-tor-egress-composition`, `persona-add-verb-wiring`, `persona-as-launch-selection-wiring`, `persona-adr-and-docs`). The durable decisions move to `docs/adr/0007-multi-persona-hardened-accounts.md` (superseding ADR-0006) at build time. The Confirmed decisions above are retained as the durable framing those tasks and the ADR formalize.
 
 ## Out of Scope
 
 - **Persona identity/credentials (email, git config, keys).** Configured inside the persona's home (container/home config), not by anon-pi. anon-pi provides the isolated account + workspace + egress; the persona is what you configure in it.
-- **GUI apps in a persona.** A separate concern (mostly an image concern: a virtual-screen + VNC image), captured in `work/notes/ideas/gui-apps-via-virtual-screen-image.md`. Composes with a persona but does not gate this PRD.
+- **GUI apps in a persona.** A separate concern (mostly an image concern: a virtual-screen + VNC image), captured in `work/notes/ideas/gui-apps-via-virtual-screen-image.md`. Composes with a persona but does not gate this spec.
 - **Egress rotation / per-request IP changing.** No rotation knob. A persona = one endpoint; Tor's natural ~10-min circuit churn gives coarse per-persona drift for free, which suffices. Aggressive/per-request rotation is deliberately NOT built (it can worsen unlinkability and true per-request rotation does not cleanly exist).
 - **Tracking / enforcing BYO endpoint uniqueness.** anon-pi stores NO used-endpoint list and does not track which persona uses which endpoint (it cannot read across DAC walls). BYO uniqueness is a one-line warning + the user's responsibility (decision 6). A root-owned enforcement file is a possible FUTURE enhancement, not v1.
 - **An interactive typed persona-selection prompt (name out of shell history).** Considered and DEFERRED to the idea `persona-name-history-hygiene`; v1 takes the name as a plain `--as <name>` / `persona add <name>` argument.
@@ -91,7 +91,7 @@ This PRD has been tasked into `work/tasks/` (slugs: `persona-name-mapping-and-se
 
 ## Further Notes
 
-- **Supersedes ADR-0006's single-account decision.** ADR-0006 said "a single dedicated account named `anon`". This PRD generalizes to N persona accounts with `anon` as default; the tasking should write a new ADR that supersedes/extends ADR-0006 (account name is now per-persona; `ANON_ACCOUNT` becomes the DEFAULT, not the only, name; the loop guard, the Tier-2 generator, the preflight, and the config marker all parameterize by account).
+- **Supersedes ADR-0006's single-account decision.** ADR-0006 said "a single dedicated account named `anon`". This spec generalizes to N persona accounts with `anon` as default; the tasking should write a new ADR that supersedes/extends ADR-0006 (account name is now per-persona; `ANON_ACCOUNT` becomes the DEFAULT, not the only, name; the loop guard, the Tier-2 generator, the preflight, and the config marker all parameterize by account).
 - **Reuses the v1 machinery, parameterized by account.** The v1 pure pieces (`shouldRedirectToAnon`, `buildAnonSudoArgv`/`buildAnonSuFallback`, the Tier-2 command generator, `evaluateHardenedPreflight`, `planHardeningStep`) already take the account/paths as inputs; multi-persona mostly threads a chosen persona through them + adds `persona add` (with the `anon-<name>` mapping + Tor-username composition + the BYO warning) + the `--as` selection. NOTE the v1 Tier-2 generator changes shape here (decisions 0 + 8): drop the hard-coded subid range (let `useradd` auto-allocate) and emit copy-paste COMMANDS instead of a `#!/bin/sh` script file. The self-re-exec, never-silent-root, and fail-closed-egress invariants are unchanged.
 - **Tor isolation mechanism (for the tasking):** `IsolateSOCKSAuth` is Tor-default; distinct SOCKS username ⇒ distinct circuit/exit; the password is an ignored placeholder; idle circuits expire at `MaxCircuitDirtiness` (~600s) and rebuild on demand; cost per persona is negligible (circuit state in the single daemon). `persona add` injects the account name as the SOCKS username when it composes the persona's `proxy` URL at creation time (stored literally in the persona's own config.json); no Tor config change is required, and launch just reads the ordinary `proxy` field.
 - **Netcage is unchanged.** No netcage change is needed: it already forces one socks5h endpoint per launch, fail-closed. Multi-persona just supplies a different endpoint per persona. (Contrast v1, which also needed only netcage's uid-scoped store, still the case here.)

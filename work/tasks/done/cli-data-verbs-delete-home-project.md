@@ -22,7 +22,7 @@ In `src/cli.ts`, using the pure resolvers:
 
 Resolve the affected paths (machine home, project folder, per-machine session
 dirs for the project's `/projects/<name>` slug) via the pure module; the CLI does
-the confirm prompt + the actual `rm`. Match the behaviour table in the prd: a
+the confirm prompt + the actual `rm`. Match the behaviour table in the spec: a
 project delete drops that project's sessions everywhere but keeps the homes; a
 home delete drops one machine's convos but not the project files.
 
@@ -68,7 +68,7 @@ Goal: land `--delete-home [<machine>]` (drop a machine's home; default machine)
 and `--delete-project <project>` (drop the project's files AND its per-machine
 session dirs across homes) in `src/cli.ts`. Both confirm on TTY, take `--yes`, and
 abort non-TTY without `--yes`. Resolve the affected paths via the pure module; the
-CLI does the prompt + `rm`. Honour the prd behaviour table: delete-project drops
+CLI does the prompt + `rm`. Honour the spec behaviour table: delete-project drops
 that project's sessions everywhere but keeps the homes; delete-home drops one
 machine's convos but keeps project files.
 

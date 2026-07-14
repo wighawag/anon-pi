@@ -35,7 +35,7 @@ gate when you changed code.
   edit) still needs an entry — use `pnpm changeset add --empty`.
 - **Does NOT need a changeset (gate PASSES without one), and needs no gate run:**
   a change with NO git-tracked file under `packages/anon-pi/` — edits under
-  `work/` (PRDs, tasks, notes), root repo docs (`AGENTS.md`, top-level docs),
+  `work/` (specs, tasks, notes), root repo docs (`AGENTS.md`, top-level docs),
   CI/tooling config outside the package. Also gitignored package files
   (`dist/**`, the build-copied `packages/anon-pi/README.md`) do NOT count
   (`git diff` cannot see them). `changeset status` finds nothing to require and

@@ -29,7 +29,7 @@ Net: the GUI lives entirely on a virtual screen inside the jail; you view it thr
 
 ## Scope / relationship to other work
 
-- **Mostly image, minimal launcher.** Keep it OUT of the multi-persona PRD (`multi-persona-hardened-accounts`); it composes with a persona (a persona could use a GUI image) but does not depend on it and should not gate it.
+- **Mostly image, minimal launcher.** Keep it OUT of the multi-persona spec (`multi-persona-hardened-accounts`); it composes with a persona (a persona could use a GUI image) but does not depend on it and should not gate it.
 - Composes with the `save-image-on-exit` / image ideas (a GUI machine is just a machine on a GUI image).
 - Forced egress is unchanged: a GUI app's network still goes through the persona's proxy, fail-closed. The VNC port is a LOCAL host<->jail forward, not egress.
 

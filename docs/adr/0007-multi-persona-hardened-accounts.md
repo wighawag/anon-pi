@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Formalizes prd `multi-persona-hardened-accounts`. **Supersedes ADR-0006** (single dedicated `anon` account): the hardened deployment is now N dedicated persona accounts `anon-<name>`, with `anon` the DEFAULT persona (uniform "persona #0", not a special-cased always-present account). ADR-0006's decisions that are UNCHANGED (self-re-exec not setuid, always-redirect, sudo password kept by default, netcage's uid-scoped store) still hold, now parameterized per persona; only its "one canonical shared account named `anon`, pinned so it can never be re-forked" decision is replaced. See ADR-0006 (carries a superseded-by note pointing here).
+Accepted. Formalizes spec `multi-persona-hardened-accounts`. **Supersedes ADR-0006** (single dedicated `anon` account): the hardened deployment is now N dedicated persona accounts `anon-<name>`, with `anon` the DEFAULT persona (uniform "persona #0", not a special-cased always-present account). ADR-0006's decisions that are UNCHANGED (self-re-exec not setuid, always-redirect, sudo password kept by default, netcage's uid-scoped store) still hold, now parameterized per persona; only its "one canonical shared account named `anon`, pinned so it can never be re-forked" decision is replaced. See ADR-0006 (carries a superseded-by note pointing here).
 
 ## Context
 

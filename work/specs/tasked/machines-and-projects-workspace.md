@@ -4,7 +4,7 @@ slug: machines-and-projects-workspace
 humanOnly: true
 ---
 
-> Launch snapshot — records intent at creation, NOT maintained. Current truth: `docs/adr/` (decisions) + the code; remaining work: `work/tasks/ready/` tasks. (The technical-detail sections below are trimmed by `to-task` once the work is tasked — they move into tasks/ADRs and this prd settles to its durable framing: Problem / Solution / User Stories / Out of Scope.)
+> Launch snapshot — records intent at creation, NOT maintained. Current truth: `docs/adr/` (decisions) + the code; remaining work: `work/tasks/ready/` tasks. (The technical-detail sections below are trimmed by `to-task` once the work is tasked — they move into tasks/ADRs and this spec settles to its durable framing: Problem / Solution / User Stories / Out of Scope.)
 
 ## Problem Statement
 
@@ -159,7 +159,7 @@ Rework anon-pi into a **machines + projects** workspace, built on netcage v0.4.0
 
 ### Autonomy notes (the two gate axes)
 
-- **`humanOnly: true` (DECIDED).** A human must drive the TASKING of this prd.
+- **`humanOnly: true` (DECIDED).** A human must drive the TASKING of this spec.
   This is a foundational rework of anon-pi's whole CLI + workspace model with
   several deliberate cuts (the menu split, the throwaway-default, the global-
   projects-with-per-machine-conversations model, the `--mount`/`.` symmetry). The
@@ -167,7 +167,7 @@ Rework anon-pi into a **machines + projects** workspace, built on netcage v0.4.0
   the tasks' own gates — the resulting tasks may well be fully agent-buildable;
   the tasker decides each task's gate from its own build-nature.
 - **`needsAnswers`: OMITTED (resolved).** The two prior open questions are
-  DECIDED and OUT OF SCOPE for this prd (see Out of Scope): (a) a fully-stateless
+  DECIDED and OUT OF SCOPE for this spec (see Out of Scope): (a) a fully-stateless
   "no host state at all" mode (the old `--ephemeral`) is dropped for now; (b)
   baking an exploratory machine into an image (a `netcage commit` dependency /
   an anon-pi `bake` verb) is dropped for now. The spec is otherwise complete and
@@ -175,7 +175,7 @@ Rework anon-pi into a **machines + projects** workspace, built on netcage v0.4.0
 
 <!-- TASKED: the Implementation/Testing detail that was here has moved into the
      tasks (work/tasks/) and the durable rationale into docs/adr/0001-machines-
-     projects-workspace-model.md. This prd has settled to its durable framing
+     projects-workspace-model.md. This spec has settled to its durable framing
      (Problem / Solution / User Stories / Out of Scope). The design reference
      docs/plan-machines-and-init.md is superseded and may be deleted. -->
 
@@ -195,7 +195,7 @@ Rework anon-pi into a **machines + projects** workspace, built on netcage v0.4.0
 - **Baking an exploratory machine into an image.** No `anon-pi bake` verb and no
   dependency on a `netcage commit` verb. The exploratory `--keep` flow lets you
   re-enter a kept container via `netcage start`; turning that into a reusable
-  image is out of scope for this prd (a user can run `podman commit` themselves).
+  image is out of scope for this spec (a user can run `podman commit` themselves).
   A `netcage commit` verb is staged separately in the netcage repo's backlog but
   is NOT a prerequisite here.
 - **Concurrent second terminals into a running box** (a jail-aware `netcage exec`
@@ -208,6 +208,6 @@ Rework anon-pi into a **machines + projects** workspace, built on netcage v0.4.0
 
 - netcage dependency: this builds ENTIRELY on netcage v0.4.0 as shipped (kept
   containers, `netcage start`, `--rm`, the `netcage.managed` label, management
-  verbs). No netcage change is REQUIRED for this prd.
-- The design reference `docs/plan-machines-and-init.md` is superseded by this prd
+  verbs). No netcage change is REQUIRED for this spec.
+- The design reference `docs/plan-machines-and-init.md` is superseded by this spec
   + the tasks + ADR-0001 and may be deleted.

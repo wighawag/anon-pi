@@ -6,7 +6,7 @@ breaking CLI change + a README migration note.
 
 This revision is written against **netcage v0.4.0 as shipped** (kept containers +
 `netcage start` + management verbs + `--rm` = ephemeral). The earlier draft hedged
-("if the netcage lifecycle PRD lands, this thins" - section 13b). It landed. This
+("if the netcage lifecycle spec lands, this thins" - section 13b). It landed. This
 rewrite bakes that in and is significantly simpler.
 
 ## 0. The anchor (what actually drove the design)

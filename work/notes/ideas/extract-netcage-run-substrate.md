@@ -59,7 +59,7 @@ The internal-seam-first step (step 1) is designed to be a BEHAVIOUR-PRESERVING r
 
 **How safe (concretely):** the repo already has a strong black-box net - ~320 assertions across ~10 `cli-*.test.ts` files pin the external contract (exit codes, the EXACT netcage argv per verb, the workspace layout, error messages), independent of the 235 internal `anon-pi.ts` exports the seam reorganises. If those CLI tests stay green WITHOUT being edited, the refactor was behaviour-preserving.
 
-**Tests should cover the safety - three specific requirements for the eventual PRD/task:**
+**Tests should cover the safety - three specific requirements for the eventual spec/task:**
 
 1. **CLI tests are the behaviour-preserving contract and must pass UNCHANGED.** The done-condition is not just "green gate" but "green gate without editing any `cli-*.test.ts` assertion". An edit forced on a CLI assertion is the signal the external contract moved - surface it, do not silently accept it.
 2. **A LAYERING-GUARD test (the one genuinely NEW test the seam demands).** An automated assertion that the generic-core (layer 2) modules do NOT import/reference layer-3 pi-specific symbols (`models.json` / `llm` / `~/.pi/agent` / `Dockerfile.pi` / provider/apiKey). This is what KEEPS the seam drawn - without it, the next feature silently re-tangles the layers and the extraction rots. This guard is the real deliverable of "cover the safety".

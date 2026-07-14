@@ -8,7 +8,7 @@ covers: [7]
 
 ## What to build
 
-Reshape v1's Tier-2 provisioning generator (`buildTier2ProvisioningScript` in `src/anon-pi.ts`) per the PRD's decisions 0 + 8. This SUPERSEDES the v1 shape for BOTH the default `anon` and every persona.
+Reshape v1's Tier-2 provisioning generator (`buildTier2ProvisioningScript` in `src/anon-pi.ts`) per the spec's decisions 0 + 8. This SUPERSEDES the v1 shape for BOTH the default `anon` and every persona.
 
 Two changes:
 
@@ -42,7 +42,7 @@ The generator stays PURE (account, login user, anon-pi path injected) and is sti
 
 > FIRST, check this task against current reality (launch snapshot; may have drifted): read the CURRENT `buildTier2ProvisioningScript` + its `hardened-provisioning` tests, and confirm the mapping task landed the account parameterization. This task CHANGES v1's shipped shape (retires the script file + the hard-coded range), so it must update the v1 tests that pin the old shape, in the same green step. If the generator already moved, build on it.
 
-You are reshaping the Tier-2 root-provisioning generator for anon-pi's multi-persona hardened deployment (prd `multi-persona-hardened-accounts`, supersedes ADR-0006). Domain: creating a dedicated account needs root; anon-pi NEVER silently sudo's, so it emits the root steps for a human to run. v1 emitted a `#!/bin/sh` script the human saved + ran with sudo, pinning an explicit subuid range. The PRD simplifies this: emit COPY-PASTE COMMANDS the human pastes into a root shell they enter FIRST (`sudo -i`/`su -`) — no script file (nothing on disk to leak the persona name, nothing to save), and running in a root shell keeps the persona name out of the audit log. And DROP the hard-coded subuid range: `useradd -m` auto-allocates a free block, so N personas never collide.
+You are reshaping the Tier-2 root-provisioning generator for anon-pi's multi-persona hardened deployment (spec `multi-persona-hardened-accounts`, supersedes ADR-0006). Domain: creating a dedicated account needs root; anon-pi NEVER silently sudo's, so it emits the root steps for a human to run. v1 emitted a `#!/bin/sh` script the human saved + ran with sudo, pinning an explicit subuid range. The spec simplifies this: emit COPY-PASTE COMMANDS the human pastes into a root shell they enter FIRST (`sudo -i`/`su -`) — no script file (nothing on disk to leak the persona name, nothing to save), and running in a root shell keeps the persona name out of the audit log. And DROP the hard-coded subuid range: `useradd -m` auto-allocates a free block, so N personas never collide.
 
 Goal: change `buildTier2ProvisioningScript` (in `src/anon-pi.ts`) to return the copy-paste command block (become-root line + `useradd -m <account>` + `loginctl enable-linger` + the visudo-validated scoped sudoers install), parameterized by the persona account, password-kept-by-default with opt-in `--nopasswd`, no range line, no chown, no `NETCAGE_GRAPHROOT`. Keep it a PURE string generator, never executed. Update the v1 `hardened-provisioning` tests that assert the old `#!/bin/sh`/range shape to the new shape, in the same green commit.
 

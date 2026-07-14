@@ -52,7 +52,7 @@ This is a docs task; verify claims against the LANDED behaviour of the CLI tasks
 
 > FIRST, check this task against current reality: read the LANDED CLI behaviour
 > (the done tasks + the current `src/cli.ts` help/flags) and document THAT, not
-> the prd's aspiration. If a flag/verb landed differently than the prd described,
+> the spec's aspiration. If a flag/verb landed differently than the spec described,
 > document what shipped and note the discrepancy (do not invent flags).
 
 anon-pi has been reworked from its 0.4.0 per-workdir model into a machines +
@@ -73,5 +73,5 @@ reason).
 "Done" = README + migration note accurate to shipped behaviour, tests green under
 `verify`, with a changeset (docs changes still need one).
 
-> RECORD any discrepancy you find between the prd and what landed as a
+> RECORD any discrepancy you find between the spec and what landed as a
 > `work/notes/observations/` note, and document what actually shipped.

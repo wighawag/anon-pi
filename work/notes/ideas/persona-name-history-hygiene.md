@@ -5,7 +5,7 @@ slug: persona-name-history-hygiene
 
 # Keep persona names out of shell history - maybe later
 
-Deferred out of the `multi-persona-hardened-accounts` PRD. During that design we considered making persona selection an interactive TYPED prompt (so the persona name never lands in shell history / `ps` argv / audit logs) with `--as <name>` only as an opt-in escape hatch. We DROPPED it for v1: the name is already visible in `/etc/passwd`, the sudoers file, the home dir path (`~anon-<name>/`), and every `ps` line of the running persona's own processes, so protecting it in the LOGIN shell's history specifically is a narrow, low-value benefit that did not justify making an interactive prompt the primary path (and a `--as` flag people would use daily anyway defeats it for heavy users).
+Deferred out of the `multi-persona-hardened-accounts` spec. During that design we considered making persona selection an interactive TYPED prompt (so the persona name never lands in shell history / `ps` argv / audit logs) with `--as <name>` only as an opt-in escape hatch. We DROPPED it for v1: the name is already visible in `/etc/passwd`, the sudoers file, the home dir path (`~anon-<name>/`), and every `ps` line of the running persona's own processes, so protecting it in the LOGIN shell's history specifically is a narrow, low-value benefit that did not justify making an interactive prompt the primary path (and a `--as` flag people would use daily anyway defeats it for heavy users).
 
 So v1 takes the name as a plain argument: `anon-pi --as <name> …` and `anon-pi persona add <name>`. The name may appear in shell history; that is accepted.
 
