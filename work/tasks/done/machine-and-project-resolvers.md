@@ -1,7 +1,7 @@
 ---
 title: Machine + project resolvers, name validation, and the "." root token
 slug: machine-and-project-resolvers
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: [workspace-layout-and-config]
 covers: [8, 9, 16]
 ---

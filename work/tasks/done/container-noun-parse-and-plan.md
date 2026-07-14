@@ -1,7 +1,7 @@
 ---
 title: container noun - arg parse, reserved word, durable run-plan, and the superseding ADR
 slug: container-noun-parse-and-plan
-prd: container-noun
+spec: container-noun
 blockedBy: []
 covers: [5, 6, 9, 10, 11, 12, 13]
 ---
@@ -84,7 +84,7 @@ dispatch wires it so `anon-pi container --help` and the parse errors are reachab
 > Build the PURE foundation of a new `container` noun for anon-pi plus its ADR.
 > anon-pi is a host-side launcher for netcage (a podman-replacement that forces
 > all egress through a socks5h proxy, fail-closed). Domain vocabulary is in
-> `CONTEXT.md`; the noun's spec is `work/prds/tasked/container-noun.md` (READ IT
+> `CONTEXT.md`; the noun's spec is `work/specs/tasked/container-noun.md` (READ IT
 > FIRST). The `container` noun reintroduces the durable mutable box `--keep` used
 > to give (retired by ADR-0004), but as an EXPLICIT noun with no create-vs-enter
 > inference: `create` (netcage run WITHOUT `--rm`, image+cwd FROZEN), `enter`

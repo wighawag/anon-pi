@@ -1,7 +1,7 @@
 ---
 title: Hardened-deployment docs + discoverability-boundary caveat
 slug: hardened-docs-and-caveat
-prd: hardened-dedicated-account-deployment
+spec: hardened-dedicated-account-deployment
 blockedBy: [hardened-init-provisioning-step]
 covers: [10, 11]
 ---

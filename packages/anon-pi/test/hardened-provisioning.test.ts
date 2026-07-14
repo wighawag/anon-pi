@@ -8,7 +8,7 @@ import {
 	type Tier2ProvisioningInputs,
 } from '../src/index.js';
 
-// The PURE Tier-2 root-provisioning COMMAND generator (prd
+// The PURE Tier-2 root-provisioning COMMAND generator (spec
 // `multi-persona-hardened-accounts` decisions 0 + 8, superseding ADR-0006).
 // anon-pi is a rootless npm launcher: it must NEVER silently sudo. So for the
 // root-requiring parts of provisioning a persona (create the `anonpi-<name>`

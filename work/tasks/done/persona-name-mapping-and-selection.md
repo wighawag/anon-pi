@@ -1,7 +1,7 @@
 ---
 title: Persona name<->account mapping, --as selector, and generalized self-re-exec loop guard (pure)
 slug: persona-name-mapping-and-selection
-prd: multi-persona-hardened-accounts
+spec: multi-persona-hardened-accounts
 blockedBy: []
 covers: [1, 6, 9]
 ---

@@ -1,4 +1,4 @@
-// End-to-end IMPURE wiring for the hardened deployment (docs/adr/0006, prd
+// End-to-end IMPURE wiring for the hardened deployment (docs/adr/0006, spec
 // `hardened-dedicated-account-deployment` stories 3+4): the self-re-exec hook on
 // the launch entry. On a hardened install a login-user invocation must re-exec
 // via `sudo -u anonpi -i <anon-pi> "$@"`; a caller already running as `anonpi` must

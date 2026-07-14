@@ -1,7 +1,7 @@
 ---
 title: Run-vs-start decision rule for kept (netcage.managed) containers
 slug: run-vs-start-kept-container-decision
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: [launch-run-plan-resolution]
 covers: [12]
 ---

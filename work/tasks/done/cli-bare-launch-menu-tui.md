@@ -1,7 +1,7 @@
 ---
 title: CLI bare-launch menu (host-side arrow-key TUI)
 slug: cli-bare-launch-menu-tui
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: [menu-choice-list-and-project-usage, cli-launch-surface-grammar-a, cli-init-onboarding]
 covers: [1, 2, 16]
 ---

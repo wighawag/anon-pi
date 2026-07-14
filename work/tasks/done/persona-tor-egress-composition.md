@@ -1,7 +1,7 @@
 ---
 title: Tor detection + per-persona proxy URL composition (pure + probe seam)
 slug: persona-tor-egress-composition
-prd: multi-persona-hardened-accounts
+spec: multi-persona-hardened-accounts
 blockedBy: [persona-name-mapping-and-selection]
 covers: [2, 3, 4]
 ---

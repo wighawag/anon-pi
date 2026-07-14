@@ -1,7 +1,7 @@
 ---
 title: CLI init onboarding — proxy detect+verify, llm capture, image pick, write config
 slug: cli-init-onboarding
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: [workspace-layout-and-config, models-json-generation-from-llm, cli-launch-surface-grammar-a, cli-data-verbs-delete-home-project]
 covers: [17]
 ---

@@ -1,7 +1,7 @@
 ---
 title: Menu choice-list + per-machine project-usage record (derived from session dirs)
 slug: menu-choice-list-and-project-usage
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: [machine-and-project-resolvers]
 covers: [1, 2, 10]
 ---

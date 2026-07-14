@@ -1,7 +1,7 @@
 ---
 title: image noun — `image snapshot` (with provenance labels) + `image list`
 slug: image-noun-and-provenance
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 adr: 0003-image-as-first-class-concept
 ---
 

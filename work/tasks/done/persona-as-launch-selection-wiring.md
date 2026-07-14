@@ -1,7 +1,7 @@
 ---
 title: `--as <name>` launch selection wiring + preflight for the selected persona (impure)
 slug: persona-as-launch-selection-wiring
-prd: multi-persona-hardened-accounts
+spec: multi-persona-hardened-accounts
 blockedBy: [persona-add-verb-wiring]
 covers: [2, 6, 8, 9]
 ---

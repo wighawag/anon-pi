@@ -1,7 +1,7 @@
 ---
 title: `anon-pi persona add <name>` verb — provision a persona (impure wiring)
 slug: persona-add-verb-wiring
-prd: multi-persona-hardened-accounts
+spec: multi-persona-hardened-accounts
 blockedBy: [persona-tier2-commands-generator, persona-tor-egress-composition]
 covers: [1, 3, 4, 5, 7, 11]
 ---

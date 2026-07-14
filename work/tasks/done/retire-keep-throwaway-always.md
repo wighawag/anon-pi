@@ -1,7 +1,7 @@
 ---
 title: Retire `--keep`/`--rm` - throwaway always; keep the forward/ports identity label
 slug: retire-keep-throwaway-always
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 adr: 0004-retire-keep-throwaway-always
 ---
 

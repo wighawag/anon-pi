@@ -1,4 +1,4 @@
-// End-to-end IMPURE wiring for MULTI-PERSONA launch selection (prd
+// End-to-end IMPURE wiring for MULTI-PERSONA launch selection (spec
 // `multi-persona-hardened-accounts`, superseding ADR-0006; task
 // `persona-as-launch-selection-wiring`). Generalizes v1's single-account
 // self-re-exec (hardened-wiring.test.ts) to the SELECTED persona: on a hardened

@@ -260,7 +260,7 @@ function main(argv: string[]): number | Promise<number> {
 		return runPersona(rawArgs.slice(1));
 	}
 
-	// MULTI-PERSONA SELF-RE-EXEC (prd `multi-persona-hardened-accounts`,
+	// MULTI-PERSONA SELF-RE-EXEC (spec `multi-persona-hardened-accounts`,
 	// superseding ADR-0006; generalizes docs/adr/0006 option A). On a hardened
 	// install EVERY login-user invocation redirects into the SELECTED persona
 	// account (`anonpi-<name>`, default `anonpi`) by SPAWNING `sudo -u <account> -i
@@ -536,7 +536,7 @@ function resolveSelectedPersona(args: readonly string[]): string | undefined {
 }
 
 /**
- * The self-re-exec hook, generalized to the SELECTED persona (prd
+ * The self-re-exec hook, generalized to the SELECTED persona (spec
  * `multi-persona-hardened-accounts`, superseding ADR-0006). On a hardened
  * install, when the current account is NOT already the selected persona account,
  * SPAWN `sudo -u <account> -i <anon-pi> "$@"` and return its exit code (so main
@@ -3608,7 +3608,7 @@ function initHardeningStep(env: AnonPiEnv): boolean | typeof ABORT {
 	}
 }
 
-// --- `anon-pi persona add <name>`: the THIN impure wiring (prd
+// --- `anon-pi persona add <name>`: the THIN impure wiring (spec
 // `multi-persona-hardened-accounts`, decisions 4-8, superseding ADR-0006) ------
 //
 // Provisions a persona: map <name> -> anonpi-<name> (personaAccount), choose the

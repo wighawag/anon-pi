@@ -1,7 +1,7 @@
 ---
 title: CLI launch surface (grammar A) — parse, run-vs-start query, spawn netcage
 slug: cli-launch-surface-grammar-a
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: [launch-run-plan-resolution, run-vs-start-kept-container-decision, models-json-generation-from-llm]
 covers: [3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 16, 20]
 ---

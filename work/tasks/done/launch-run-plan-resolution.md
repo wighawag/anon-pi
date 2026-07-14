@@ -1,7 +1,7 @@
 ---
 title: Launch RunPlan resolution for every mode (two-mount invariant, --rm/--keep, --mount, forwarded args, seed)
 slug: launch-run-plan-resolution
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: [machine-and-project-resolvers]
 covers: [3, 4, 5, 6, 8, 11, 12, 13, 14, 16, 20]
 ---

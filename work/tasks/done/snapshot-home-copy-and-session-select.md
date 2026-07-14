@@ -1,7 +1,7 @@
 ---
 title: machine snapshot — copy the home (minus sessions) + per-project session carry-over
 slug: snapshot-home-copy-and-session-select
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 ---
 
 ## What to build

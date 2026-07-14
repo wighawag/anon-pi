@@ -1,7 +1,7 @@
 ---
 title: `-i <image>` launch override (ephemeral per-launch image)
 slug: launch-image-override
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 adr: 0003-image-as-first-class-concept
 blockedBy: [image-noun-and-provenance, retire-keep-throwaway-always]
 ---

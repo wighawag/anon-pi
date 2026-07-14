@@ -1,7 +1,7 @@
 ---
 title: Hardened preflight checks + netcage >= 0.11.0 assertion (pure predicates + probe seam)
 slug: hardened-preflight-checks
-prd: hardened-dedicated-account-deployment
+spec: hardened-dedicated-account-deployment
 blockedBy: []
 covers: [6, 8, 10]
 ---

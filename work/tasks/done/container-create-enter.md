@@ -1,7 +1,7 @@
 ---
 title: container create + enter - durable box lifecycle (frozen image + cwd, refuse-if-running)
 slug: container-create-enter
-prd: container-noun
+spec: container-noun
 blockedBy: [container-noun-parse-and-plan]
 covers: [1, 2, 3, 4]
 ---
@@ -52,7 +52,7 @@ state intact.
 ## Prompt
 
 > Implement `container create` and `container enter` for anon-pi's new `container`
-> noun. READ `work/prds/tasked/container-noun.md` and the ADR the parse-and-plan
+> noun. READ `work/specs/tasked/container-noun.md` and the ADR the parse-and-plan
 > task wrote (`docs/adr/*container*`) FIRST; `CONTEXT.md` has the domain
 > vocabulary. anon-pi launches pi inside a netcage jail; a durable box is a netcage
 > container run WITHOUT `--rm` (so it survives exit) that the user re-enters via

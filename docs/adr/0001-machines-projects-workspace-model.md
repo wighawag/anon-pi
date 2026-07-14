@@ -7,7 +7,7 @@ anon-pi 0.4.0 launched pi as `anon-pi [WORKDIR]`: a per-workdir throwaway
 (`~/.config/anon-pi/state/<workdir-slug>/agent`). This duplicated pi config +
 extensions per workdir, had no notion of a durable named environment, and
 predated netcage v0.4.0's container lifecycle (kept containers, `netcage start`,
-`--rm`, the `netcage.managed` label). See `work/prds/tasked/machines-and-projects-workspace.md`.
+`--rm`, the `netcage.managed` label). See `work/specs/tasked/machines-and-projects-workspace.md`.
 
 ## Decision
 

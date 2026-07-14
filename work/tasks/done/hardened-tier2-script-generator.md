@@ -1,7 +1,7 @@
 ---
 title: Hardened Tier-2 root provisioning-script generator (pure)
 slug: hardened-tier2-script-generator
-prd: hardened-dedicated-account-deployment
+spec: hardened-dedicated-account-deployment
 blockedBy: []
 covers: [4, 5]
 ---

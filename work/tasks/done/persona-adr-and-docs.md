@@ -1,7 +1,7 @@
 ---
 title: Superseding ADR + multi-persona docs (per-persona egress, --as, persona add)
 slug: persona-adr-and-docs
-prd: multi-persona-hardened-accounts
+spec: multi-persona-hardened-accounts
 blockedBy: [persona-as-launch-selection-wiring]
 covers: [2, 5, 10, 11]
 ---

@@ -1,7 +1,7 @@
 ---
 title: Generate models.json from the llm endpoint (pure)
 slug: models-json-generation-from-llm
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: [workspace-layout-and-config, launch-run-plan-resolution]
 covers: [17]
 ---

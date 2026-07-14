@@ -1,7 +1,7 @@
 ---
 title: machine snapshot <machine> <new-name> — commit a running container into a new machine
 slug: machine-snapshot-verb
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 ---
 
 ## What to build

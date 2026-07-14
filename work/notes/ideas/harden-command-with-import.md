@@ -5,13 +5,13 @@ slug: harden-command-with-import
 
 # Standalone `anon-pi harden` verb, with existing-workspace import
 
-Deferred out of the v1 hardened-dedicated-account feature (see prd `hardened-dedicated-account-deployment`). v1 ships hardening only through `init` (which auto-runs on an uninitialised anon-pi and now ASKS whether to run under a dedicated `anon` account). A fresh `init` has nothing to import, so v1 sidesteps the migrate question entirely. This idea captures the piece that was postponed: a standalone `harden` verb that re-hardens a machine that ALREADY has anonymized work under the login user's `~/.anon-pi`.
+Deferred out of the v1 hardened-dedicated-account feature (see spec `hardened-dedicated-account-deployment`). v1 ships hardening only through `init` (which auto-runs on an uninitialised anon-pi and now ASKS whether to run under a dedicated `anon` account). A fresh `init` has nothing to import, so v1 sidesteps the migrate question entirely. This idea captures the piece that was postponed: a standalone `harden` verb that re-hardens a machine that ALREADY has anonymized work under the login user's `~/.anon-pi`.
 
 ## Why it was deferred
 
 The value of a standalone `harden` (over the init path) is the RE-RUN-on-a-populated-workspace case: a user who has been running normal (non-hardened) anon-pi and now wants their existing homes/projects/session transcripts moved BEHIND the DAC boundary. That is precisely an IMPORT/migrate step, and importing existing work is its own machinery (overlaps the separate `import-repo-into-project` idea). Rather than block v1 on the migrate design, v1 ships init-driven hardening only; this verb is the follow-up.
 
-## The open question this idea owns (moved out of the prd)
+## The open question this idea owns (moved out of the spec)
 
 When `harden` runs on a machine with a populated login-user `~/.anon-pi` (homes, projects, session transcripts, config), what happens to that existing work, which is exactly the anonymized work the feature exists to get out of casual reach? Three behaviours:
 
@@ -27,7 +27,7 @@ Prior lean (to revisit when this is picked up): non-interactive DEFAULT = **(c) 
 
 ## Dependencies / links
 
-- Builds on prd `hardened-dedicated-account-deployment` (v1 must ship first).
+- Builds on spec `hardened-dedicated-account-deployment` (v1 must ship first).
 - The migrate path's content-level concerns overlap the `import-repo-into-project` idea (`work/notes/ideas/import-repo-into-project.md`); the deep rewrite stays there, `harden` only does the thin relocate + `chown`.
 - Same netcage dependency as v1 (uid-scoped store, netcage >= 0.11.0). Does NOT set `NETCAGE_GRAPHROOT`.
 - Same never-silent-root invariant: Tier 2 (including the migrate `chown`) is GENERATED and run by the human.

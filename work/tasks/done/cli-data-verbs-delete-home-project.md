@@ -1,7 +1,7 @@
 ---
 title: CLI data verbs — --delete-home [machine] and --delete-project <project>
 slug: cli-data-verbs-delete-home-project
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: [machine-and-project-resolvers, cli-launch-surface-grammar-a, cli-machine-verbs]
 covers: [19]
 ---

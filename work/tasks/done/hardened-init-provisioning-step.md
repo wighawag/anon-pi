@@ -1,7 +1,7 @@
 ---
 title: Init hardening step: engine + resumable provisioning flow + self-re-exec wiring
 slug: hardened-init-provisioning-step
-prd: hardened-dedicated-account-deployment
+spec: hardened-dedicated-account-deployment
 blockedBy: [hardened-self-reexec-invocation, hardened-preflight-checks, hardened-tier2-script-generator]
 covers: [1, 2, 5, 6, 7, 8]
 ---

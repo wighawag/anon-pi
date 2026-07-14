@@ -1,7 +1,7 @@
 ---
 title: Workspace layout + config.json/machine.json load with env-override precedence
 slug: workspace-layout-and-config
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: []
 covers: [15, 21]
 ---

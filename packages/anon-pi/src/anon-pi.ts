@@ -345,7 +345,7 @@ export function builtinProjectsRoot(env: AnonPiEnv): string {
 // `--delete-home [<machine>]` and `--delete-project <project>` replace the old
 // `--fresh`. This module owns only the PURE affected-path resolution (which host
 // paths a delete would remove); the CLI does the confirm prompt + the actual
-// `rm` (cli-delete.test.ts). Per the prd behaviour table:
+// `rm` (cli-delete.test.ts). Per the spec behaviour table:
 //   - delete-home drops ONE machine's home (config + convos + shell env) and
 //     keeps the project FILES (they live under the projects root, not the home);
 //   - delete-project drops that project's FILES and its per-machine session dir
@@ -399,7 +399,7 @@ export interface DeleteProjectPlan {
  * dir in each SUPPLIED machine home (the machine-invariant slug). Validates the
  * project name (rejecting traversal) so both the folder join and every session
  * join stay inside their roots. The homes are NOT targeted (only the per-project
- * slug dir inside each), matching the prd behaviour table.
+ * slug dir inside each), matching the spec behaviour table.
  */
 export function resolveDeleteProject(args: {
 	env: AnonPiEnv;
@@ -4155,7 +4155,7 @@ export function envFromProcess(
 // the process. cli.ts (a later task) does the actual exec.
 
 /**
- * The DEFAULT persona's dedicated Unix account name (prd
+ * The DEFAULT persona's dedicated Unix account name (spec
  * `hardened-dedicated-account-deployment`, docs/adr/0006). It is the account for
  * the empty-suffix persona (`personaAccount(undefined) === 'anonpi'`); named
  * personas map to `anonpi-<name>` (PERSONA_ACCOUNT_PREFIX).
@@ -4349,7 +4349,7 @@ export function buildAnonSuFallback(inv: HardenedInvocation): string[] {
 
 // --- Multi-persona: name<->account mapping, --as selection, generalized guard -
 //
-// Multi-persona (prd `multi-persona-hardened-accounts`, superseding ADR-0006)
+// Multi-persona (spec `multi-persona-hardened-accounts`, superseding ADR-0006)
 // maps N accounts: a user-typed BARE name (`alice`) maps to the namespaced Unix
 // account `anonpi-<name>` (`anonpi-alice`), and the DEFAULT (empty/absent name)
 // is the bare `anonpi` (ANON_ACCOUNT). This
@@ -4654,7 +4654,7 @@ export function shouldRedirectToPersona(
 }
 
 // --- Per-persona fail-closed egress: the Tor URL composer + the offer-Tor
-// predicate (prd `multi-persona-hardened-accounts`, decisions 3 + 4 + 5,
+// predicate (spec `multi-persona-hardened-accounts`, decisions 3 + 4 + 5,
 // superseding ADR-0006) -------------------------------------------------------
 //
 // v1 had ONE global proxy. Multi-persona gives EACH persona its OWN socks5h
@@ -4691,7 +4691,7 @@ export function shouldRedirectToPersona(
  * `IsolateSOCKSAuth` isolates on the USERNAME (the persona account); the
  * password is never checked, so a single, obvious placeholder is used. Pinned as
  * a constant so the composer and its test agree and it can never silently drift.
- * (See prd `multi-persona-hardened-accounts` Further Notes: "the password is an
+ * (See spec `multi-persona-hardened-accounts` Further Notes: "the password is an
  * ignored placeholder".)
  */
 export const TOR_PLACEHOLDER_PASSWORD = 'x';
@@ -4771,7 +4771,7 @@ export function offerTor(detection: TorDetection | undefined): boolean {
 	return detection !== undefined && detection.open && detection.socks5 === true;
 }
 
-// --- The Tier-2 root-provisioning COMMAND generator (prd
+// --- The Tier-2 root-provisioning COMMAND generator (spec
 // `multi-persona-hardened-accounts`, decisions 0 + 8, superseding ADR-0006) ----
 //
 // The hardened deployment splits its setup into two tiers: Tier 1 (rootless)
@@ -5014,7 +5014,7 @@ ${numbered}
 `;
 }
 
-// --- The hardened-deployment PREFLIGHT (docs/adr/0006, prd story 6) -----------
+// --- The hardened-deployment PREFLIGHT (docs/adr/0006, spec story 6) -----------
 //
 // A half-provisioned `anonpi` account must fail LOUDLY with remediation, not
 // cryptically. So before a hardened install runs anything as `anonpi`, anon-pi
@@ -5036,7 +5036,7 @@ ${numbered}
 /**
  * The netcage version FLOOR anon-pi requires: `0.12.0`. It is a floor for TWO
  * reasons now, both load-bearing on EVERY launch:
- *   - the UID-SCOPED store (shipped in netcage 0.11.0; netcage ADR-0017 / prd
+ *   - the UID-SCOPED store (shipped in netcage 0.11.0; netcage ADR-0017 / spec
  *     `uid-scoped-graphroot-multi-user-fix`). Running netcage as `anonpi` needs
  *     this so its store lands in the account's own uid-scoped path
  *     (`netcage-storage-<uid>`) instead of colliding on the shared
@@ -5175,7 +5175,7 @@ export interface HardenedPreflightResult {
  * account and points at the Tier-2 provisioning commands anon-pi printed, which
  * create the account with `useradd -m <account>`: modern shadow-utils then
  * AUTO-ALLOCATES a free /etc/subuid + /etc/subgid block for it (no explicit
- * range line, per prd `multi-persona-hardened-accounts` decision 0), so the fix
+ * range line, per spec `multi-persona-hardened-accounts` decision 0), so the fix
  * is simply to run those commands.
  */
 export function subidRemediation(account: string): string {
@@ -5359,7 +5359,7 @@ export function evaluateHardenedPreflight(
 	return {ok: failures.length === 0, failures};
 }
 
-// --- The resumable hardening-step ORCHESTRATOR (docs/adr/0006, prd stories 1,5-8)
+// --- The resumable hardening-step ORCHESTRATOR (docs/adr/0006, spec stories 1,5-8)
 //
 // The PURE decision that stitches the three pieces above (preflight, Tier-2
 // script, Tier-1 plan) into the resumable `init` hardening step. Given the
@@ -5495,7 +5495,7 @@ export function planHardeningStep(
 	};
 }
 
-// --- `anon-pi persona add <name>`: the pure provisioning planner + parser (prd
+// --- `anon-pi persona add <name>`: the pure provisioning planner + parser (spec
 // `multi-persona-hardened-accounts`, decisions 4 + 5 + 6 + 7 + 8, superseding
 // ADR-0006) -------------------------------------------------------------------
 //
@@ -5521,7 +5521,7 @@ export function planHardeningStep(
 
 /**
  * The EXACT one-line uniqueness WARNING printed on the bring-your-own SOCKS path
- * of `persona add` (prd `multi-persona-hardened-accounts` decision 6). A BYO
+ * of `persona add` (spec `multi-persona-hardened-accounts` decision 6). A BYO
  * endpoint must be UNIQUE to a persona: two personas sharing one BYO endpoint
  * share an exit IP and become linkable, defeating the isolation that matters
  * most. anon-pi keeps NO used-endpoint list (it cannot read across personas' DAC

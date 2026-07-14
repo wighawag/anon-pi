@@ -1,7 +1,7 @@
 ---
 title: CLI machine verbs — create / list / set-image / rm
 slug: cli-machine-verbs
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: [machine-and-project-resolvers, cli-launch-surface-grammar-a]
 covers: [8, 9, 18]
 ---

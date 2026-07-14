@@ -1,7 +1,7 @@
 ---
 title: Retire the orphaned legacy pure surface (buildRunPlan/import symbols + dead env fields)
 slug: retire-legacy-pure-surface
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: [cli-launch-surface-grammar-a]
 covers: []
 ---

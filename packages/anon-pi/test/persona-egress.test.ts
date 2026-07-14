@@ -10,7 +10,7 @@ import {
 	type TorDetection,
 } from '../src/index.js';
 
-// The PURE per-persona egress composition (prd `multi-persona-hardened-accounts`,
+// The PURE per-persona egress composition (spec `multi-persona-hardened-accounts`,
 // decisions 3 + 4 + 5, superseding ADR-0006). Three pieces, all pure + injected:
 // the Tor multi-persona URL composer (account name AS the SOCKS-isolation
 // username), the "offer Tor?" predicate over an INJECTED Tor-detection probe, and

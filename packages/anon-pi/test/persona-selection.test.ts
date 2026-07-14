@@ -14,7 +14,7 @@ import {
 	type PersonaSelection,
 } from '../src/index.js';
 
-// The PURE core: N personas selected by a bare name (prd
+// The PURE core: N personas selected by a bare name (spec
 // `multi-persona-hardened-accounts`, superseding ADR-0006). The dedicated
 // account namespace is anon-pi's OWN: the default is `anonpi` (ANON_ACCOUNT) and
 // named personas are `anonpi-<name>` (PERSONA_ACCOUNT_PREFIX), DISJOINT from the

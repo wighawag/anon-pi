@@ -1,7 +1,7 @@
 ---
 title: Reshape the Tier-2 generator to copy-paste commands + auto-allocated subid (pure, supersedes v1 script-file)
 slug: persona-tier2-commands-generator
-prd: multi-persona-hardened-accounts
+spec: multi-persona-hardened-accounts
 blockedBy: [persona-name-mapping-and-selection]
 covers: [7]
 ---

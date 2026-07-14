@@ -1,7 +1,7 @@
 ---
 title: Rename container work path /work → /projects in images + trust.json + seed
 slug: images-projects-path-rename
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: [launch-run-plan-resolution]
 covers: [20]
 ---

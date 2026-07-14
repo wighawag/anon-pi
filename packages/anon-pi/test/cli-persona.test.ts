@@ -1,4 +1,4 @@
-// End-to-end IMPURE wiring for `anon-pi persona add <name>` (prd
+// End-to-end IMPURE wiring for `anon-pi persona add <name>` (spec
 // `multi-persona-hardened-accounts`, decisions 4-8, superseding ADR-0006): the
 // thin CLI around the pure planPersonaAdd + composeTorPersonaProxy + offerTor +
 // the Tier-2 command generator. It provisions a persona: maps <name> ->

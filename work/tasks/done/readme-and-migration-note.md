@@ -1,7 +1,7 @@
 ---
 title: README rewrite + 0.4.0 → machines/projects migration note
 slug: readme-and-migration-note
-prd: machines-and-projects-workspace
+spec: machines-and-projects-workspace
 blockedBy: [cli-launch-surface-grammar-a, cli-bare-launch-menu-tui, cli-machine-verbs, cli-data-verbs-delete-home-project, cli-init-onboarding, images-projects-path-rename]
 covers: [22]
 ---

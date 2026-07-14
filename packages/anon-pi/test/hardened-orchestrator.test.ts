@@ -11,7 +11,7 @@ import {
 	type HardeningStepInputs,
 } from '../src/index.js';
 
-// The PURE resumable hardening-step ORCHESTRATOR (docs/adr/0006, prd
+// The PURE resumable hardening-step ORCHESTRATOR (docs/adr/0006, spec
 // `hardened-dedicated-account-deployment` stories 1 + 5-8). `planHardeningStep`
 // stitches the three pure pieces (preflight, Tier-2 script, Tier-1 plan) into
 // the ONE next action of the resumable `init` step, over an INJECTED preflight

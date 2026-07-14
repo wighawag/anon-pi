@@ -1,7 +1,7 @@
 ---
 title: container list + rm - durable box housekeeping (identity readout, --yes stop-then-remove)
 slug: container-list-rm
-prd: container-noun
+spec: container-noun
 blockedBy: [container-create-enter]
 covers: [7, 8]
 ---
@@ -50,7 +50,7 @@ merge conflict (they are otherwise logically independent).
 ## Prompt
 
 > Implement `container list` and `container rm` for anon-pi's `container` noun,
-> completing the four verbs. READ `work/prds/tasked/container-noun.md` and the
+> completing the four verbs. READ `work/specs/tasked/container-noun.md` and the
 > container ADR FIRST; `CONTEXT.md` has the vocabulary. A durable box is a netcage
 > container run WITHOUT `--rm`, carrying a durable-name label the create path
 > stamps; there is NO anon-pi-side registry - the netcage container + its labels

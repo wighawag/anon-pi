@@ -12,7 +12,7 @@ import {
 	type PersonaAddInputs,
 } from '../src/index.js';
 
-// The PURE `persona add` pieces (prd `multi-persona-hardened-accounts`,
+// The PURE `persona add` pieces (spec `multi-persona-hardened-accounts`,
 // decisions 4-8, superseding ADR-0006): the `persona <verb>` grammar, the BYO
 // uniqueness warning wording, and the resumable provisioning PLANNER. All pure +
 // injected: no real getent/Tor/sudo/useradd here. The impure wiring is covered

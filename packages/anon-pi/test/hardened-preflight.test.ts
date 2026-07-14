@@ -15,7 +15,7 @@ import {
 	type HardenedPreflightProbes,
 } from '../src/index.js';
 
-// The PURE hardened-deployment preflight (docs/adr/0006, prd
+// The PURE hardened-deployment preflight (docs/adr/0006, spec
 // `hardened-dedicated-account-deployment` story 6). A half-provisioned `anonpi`
 // account must fail LOUDLY with remediation. Each check is a pure predicate over
 // an INJECTED probe result (the real `/etc/subuid` read, `loginctl`, `stat

@@ -1,7 +1,7 @@
 ---
 title: Hardened self-re-exec invocation + always-redirect predicate (pure)
 slug: hardened-self-reexec-invocation
-prd: hardened-dedicated-account-deployment
+spec: hardened-dedicated-account-deployment
 blockedBy: []
 covers: [3, 4]
 ---
